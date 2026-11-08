@@ -47,8 +47,8 @@ time and point source after reading.
 
 - Positions exist only while the cloud has points. Many exports cut turns and transit legs, so those parts of a
   flight have no positions.
-- The cloud must keep its points in their original order. Re-sorted, thinned or merged-and-resampled clouds lose the
-  pulse structure; the report's `multi_return_share` shows what was found.
+- Thinned or resampled clouds lose the pulse structure (re-sorted ones are joined again by time); the report's
+  `multi_return_share` shows what was found.
 - A pulse split across two read chunks (5 M points) is lost; a handful per chunk.
 - Time stays in the cloud's own clock (GPS week seconds or adjusted GPS time, read from the LAS header). The CRS is
   the cloud's.
