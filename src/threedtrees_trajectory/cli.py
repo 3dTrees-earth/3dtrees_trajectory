@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["RAYON_NUM_THREADS"] = str(args.threads)  # read by the LAZ decoder when its thread pool starts
 
     from .estimate import estimate
-    from .output import report, write_csv, write_report
+    from .output import refusal, report, write_csv, write_report
     from .pulses import read_pulses
 
     pulses, info = read_pulses(args.clouds, full=args.full)
@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         result = estimate(pulses, platform=args.platform, split=args.split, interval=args.interval)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
+        write_report(args.report or args.output.with_suffix(".report.json"), refusal(info, pulses, str(error)))
         return 2
     write_csv(args.output, info, result)
     data = report(info, result, pulses.multi_share)

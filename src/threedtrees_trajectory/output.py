@@ -76,6 +76,23 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
     return out
 
 
+def refusal(info: CloudInfo, pulses, reason: str) -> dict:
+    """Report for a cloud the tool can't estimate from: what it found, and why it stopped."""
+    return {
+        "tool": f"3dtrees_trajectory {__version__}",
+        "files": info.files,
+        "points": info.points,
+        "crs": info.crs,
+        "time_system": info.time_system,
+        "multi_return_share": round(pulses.multi_share, 4),
+        "has_gps_time": pulses.has_time,
+        "has_scan_angle": pulses.has_scan_angle,
+        "positions": 0,
+        "quality": "none",
+        "error": reason,
+    }
+
+
 def write_report(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
