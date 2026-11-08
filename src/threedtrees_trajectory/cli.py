@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from . import __version__
-from .estimate import estimate
-from .output import report, write_csv, write_report
-from .pulses import read_pulses
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,12 +19,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split", choices=["auto", "file", "source", "time"], default="auto",
                         help="static only: how scans are told apart (default: point sources, then files, then time jumps)")
     parser.add_argument("--interval", type=float, default=0.5, help="mobile only: seconds per position (default 0.5)")
-    parser.add_argument("--keep-every", type=int, default=0,
-                        help="keep every n-th pulse (default: as many as fit in about 7 GB)")
+    parser.add_argument("--threads", type=int, default=8, help="threads for LAZ decoding (default 8)")
+    parser.add_argument("--full", action="store_true", help="read and keep every point (slower, more memory)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
+    os.environ["RAYON_NUM_THREADS"] = str(args.threads)  # read by the LAZ decoder when its thread pool starts
 
-    pulses, info = read_pulses(args.clouds, keep_every=args.keep_every)
+    from .estimate import estimate
+    from .output import report, write_csv, write_report
+    from .pulses import read_pulses
+
+    pulses, info = read_pulses(args.clouds, full=args.full)
     try:
         result = estimate(pulses, platform=args.platform, split=args.split, interval=args.interval)
     except ValueError as error:

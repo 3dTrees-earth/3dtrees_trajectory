@@ -103,6 +103,13 @@ def detect_platform(p: Pulses) -> tuple[str, str]:
 
 
 def estimate(p: Pulses, platform: str = "auto", split: str = "auto", interval: float = 0.5) -> Result:
+    """Positions in the cloud's coordinates (the solvers work relative to ``p.origin``)."""
+    result = _estimate(p, platform, split, interval)
+    result.fits = [solve.Fit(f.time, f.xyz + p.origin, f.pulses, f.miss) for f in result.fits]
+    return result
+
+
+def _estimate(p: Pulses, platform: str, split: str, interval: float) -> Result:
     if len(p) == 0:
         raise ValueError("The cloud has no points.")
     multi_share = float(p.multi.mean())

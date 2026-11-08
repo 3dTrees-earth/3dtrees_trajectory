@@ -29,10 +29,11 @@ class Fit:
 
 
 def _lines(p: Pulses, min_length: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    line = p.first - p.last
+    first, last = p.first.astype(np.float64), p.last.astype(np.float64)
+    line = first - last
     length = np.linalg.norm(line, axis=1)
     keep = p.multi & (length >= min_length)
-    return p.first[keep], line[keep] / length[keep, None], p.time[keep]
+    return first[keep], line[keep] / length[keep, None], p.time[keep]
 
 
 def _closest_point(origin: np.ndarray, direction: np.ndarray, dt: np.ndarray | None, cond_max: float):
@@ -78,7 +79,7 @@ def fit_lines(origin: np.ndarray, direction: np.ndarray, time: np.ndarray, movin
 def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_length: float = 1.0) -> list[Fit]:
     """Moving sensor: one position (with velocity) per time window and point source."""
     origin, direction, time = _lines(p, min_length)
-    source = p.source[p.multi & (np.linalg.norm(p.first - p.last, axis=1) >= min_length)]
+    source = p.source[p.multi & (np.linalg.norm(p.first.astype(np.float64) - p.last, axis=1) >= min_length)]
     window = np.floor(time / interval).astype(np.int64)
     order = np.lexsort((source, window))
     origin, direction, time, source, window = origin[order], direction[order], time[order], source[order], window[order]
@@ -93,17 +94,21 @@ def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_
     return sorted(fits, key=lambda f: f.time)
 
 
-def station_from_lines(p: Pulses, min_pulses: int = 2000, min_length: float = 0.5) -> Fit | None:
-    """Static scanner: one position from all lines of one scan."""
+def station_from_lines(p: Pulses, min_pulses: int = 2000, min_length: float = 0.5, max_pulses: int = 200_000) -> Fit | None:
+    """Static scanner: one position from the lines of one scan (an even sample of at most ``max_pulses``; more add
+    nothing to a fit that is already good to about 1 cm)."""
     origin, direction, time = _lines(p, min_length)
     if len(origin) < min_pulses:
         return None
+    if len(origin) > max_pulses:
+        pick = np.random.default_rng(0).choice(len(origin), max_pulses, replace=False)
+        origin, direction, time = origin[pick], direction[pick], time[pick]
     return fit_lines(origin, direction, time, False, min_pulses)
 
 
 def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200) -> list[Fit]:
     """Moving sensor, single returns: per window, the position from which each point is seen at its scan angle."""
-    xyz, time = p.first, p.time
+    xyz, time = p.first.astype(np.float64), p.time
     tangent = np.tan(np.radians(np.abs(p.scan_angle.astype(float))))
     centre = xyz.mean(axis=0)
     rel = xyz - centre
@@ -149,6 +154,7 @@ def _near_ground(p: Pulses, ground_band: float, max_points: int) -> np.ndarray:
     xyz = p.first
     if len(xyz) > max_points:
         xyz = xyz[np.random.default_rng(0).choice(len(xyz), max_points, replace=False)]
+    xyz = xyz.astype(np.float64)
     gx, gy = np.floor(xyz[:, 0]).astype(np.int64), np.floor(xyz[:, 1]).astype(np.int64)
     key = (gx - gx.min()) * (gy.max() - gy.min() + 1) + (gy - gy.min())
     order = np.lexsort((xyz[:, 2], key))

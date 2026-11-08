@@ -42,6 +42,7 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
         "tool": f"3dtrees_trajectory {__version__}",
         "files": info.files,
         "points": info.points,
+        "kept_every": dict(zip(("multi_return_pulse", "single_return_pulse", "block"), info.kept_every)),
         "crs": info.crs,
         "time_system": info.time_system,
         "platform": result.platform,
@@ -59,6 +60,9 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
         out["gaps_over_5s"] = int((gaps > 5).sum())
         out["note"] = ("Positions exist only while the cloud has points. Turns and transit legs cut from the cloud "
                        "have no positions.")
+        if info.kept_every[2] > 1:
+            out["note"] += (f" Single returns only: one block in {info.kept_every[2]} was read, so positions come in "
+                            "bursts; --full reads every point.")
     return out
 
 

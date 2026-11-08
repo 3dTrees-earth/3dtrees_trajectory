@@ -43,6 +43,24 @@ Multi-file datasets are read together. Scans are told apart automatically:
 Multi-return records that were stored apart from each other (some software sorts points spatially) are joined by GPS
 time and point source after reading.
 
+## Speed and memory
+
+LAZ is decoded in parallel (`--threads`, default 8). Coordinates are kept as float32 relative to the first file's
+offset. At most 40 M multi-return and 10 M single-return pulses are kept, as every n-th pulse so the whole
+acquisition stays covered; a cloud without multi-return pulses is read as evenly spread blocks of 200 k points,
+40 M in total. `--full` reads every point.
+
+| Dataset | Points | Before | Now |
+| --- | --- | --- | --- |
+| 1844 YellowScan, 3 flights | 678 M | 146 s, 13.5 GB | 93 s, 3.8 GB |
+| 2019 RIEGL ULS | 93 M | 69 s, 6.9 GB | 44 s, 3.6 GB |
+| 2018 MLS, single return | 2 B | 244 s, 19.7 GB | 62 s, 6.1 GB |
+| 3582 TERN TLS, merged | 66 M | 136 s, 8.7 GB | 38 s, 2.0 GB |
+| 1887 FARO TLS, 30 tiles | 330 M | 160 s, 14.1 GB | 21 s, 4.5 GB |
+
+Positions are unchanged on the multi-return datasets (TLS stations within 1 mm, flight paths within 0.007 m at the
+95th percentile of the delivered ones); the single-return scans keep their accuracy (median 0.48 and 0.70 m).
+
 ## Limits
 
 - Positions exist only while the cloud has points. Many exports cut turns and transit legs, so those parts of a
@@ -50,6 +68,7 @@ time and point source after reading.
 - Thinned or resampled clouds lose the pulse structure (re-sorted ones are joined again by time); the report's
   `multi_return_share` shows what was found.
 - A pulse split across two read chunks (5 M points) is lost; a handful per chunk.
+- A single-return flight read in blocks has positions in bursts; use `--full` when the whole path is needed.
 - Time stays in the cloud's own clock (GPS week seconds or adjusted GPS time, read from the LAS header). The CRS is
   the cloud's.
 
