@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(args.output, info, result)
     data = report(info, result, float(pulses.multi.mean()) if len(pulses) else 0.0)
     write_report(args.report or args.output.with_suffix(".report.json"), data)
-    print(f"{result.platform} via {result.method}: {len(result.fits)} positions -> {args.output}")
+    print(f"{result.platform} ({result.evidence}) via {result.method}: {len(result.fits)} positions -> {args.output}")
     for warning in result.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     return 0 if result.fits else 1

@@ -80,3 +80,12 @@ def test_single_return_without_scan_angle_is_refused(tmp_path, capsys):
     las.write(tmp_path / "g.laz")
     assert main([str(tmp_path / "g.laz"), "-o", str(tmp_path / "p.csv"), "--platform", "mobile"]) == 2
     assert "trajectory file" in capsys.readouterr().err
+
+
+def test_platform_is_detected_for_single_returns(tmp_path):
+    scan(tmp_path / "s.laz", (3.0, 4.0, 1.5), single_return=True, seed=1, rays=200000)
+    flight(tmp_path / "f.laz", single_return=True)
+    assert main([str(tmp_path / "s.laz"), "-o", str(tmp_path / "s.csv")]) == 0
+    assert json.loads((tmp_path / "s.report.json").read_text())["platform"] == "static"
+    assert main([str(tmp_path / "f.laz"), "-o", str(tmp_path / "f.csv")]) == 0
+    assert json.loads((tmp_path / "f.report.json").read_text())["platform"] == "mobile"

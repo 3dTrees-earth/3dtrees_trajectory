@@ -65,7 +65,7 @@ def scan(path: Path, position, single_return=False, rays=40000, seed=0, t0=10000
     """Static scanner at position; rays fan out below the horizon onto canopy and ground."""
     rng = np.random.default_rng(seed)
     azimuth = rng.uniform(0, 2 * np.pi, rays)
-    zenith = np.radians(rng.uniform(95, 175, rays))  # downward rays only, so the ground catches each one
+    zenith = np.radians(rng.uniform(92, 175, rays))  # downward rays only (out to about 40 m), so the ground catches each one
     direction = np.c_[np.sin(zenith) * np.cos(azimuth), np.sin(zenith) * np.sin(azimuth), np.cos(zenith)]
     sensor = np.tile(np.asarray(position, float), (rays, 1))
     # 'canopy' here: low shrubs 0.2-1 m above ground between sensor and ground

@@ -45,6 +45,7 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
         "crs": info.crs,
         "time_system": info.time_system,
         "platform": result.platform,
+        "platform_evidence": result.evidence,
         "method": result.method,
         "multi_return_share": round(multi_share, 4),
         "positions": len(result.fits),

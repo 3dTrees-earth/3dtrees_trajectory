@@ -143,18 +143,12 @@ def _peak(points: np.ndarray, cell: float, smooth: float, extent_max: float) -> 
     return lo[0] + (i + 0.5) * cell, lo[1] + (j + 0.5) * cell
 
 
-def station_from_density(p: Pulses, cell: float = 0.1, ground_band: float = 0.5, smooth: float = 1.0,
-                         max_points: int = 5_000_000) -> Fit | None:
-    """Static scanner, single returns: the peak of near-ground point density (density falls with range).
-
-    Coarse peak on a 0.5 m grid first, then the fine peak on a ``cell`` grid within 10 m of it; at most ``max_points``
-    points (an even sample) are used, so memory stays bounded for any scan size."""
+def _near_ground(p: Pulses, ground_band: float, max_points: int) -> np.ndarray:
+    """Points within ``ground_band`` above the local ground (5th percentile height per 1 m column), from an even
+    sample of at most ``max_points`` points."""
     xyz = p.first
-    if len(xyz) < 1000:
-        return None
     if len(xyz) > max_points:
         xyz = xyz[np.random.default_rng(0).choice(len(xyz), max_points, replace=False)]
-    # local ground: 5th percentile height per 1 m column; near-ground = within ground_band above it
     gx, gy = np.floor(xyz[:, 0]).astype(np.int64), np.floor(xyz[:, 1]).astype(np.int64)
     key = (gx - gx.min()) * (gy.max() - gy.min() + 1) + (gy - gy.min())
     order = np.lexsort((xyz[:, 2], key))
@@ -163,7 +157,31 @@ def station_from_density(p: Pulses, cell: float = 0.1, ground_band: float = 0.5,
     counts = np.diff(np.r_[starts, len(order)])
     ground = np.empty(len(xyz))
     ground[order] = np.repeat(xyz[order, 2][starts + (counts * 0.05).astype(int)], counts)
-    near = xyz[xyz[:, 2] - ground < ground_band]
+    return xyz[xyz[:, 2] - ground < ground_band]
+
+
+def density_concentration(p: Pulses, radius: float = 5.0, max_points: int = 2_000_000) -> float:
+    """How strongly near-ground points pile up around one spot: their share within ``radius`` of the density peak,
+    over the share an even spread over the covered ground would give. A static scanner's density falls with range,
+    so its scans score far higher than a flight or a walk, whose density is even along the path."""
+    near = _near_ground(p, 0.5, max_points)
+    if len(near) < 1000:
+        return 0.0
+    cx, cy = _peak(near[:, :2], 0.5, 2.0, 500.0)
+    share = float((np.hypot(near[:, 0] - cx, near[:, 1] - cy) < radius).mean())
+    covered = len(np.unique(np.floor(near[:, :2]).astype(np.int64), axis=0))  # m2 of ground with points
+    return share / min(1.0, np.pi * radius**2 / max(covered, 1))
+
+
+def station_from_density(p: Pulses, cell: float = 0.1, ground_band: float = 0.5, smooth: float = 1.0,
+                         max_points: int = 5_000_000) -> Fit | None:
+    """Static scanner, single returns: the peak of near-ground point density (density falls with range).
+
+    Coarse peak on a 0.5 m grid first, then the fine peak on a ``cell`` grid within 10 m of it; at most ``max_points``
+    points (an even sample) are used, so memory stays bounded for any scan size."""
+    if len(p) < 1000:
+        return None
+    near = _near_ground(p, ground_band, max_points)
     if len(near) < 1000:
         return None
     cx, cy = _peak(near[:, :2], 0.5, 2.0, 500.0)
