@@ -8,6 +8,7 @@ dependencies = [
   "laspy[lazrs]==2.6.1",
   "numpy==2.3.5",
   "scipy==1.16.3",
+  "pyproj==3.7.2",  # laspy needs it to read the CRS from the header
 ]
 
 [project.optional-dependencies]
