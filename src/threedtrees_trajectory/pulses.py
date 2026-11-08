@@ -73,10 +73,16 @@ def _crs(header: laspy.LasHeader) -> str:
     return f"EPSG:{epsg}" if epsg else "unknown"
 
 
-def _backend() -> laspy.LazBackend | None:
-    """Parallel LAZ decoding when available (threads: RAYON_NUM_THREADS, set by the CLI)."""
-    available = laspy.LazBackend.detect_available()
-    return laspy.LazBackend.LazrsParallel if laspy.LazBackend.LazrsParallel in available else None
+def _is_copc(path: Path) -> bool:
+    with laspy.open(path) as reader:
+        return any(type(vlr).__name__ == "CopcInfoVlr" for vlr in reader.header.vlrs)
+
+
+def _open(path: Path) -> laspy.LasReader:
+    """Parallel LAZ decoding when available (threads: RAYON_NUM_THREADS, set by the CLI). Not for COPC: its variable
+    chunks break the parallel decoder and seeking, while reading it through in order works in 0.4 GB."""
+    parallel = laspy.LazBackend.LazrsParallel in laspy.LazBackend.detect_available() and not _is_copc(path)
+    return laspy.open(path, laz_backend=laspy.LazBackend.LazrsParallel if parallel else None)
 
 
 def _time_system(header: laspy.LasHeader, names: set[str]) -> str:
@@ -116,15 +122,13 @@ def _join_stray(stray: _Store, pulses: _Store) -> None:
 
 
 def _multi_share(path: Path) -> float:
-    """Share of records in multi-return pulses among the first BLOCK points (tied by time, source, return number)."""
-    with laspy.open(path, laz_backend=_backend()) as reader:
-        names = set(reader.header.point_format.dimension_names)
-        if "gps_time" not in names or reader.header.point_count == 0:
+    """Share of the first BLOCK records that belong to multi-return pulses (NumberOfReturns > 1). The field, not the
+    record order, so reordered files such as COPC count right."""
+    with _open(path) as reader:
+        if reader.header.point_count == 0:
             return 0.0
         chunk = reader.read_points(min(BLOCK, reader.header.point_count))
-    t, rn, src = np.asarray(chunk.gps_time), np.asarray(chunk.return_number), np.asarray(chunk.point_source_id)
-    joined = (t[1:] == t[:-1]) & (src[1:] == src[:-1]) & (rn[1:] == rn[:-1] + 1)
-    return float(joined.mean()) if len(joined) else 0.0
+    return float((np.asarray(chunk.number_of_returns) > 1).mean())
 
 
 def _chunks(reader: laspy.LasReader, every_block: int):
@@ -147,14 +151,16 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
             total += reader.header.point_count
             origin = np.array(reader.header.offsets, float) if origin is None else origin
     single_only = bool(paths) and _multi_share(paths[0]) < 0.01
-    every_block = 1 if full or not single_only else max(1, -(-total // MAX_SINGLE_ONLY))
+    sample_blocks = single_only and not full and not any(_is_copc(path) for path in paths)
+    every_block = max(1, -(-total // MAX_SINGLE_ONLY)) if sample_blocks else 1
     multi_every = 1 if full else max(1, -(-total // max_multi))  # counts every record as a pulse: the worst case
-    single_every = 1 if full or single_only else max(1, -(-total // max_single))
+    single_budget = MAX_SINGLE_ONLY if single_only else max_single
+    single_every = 1 if full or sample_blocks else max(1, -(-total // single_budget))
     pulses = _Store("time", "first", "last", "returns", "source", "file", "angle")
     stray = _Store("time", "xyz", "number", "source", "file", "angle")
     crs, time_system, has_time, has_angle = None, None, True, True
     for index, path in enumerate(paths):
-        with laspy.open(path, laz_backend=_backend()) as reader:
+        with _open(path) as reader:
             header = reader.header
             names = set(header.point_format.dimension_names)
             has_time &= "gps_time" in names

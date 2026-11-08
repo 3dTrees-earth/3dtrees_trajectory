@@ -68,6 +68,10 @@ Positions are unchanged on the multi-return datasets (TLS stations within 1 mm, 
 - Thinned or resampled clouds lose the pulse structure (re-sorted ones are joined again by time); the report's
   `multi_return_share` shows what was found.
 - A pulse split across two read chunks (5 M points) is lost; a handful per chunk.
+- COPC works but loses accuracy: it stores points by octree node, not in acquisition order. Returns are then joined by
+  GPS time alone, which mixes pulses of multi-beam scanners (1807 YellowScan: 0.001 m median from LAZ, 0.075 m median
+  and 5 m at the 95th percentile from COPC), and merged TLS scans whose clocks overlap can no longer be told apart
+  (3582 is then read as a flight). Original per-flight or per-scan LAS/LAZ files are the better input.
 - A single-return flight read in blocks has positions in bursts; use `--full` when the whole path is needed.
 - Time stays in the cloud's own clock (GPS week seconds or adjusted GPS time, read from the LAS header). The CRS is
   the cloud's.
