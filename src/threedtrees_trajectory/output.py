@@ -14,24 +14,40 @@ from .pulses import CloudInfo
 FORMAT = "3dtrees-trajectory/1"
 
 
-def _header(info: CloudInfo, result: Result) -> list[str]:
+TYPICAL_ERROR_M = {"lines": "0.01", "scan_angle": "1 horizontal, 0.1 vertical", "density": "0.5 horizontal"}
+
+
+def _header(info: CloudInfo, result: Result, quality_label: str, median_miss: float | None) -> list[str]:
+    """The converter's keys, then the estimate's own (extra ``#`` lines; the platform's reader skips unknown keys)."""
     time_system = info.time_system if result.platform == "mobile" else "none"
     lines = [f"# format: {FORMAT}", f"# crs: {info.crs}", "# vertical_crs: unknown", f"# time_system: {time_system}"]
     if time_system == "gps_sow":
         lines.append("# gps_week: unknown")
     lines += [f"# source_layout: estimated_{result.method}", f"# source_file: {Path(info.files[0]).name}",
-              f"# converter: 3dtrees_trajectory {__version__}"]
+              f"# converter: 3dtrees_trajectory {__version__}",
+              "# estimated: true", f"# method: {result.method}", f"# quality: {quality_label}",
+              f"# typical_error_m: {TYPICAL_ERROR_M[result.method]}"]
+    if median_miss is not None:
+        lines.append(f"# median_miss_m: {median_miss:.4f}")
+    if result.method == "density":
+        lines.append("# z: ground under the scanner")
     return lines
 
 
 def write_csv(path: Path, info: CloudInfo, result: Result) -> None:
-    rows = _header(info, result)
-    if result.platform == "mobile":
-        rows.append("time,x,y,z")
-        rows += [f"{f.time:.6f},{f.xyz[0]:.4f},{f.xyz[1]:.4f},{f.xyz[2]:.4f}" for f in result.fits]
-    else:
-        rows.append("name,x,y,z")
-        rows += [f"{n},{f.xyz[0]:.4f},{f.xyz[1]:.4f},{f.xyz[2]:.4f}" for n, f in zip(result.names, result.fits)]
+    """Columns as the standard (time or name, x, y, z), then ``miss_m`` for the line and scan-angle fits: how far the
+    pulse lines (or scan-angle cones) miss the position, a per-position uncertainty. Readers that take the first four
+    columns by position, like the platform's preview, are unaffected."""
+    miss = np.array([f.miss for f in result.fits], float)
+    median = float(np.nanmedian(miss)) if np.isfinite(miss).any() else None
+    rows = _header(info, result, quality(result, miss), median)
+    with_miss = result.method != "density"
+    first = "time" if result.platform == "mobile" else "name"
+    rows.append(f"{first},x,y,z" + (",miss_m" if with_miss else ""))
+    labels = [f"{f.time:.6f}" for f in result.fits] if result.platform == "mobile" else result.names
+    for label, f in zip(labels, result.fits):
+        row = f"{label},{f.xyz[0]:.4f},{f.xyz[1]:.4f},{f.xyz[2]:.4f}"
+        rows.append(row + (f",{f.miss:.4f}" if with_miss else ""))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
