@@ -59,14 +59,14 @@ pulse.
 
 | Dataset | Points | Before | Now |
 | --- | --- | --- | --- |
-| 1844 YellowScan, 3 flights | 678 M | 146 s, 13.5 GB | 93 s, 3.8 GB |
-| 2019 RIEGL ULS | 93 M | 69 s, 6.9 GB | 44 s, 3.6 GB |
-| 2018 MLS, single return | 2 B | 244 s, 19.7 GB | 62 s, 6.1 GB |
-| 3582 TERN TLS, merged | 66 M | 136 s, 8.7 GB | 38 s, 2.0 GB |
-| 1887 FARO TLS, 30 tiles | 330 M | 160 s, 14.1 GB | 21 s, 4.5 GB |
+| 1844 YellowScan, 3 flights | 678 M | 146 s, 13.5 GB | 119 s, 3.8 GB |
+| 2019 RIEGL ULS | 93 M | 69 s, 6.9 GB | 45 s, 3.5 GB |
+| 2018 MLS, single return | 2 B | 244 s, 19.7 GB | 213 s, 7.0 GB |
+| 3582 TERN TLS, merged | 66 M | 136 s, 8.7 GB | 37 s, 2.1 GB |
+| 1887 FARO TLS, 30 tiles | 330 M | 160 s, 14.1 GB | 145 s, 4.3 GB |
 
-Positions are unchanged on the multi-return datasets (TLS stations within 1 mm, flight paths within 0.007 m at the
-95th percentile of the delivered ones); the single-return scans keep their accuracy (median 0.48 and 0.70 m).
+Ground-truth backfill (65 datasets, `/mnt/data/kg281/3dtrees_trajectories` on geos): every run under 8 GB peak, most
+20-60 s, the 70 GB DJI dataset 2585 12 min.
 
 ## Limits
 
