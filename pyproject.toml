@@ -1,0 +1,24 @@
+[project]
+name = "threedtrees-trajectory"
+version = "0.1.0"
+description = "Sensor trajectory (ULS/MLS/ALS) or scan positions (TLS) estimated from a lidar point cloud alone"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "laspy[lazrs]==2.6.1",
+  "numpy==2.3.5",
+  "scipy==1.16.3",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.4"]
+
+[project.scripts]
+3dtrees-trajectory = "threedtrees_trajectory.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

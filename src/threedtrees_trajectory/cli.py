@@ -1,0 +1,45 @@
+"""3dtrees-trajectory: sensor path (ULS, MLS, ALS) or scanner positions (TLS) estimated from a point cloud alone."""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from . import __version__
+from .estimate import estimate
+from .output import report, write_csv, write_report
+from .pulses import read_pulses
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="3dtrees-trajectory", description=__doc__)
+    parser.add_argument("clouds", nargs="+", type=Path, help="LAS/LAZ files; for TLS one file per scan works best")
+    parser.add_argument("-o", "--output", type=Path, required=True, help="3Dtrees trajectory CSV")
+    parser.add_argument("--report", type=Path, help="JSON quality report (default: next to the CSV)")
+    parser.add_argument("--platform", choices=["auto", "mobile", "static"], default="auto",
+                        help="mobile = ULS/MLS/ALS path, static = TLS scan positions (default: detected)")
+    parser.add_argument("--split", choices=["auto", "file", "source", "time"], default="auto",
+                        help="static only: how scans are told apart (default: point sources, then files, then time jumps)")
+    parser.add_argument("--interval", type=float, default=0.5, help="mobile only: seconds per position (default 0.5)")
+    parser.add_argument("--keep-every", type=int, default=0,
+                        help="keep every n-th pulse (default: as many as fit in about 7 GB)")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    args = parser.parse_args(argv)
+
+    pulses, info = read_pulses(args.clouds, keep_every=args.keep_every)
+    try:
+        result = estimate(pulses, platform=args.platform, split=args.split, interval=args.interval)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    write_csv(args.output, info, result)
+    data = report(info, result, float(pulses.multi.mean()) if len(pulses) else 0.0)
+    write_report(args.report or args.output.with_suffix(".report.json"), data)
+    print(f"{result.platform} via {result.method}: {len(result.fits)} positions -> {args.output}")
+    for warning in result.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    return 0 if result.fits else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
