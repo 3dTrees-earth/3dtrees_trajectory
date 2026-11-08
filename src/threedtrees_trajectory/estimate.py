@@ -8,9 +8,10 @@ import numpy as np
 from . import solve
 from .pulses import Pulses
 
-MULTI_SHARE_MIN = 0.02  # below this share of multi-return pulses the line method has too little to work with
+MULTI_SHARE_MIN = 0.005  # below this share of multi-return pulses the line method has too little to work with
 STATIC_MISS_MAX = 0.05  # one position explaining all lines within 5 cm = a static scan
 SCAN_GAP = 30.0  # seconds; a jump in file-order time this large starts a new scan in a merged TLS cloud
+MIN_LINE_POSITIONS = 10  # fewer positions from pulse lines than this: fall back to scan angles
 CONCENTRATION_MIN = 15.0  # ground density piling up this much around one spot = a static scanner
 
 
@@ -90,9 +91,11 @@ def detect_platform(p: Pulses) -> tuple[str, str]:
     Multi-return pulses with time: static when one position explains their lines within 5 cm. Otherwise: static when
     near-ground points pile up around one spot (CONCENTRATION_MIN times an even spread), as a fixed scanner's do.
     Checked on 3Dtrees data: TLS 22 to 128, ULS 1.8 to 7.7, MLS 4.3."""
+    if not p.has_time:
+        return "static", "no GPS time, so it can't be a path"
     names, label = split_scans(p, "auto")
     part = p.subset(label == np.argmax(np.bincount(label)))
-    if part.has_time and float(part.multi.mean()) >= MULTI_SHARE_MIN:
+    if part.has_time and p.multi_share >= MULTI_SHARE_MIN:
         fit = solve.station_from_lines(part, min_pulses=500)
         if fit is not None:
             platform = "static" if fit.miss <= STATIC_MISS_MAX else "mobile"
@@ -112,7 +115,7 @@ def estimate(p: Pulses, platform: str = "auto", split: str = "auto", interval: f
 def _estimate(p: Pulses, platform: str, split: str, interval: float) -> Result:
     if len(p) == 0:
         raise ValueError("The cloud has no points.")
-    multi_share = float(p.multi.mean())
+    multi_share = p.multi_share
     warnings = []
     evidence = "given"
     if platform == "auto":
@@ -120,9 +123,14 @@ def _estimate(p: Pulses, platform: str, split: str, interval: float) -> Result:
     if platform == "mobile":
         if not p.has_time:
             raise ValueError("A moving sensor's path needs GPS time per point; this cloud has none.")
-        if multi_share >= MULTI_SHARE_MIN:
-            fits = solve.path_from_lines(p, interval=interval)
-            return Result("mobile", "lines", fits, warnings=warnings, evidence=evidence)
+        lines = solve.path_from_lines(p, interval=interval) if multi_share >= MULTI_SHARE_MIN else []
+        if len(lines) >= MIN_LINE_POSITIONS:  # a gappy path from lines beats a full one from scan angles (metres off)
+            fits = lines
+            kept = solve.drop_outliers(fits)
+            if len(kept) < len(fits):
+                warnings.append(f"{len(fits) - len(kept)} of {len(fits)} positions were more than 1 m off the path of "
+                                "their neighbours and were dropped.")
+            return Result("mobile", "lines", kept, warnings=warnings, evidence=evidence)
         if p.has_scan_angle:
             warnings.append("Single returns only: path from scan angles, about 1 m horizontally and 0.1 m vertically on "
                             "RIEGL and DJI flights, much worse where the scan angle isn't measured off nadir (YellowScan 8 m).")

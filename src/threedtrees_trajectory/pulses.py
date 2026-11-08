@@ -8,8 +8,8 @@ by GPS time and point source after reading.
 
 Memory stays bounded: coordinates are float32 relative to ``origin`` (sub-millimetre within 10 km), and at most
 MAX_MULTI multi-return and MAX_SINGLE single-return pulses are kept, as every n-th pulse so the whole acquisition
-time stays covered. A cloud whose first million points hold no multi-return pulses is read faster: evenly spread
-blocks of BLOCK points, MAX_SINGLE_ONLY in total, so most of it is never decoded. ``full`` reads every point.
+time stays covered; a cloud whose first million points hold no multi-return pulses keeps MAX_SINGLE_ONLY single
+returns instead. ``full`` keeps every pulse.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import laspy
 import numpy as np
 
 CHUNK = 5_000_000
-BLOCK = 200_000  # points per contiguous block when a single-return cloud is sampled; small enough to spread
+PROBE = 1_000_000  # points read first to tell a single-return cloud
 MAX_MULTI = 40_000_000
 MAX_SINGLE = 10_000_000  # single returns next to multi-return pulses
 MAX_SINGLE_ONLY = 40_000_000  # clouds without multi-return pulses, where single returns are all there is
@@ -40,13 +40,15 @@ class Pulses:
     scan_angle: np.ndarray  # float32, degrees off nadir as written in the file (0 when absent)
     has_time: bool
     has_scan_angle: bool
+    multi_share: float  # share of multi-return pulses in the whole cloud, before thinning
 
     def __len__(self) -> int:
         return len(self.time)
 
     def subset(self, index: np.ndarray) -> "Pulses":
         return Pulses(self.origin, self.time[index], self.first[index], self.last[index], self.returns[index],
-                      self.source[index], self.file[index], self.scan_angle[index], self.has_time, self.has_scan_angle)
+                      self.source[index], self.file[index], self.scan_angle[index], self.has_time, self.has_scan_angle,
+                      self.multi_share)
 
     @property
     def multi(self) -> np.ndarray:
@@ -59,7 +61,7 @@ class CloudInfo:
     time_system: str  # gps_adjusted | gps_sow | none
     points: int
     files: list[str]
-    kept_every: tuple[int, int, int]  # (multi-return pulse, single-return pulse, block) strides
+    kept_every: tuple[int, int]  # (multi-return, single-return) pulse strides
 
 
 def _crs(header: laspy.LasHeader) -> str:
@@ -121,24 +123,17 @@ def _join_stray(stray: _Store, pulses: _Store) -> None:
                source=source[start], file=file[start], angle=angle[order[start]])
 
 
-def _multi_share(path: Path) -> float:
-    """Share of the first BLOCK records that belong to multi-return pulses (NumberOfReturns > 1). The field, not the
-    record order, so reordered files such as COPC count right."""
+def _looks_single_return(path: Path) -> bool:
+    """Under 1 % multi-return records among the first PROBE points, by NumberOfReturns or by consecutive return
+    numbers (some writers leave NumberOfReturns at 1)."""
     with _open(path) as reader:
         if reader.header.point_count == 0:
-            return 0.0
-        chunk = reader.read_points(min(BLOCK, reader.header.point_count))
-    return float((np.asarray(chunk.number_of_returns) > 1).mean())
-
-
-def _chunks(reader: laspy.LasReader, every_block: int):
-    """All points in CHUNK pieces, or every ``every_block``-th block of BLOCK points."""
-    if every_block <= 1:
-        yield from reader.chunk_iterator(CHUNK)
-        return
-    for start in range(0, reader.header.point_count, BLOCK * every_block):
-        reader.seek(start)
-        yield reader.read_points(BLOCK)
+            return True
+        chunk = reader.read_points(min(PROBE, reader.header.point_count))
+    rn = np.asarray(chunk.return_number)
+    by_field = float((np.asarray(chunk.number_of_returns) > 1).mean())
+    by_order = float((rn[1:] == rn[:-1] + 1).mean()) if len(rn) > 1 else 0.0
+    return max(by_field, by_order) < 0.01
 
 
 def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int = MAX_SINGLE,
@@ -150,12 +145,10 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
         with laspy.open(path) as reader:
             total += reader.header.point_count
             origin = np.array(reader.header.offsets, float) if origin is None else origin
-    single_only = bool(paths) and _multi_share(paths[0]) < 0.01
-    sample_blocks = single_only and not full and not any(_is_copc(path) for path in paths)
-    every_block = max(1, -(-total // MAX_SINGLE_ONLY)) if sample_blocks else 1
+    single_only = bool(paths) and _looks_single_return(paths[0])
     multi_every = 1 if full else max(1, -(-total // max_multi))  # counts every record as a pulse: the worst case
-    single_budget = MAX_SINGLE_ONLY if single_only else max_single
-    single_every = 1 if full or sample_blocks else max(1, -(-total // single_budget))
+    single_every = 1 if full else max(1, -(-total // (MAX_SINGLE_ONLY if single_only else max_single)))
+    counts = np.zeros(2, np.int64)  # multi-return, single-return pulses before thinning
     pulses = _Store("time", "first", "last", "returns", "source", "file", "angle")
     stray = _Store("time", "xyz", "number", "source", "file", "angle")
     crs, time_system, has_time, has_angle = None, None, True, True
@@ -171,7 +164,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
             time_system = file_time if time_system in (None, file_time) else "mixed"
             scale = np.asarray(header.scales)
             shift = np.asarray(header.offsets) - origin
-            for chunk in _chunks(reader, every_block):
+            for chunk in reader.chunk_iterator(CHUNK):
                 n = len(chunk)
                 t = np.asarray(chunk.gps_time) if "gps_time" in names else np.zeros(n)
                 rn = np.asarray(chunk.return_number)
@@ -187,6 +180,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                 lone = single & (np.asarray(chunk.number_of_returns)[start] > 1) & ("gps_time" in names)
                 keep = np.zeros(len(start), bool)
                 multi_idx, single_idx = np.flatnonzero(~single), np.flatnonzero(single & ~lone)
+                counts += [len(multi_idx) + int(lone.sum()) // 2, len(single_idx)]
                 keep[multi_idx[::multi_every]] = True
                 keep[single_idx[::single_every]] = True
                 lone_idx = start[lone]
@@ -213,7 +207,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
     result = Pulses(origin if origin is not None else np.zeros(3), pulses.array("time", np.float64),
                     pulses.array("first", np.float32, 3), pulses.array("last", np.float32, 3),
                     pulses.array("returns", np.uint8), pulses.array("source", np.uint16), pulses.array("file", np.uint16),
-                    angle, has_time, has_angle and bool(np.any(angle != 0)))
+                    angle, has_time, has_angle and bool(np.any(angle != 0)), float(counts[0] / max(counts.sum(), 1)))
     info = CloudInfo(crs or "unknown", time_system or "none", total, [str(p) for p in paths],
-                     (multi_every, single_every, every_block))
+                     (multi_every, single_every))
     return result, info

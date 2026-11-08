@@ -91,6 +91,10 @@ def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_
         fit = fit_lines(origin[lo:hi], direction[lo:hi], time[lo:hi], True, min_pulses)
         if fit is not None:
             fits.append(fit)
+    # A window whose lines don't meet (median miss 0.7-30 m against 0.02 m) fitted noise or mixed pulses: drop it.
+    if fits:
+        limit = max(0.25, 10 * float(np.median([f.miss for f in fits])))
+        fits = [f for f in fits if f.miss <= limit]
     return sorted(fits, key=lambda f: f.time)
 
 
@@ -195,3 +199,24 @@ def station_from_density(p: Pulses, cell: float = 0.1, ground_band: float = 0.5,
     x, y = _peak(close[:, :2], cell, smooth, 20.0)  # smoothing bridges the blind spot under the tripod
     z = float(np.median(near[np.hypot(near[:, 0] - x, near[:, 1] - y) < 2, 2]))
     return Fit(float(np.median(p.time)) if p.has_time else 0.0, np.array([x, y, z]), len(near), float("nan"))
+
+
+def drop_outliers(fits: list[Fit], window: float = 1.5, limit: float = 1.0) -> list[Fit]:
+    """Positions more than ``limit`` metres off the path their neighbours describe: the median position of the
+    positions up to ``window`` seconds before and after, interpolated to this position's time. A window fit can lock
+    onto a few stray lines (a bird, noise, another pulse's echo) and land metres off; its neighbours don't."""
+    if len(fits) < 5:
+        return fits
+    time = np.array([f.time for f in fits])
+    xyz = np.array([f.xyz for f in fits])
+    keep = np.ones(len(fits), bool)
+    for i, t in enumerate(time):
+        before = (time >= t - window) & (time < t)
+        after = (time > t) & (time <= t + window)
+        if before.sum() < 2 or after.sum() < 2:
+            continue
+        tb, ta = np.median(time[before]), np.median(time[after])
+        pb, pa = np.median(xyz[before], axis=0), np.median(xyz[after], axis=0)
+        expected = pb + (pa - pb) * (t - tb) / (ta - tb)
+        keep[i] = np.linalg.norm(xyz[i] - expected) <= limit
+    return [f for f, k in zip(fits, keep) if k]

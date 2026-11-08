@@ -36,13 +36,25 @@ def write_csv(path: Path, info: CloudInfo, result: Result) -> None:
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
+def quality(result: Result, miss: np.ndarray) -> str:
+    """good: pulse lines meet within 10 cm (cm-accurate on every checked dataset); rough: scan-angle or density
+    positions (0.5-8 m); unreliable: pulse lines miss by more than 0.5 m (1815, whose return numbers are broken,
+    sits at 6.7 m and 25 m off); none: no positions."""
+    if not result.fits:
+        return "none"
+    if result.method != "lines":
+        return "rough"
+    median = float(np.nanmedian(miss))
+    return "good" if median <= 0.1 else "unreliable" if median > 0.5 else "rough"
+
+
 def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
     miss = np.array([f.miss for f in result.fits], float)
     out = {
         "tool": f"3dtrees_trajectory {__version__}",
         "files": info.files,
         "points": info.points,
-        "kept_every": dict(zip(("multi_return_pulse", "single_return_pulse", "block"), info.kept_every)),
+        "kept_every": dict(zip(("multi_return_pulse", "single_return_pulse"), info.kept_every)),
         "crs": info.crs,
         "time_system": info.time_system,
         "platform": result.platform,
@@ -51,6 +63,7 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
         "multi_return_share": round(multi_share, 4),
         "positions": len(result.fits),
         "median_miss_m": None if not np.isfinite(miss).any() else round(float(np.nanmedian(miss)), 4),
+        "quality": quality(result, miss),
         "warnings": result.warnings,
     }
     if result.platform == "mobile" and result.fits:
@@ -60,9 +73,6 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
         out["gaps_over_5s"] = int((gaps > 5).sum())
         out["note"] = ("Positions exist only while the cloud has points. Turns and transit legs cut from the cloud "
                        "have no positions.")
-        if info.kept_every[2] > 1:
-            out["note"] += (f" Single returns only: one block in {info.kept_every[2]} was read, so positions come in "
-                            "bursts; --full reads every point.")
     return out
 
 

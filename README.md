@@ -43,12 +43,19 @@ Multi-file datasets are read together. Scans are told apart automatically:
 Multi-return records that were stored apart from each other (some software sorts points spatially) are joined by GPS
 time and point source after reading.
 
+## Quality checks
+
+- Moving sensor: a time window whose pulse lines miss the fitted position by more than 10 times the median (at least
+  0.25 m) is dropped, and so is a position more than 1 m off the path of its neighbours (within 1.5 s).
+- The report's `quality` is `good` when the lines meet within 10 cm, `rough` for scan-angle and density positions,
+  and `unreliable` when the lines miss by more than 0.5 m (broken return numbers).
+
 ## Speed and memory
 
-LAZ is decoded in parallel (`--threads`, default 8). Coordinates are kept as float32 relative to the first file's
-offset. At most 40 M multi-return and 10 M single-return pulses are kept, as every n-th pulse so the whole
-acquisition stays covered; a cloud without multi-return pulses is read as evenly spread blocks of 200 k points,
-40 M in total. `--full` reads every point.
+LAZ is decoded in parallel (`--threads`, default 8; COPC is read serially). Coordinates are kept as float32 relative
+to the first file's offset. At most 40 M multi-return and 10 M single-return pulses are kept (40 M single returns when
+a cloud has no multi-return pulses), as every n-th pulse so the whole acquisition stays covered. `--full` keeps every
+pulse.
 
 | Dataset | Points | Before | Now |
 | --- | --- | --- | --- |
@@ -72,7 +79,6 @@ Positions are unchanged on the multi-return datasets (TLS stations within 1 mm, 
   GPS time alone, which mixes pulses of multi-beam scanners (1807 YellowScan: 0.001 m median from LAZ, 0.075 m median
   and 5 m at the 95th percentile from COPC), and merged TLS scans whose clocks overlap can no longer be told apart
   (3582 is then read as a flight). Original per-flight or per-scan LAS/LAZ files are the better input.
-- A single-return flight read in blocks has positions in bursts; use `--full` when the whole path is needed.
 - Time stays in the cloud's own clock (GPS week seconds or adjusted GPS time, read from the LAS header). The CRS is
   the cloud's.
 
