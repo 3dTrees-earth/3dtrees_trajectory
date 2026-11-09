@@ -14,6 +14,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("clouds", nargs="+", type=Path, help="LAS/LAZ files; for TLS one file per scan works best")
     parser.add_argument("-o", "--output", type=Path, required=True, help="3Dtrees trajectory CSV")
     parser.add_argument("--report", type=Path, help="JSON quality report (default: next to the CSV)")
+    parser.add_argument("--geojson", type=Path, help="map layer of the path or stations (default: next to the CSV)")
     parser.add_argument("--platform", choices=["auto", "mobile", "static"], default="auto",
                         help="mobile = ULS/MLS/ALS path, static = TLS scan positions (default: detected)")
     parser.add_argument("--split", choices=["auto", "file", "source", "time"], default="auto",
@@ -26,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["RAYON_NUM_THREADS"] = str(args.threads)  # read by the LAZ decoder when its thread pool starts
 
     from .estimate import estimate
-    from .output import refusal, report, write_csv, write_report
+    from .output import geojson, refusal, report, write_csv, write_geojson, write_report
     from .pulses import read_pulses
 
     pulses, info = read_pulses(args.clouds, full=args.full)
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         write_report(args.report or args.output.with_suffix(".report.json"), refusal(info, pulses, str(error)))
         return 2
     write_csv(args.output, info, result)
+    write_geojson(args.geojson or args.output.with_suffix(".geojson"), geojson(info, result))
     data = report(info, result, pulses.multi_share)
     write_report(args.report or args.output.with_suffix(".report.json"), data)
     print(f"{result.platform} ({result.evidence}) via {result.method}: {len(result.fits)} positions -> {args.output}")

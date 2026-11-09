@@ -19,6 +19,11 @@ the platform's trajectory converter writes, plus a JSON quality report.
 | Static scanner, single returns | `density`: the peak of near-ground point density per scan | 0.5 to 0.7 m (FARO, BLK360); z is the ground under the scanner |
 | Single returns without scan angle (moving), or no way to tell scans apart (static) | refused or flagged | provide the trajectory or one file per scan |
 
+Next to the CSV and the report, the tool writes a GeoJSON map layer: the path as lines (split where positions are
+more than 5 s apart, so no line crosses unscanned turns, about one vertex per metre) or the TLS stations as points,
+in WGS84 when the cloud's CRS is known. `3dtrees-trajectory-geojson file.csv` makes the same layer from an existing
+trajectory CSV.
+
 ## Platform and scans, detected
 
 No platform has to be given. On the largest scan group of the cloud:
