@@ -52,10 +52,12 @@ time and point source after reading.
 
 - Moving sensor: a time window whose pulse lines miss the fitted position by more than 10 times the median (at least
   0.25 m) is dropped, and so is a position more than 1 m off the path of its neighbours (within 1.5 s).
-- Paths and stations share one layout, `time,x,y,z,speed_m_s,scan`; the first four columns are the standard's. A path
-  has a speed (from its neighbours within 5 s) and no scan name; a station has its scan name, the mean GPS time of
-  its pulses (empty without GPS time) and no speed. The header carries `platform`, `method` and `quality`;
-  the report adds `median_miss_m` (how far the pulse lines miss the positions, median) and `typical_error_m`.
+- Paths and stations share one layout with uploaded files (`3dtrees-trajectory/2`): `time,x,y,z,roll,pitch,yaw,name`,
+  name last so readers of the first four columns are unaffected. A path leaves the name empty; a station has its scan
+  name and the mean GPS time of its pulses (empty without GPS time). Roll, pitch and yaw stay empty (positions only),
+  and speed is not stored (viewers derive it). The header carries `kind` (path or stations), `origin: estimated`,
+  `method` and `quality`; the report adds `median_miss_m` (how far the pulse lines miss the positions, median) and
+  `typical_error_m`.
   `quality` is `good` when the lines meet within 10 cm, `rough` for scan-angle and density positions, and `unreliable` when the
   lines miss by more than 0.5 m (broken return numbers).
 

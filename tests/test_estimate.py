@@ -8,7 +8,7 @@ from synthetic import flight, scan
 
 
 def _read(path):
-    """Column names and rows: time, x, y, z, speed_m_s, scan."""
+    """Column names and rows: time, x, y, z, roll, pitch, yaw, name."""
     lines = [l for l in path.read_text().splitlines() if not l.startswith("#")]
     return lines[0].split(","), [l.split(",") for l in lines[1:]]
 
@@ -17,16 +17,16 @@ def test_flight_multi_return_recovers_path_to_centimetres(tmp_path):
     time, sensor = flight(tmp_path / "f.laz")
     assert main([str(tmp_path / "f.laz"), "-o", str(tmp_path / "p.csv")]) == 0
     columns, rows = _read(tmp_path / "p.csv")
-    assert columns == ["time", "x", "y", "z", "speed_m_s", "scan"]
+    assert columns == ["time", "x", "y", "z", "roll", "pitch", "yaw", "name"]
     est = np.array([r[:4] for r in rows], float)
-    assert all(r[4] and not r[5] for r in rows)  # a path has speeds and no scan names
+    assert all(not any(r[4:]) for r in rows)  # a path: no attitude, no names
     truth = np.c_[np.interp(est[:, 0], time, sensor[:, 0]), np.interp(est[:, 0], time, sensor[:, 1]), np.interp(est[:, 0], time, sensor[:, 2])]
     assert len(est) >= 35
     assert np.abs(est[:, 1:] - truth).max() < 0.05
     report = json.loads((tmp_path / "p.report.json").read_text())
     assert report["platform"] == "mobile" and report["method"] == "lines"
     text = (tmp_path / "p.csv").read_text()
-    assert "# quality: good" in text and "# platform: mobile" in text and "miss_m" not in text
+    assert "# quality: good" in text and "# kind: path" in text and "# origin: estimated" in text and "miss_m" not in text
     assert report["median_miss_m"] < 0.05 and report["typical_error_m"] == "0.01"
 
 
@@ -46,9 +46,9 @@ def test_tls_one_file_per_scan_gives_each_station(tmp_path):
     scan(tmp_path / "b.laz", (25.0, -7.0, 1.6), seed=2)
     assert main([str(tmp_path / "a.laz"), str(tmp_path / "b.laz"), "-o", str(tmp_path / "s.csv")]) == 0
     columns, rows = _read(tmp_path / "s.csv")
-    assert columns == ["time", "x", "y", "z", "speed_m_s", "scan"]
+    assert columns == ["time", "x", "y", "z", "roll", "pitch", "yaw", "name"]
     xyz = np.array([r[1:4] for r in rows], float)
-    assert [r[5] for r in rows] == ["scan0", "scan1"] and not any(r[4] for r in rows)  # stations: names, no speed
+    assert [r[7] for r in rows] == ["scan0", "scan1"] and not any(r[4] or r[5] or r[6] for r in rows)
     assert np.abs(xyz - [[3.0, 4.0, 1.5], [25.0, -7.0, 1.6]]).max() < 0.02
 
 
