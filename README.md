@@ -52,9 +52,10 @@ time and point source after reading.
 
 - Moving sensor: a time window whose pulse lines miss the fitted position by more than 10 times the median (at least
   0.25 m) is dropped, and so is a position more than 1 m off the path of its neighbours (within 1.5 s).
-- The CSV header carries `method`, `quality`, `typical_error_m` and `median_miss_m`, and each row a `miss_m` column
-  after z (how far the pulse lines miss that position). The report's `quality` is `good` when the lines meet within 10 cm, `rough` for scan-angle and density positions,
-  and `unreliable` when the lines miss by more than 0.5 m (broken return numbers).
+- The CSV has the standard's columns only (`time,x,y,z`, or `name,x,y,z` for TLS); its header carries `method`,
+  `quality`, `typical_error_m` and `median_miss_m` (how far the pulse lines miss the positions, median). `quality` is
+  `good` when the lines meet within 10 cm, `rough` for scan-angle and density positions, and `unreliable` when the
+  lines miss by more than 0.5 m (broken return numbers).
 
 ## Speed and memory
 

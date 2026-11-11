@@ -8,7 +8,7 @@ from synthetic import flight, scan
 
 
 def _read(path):
-    """The standard's first four columns (time or name, x, y, z); miss_m may follow."""
+    """The standard's columns (time or name, x, y, z)."""
     lines = [l for l in path.read_text().splitlines() if not l.startswith("#")]
     return lines[0].split(",")[:4], [l.split(",")[:4] for l in lines[1:]]
 
@@ -25,7 +25,7 @@ def test_flight_multi_return_recovers_path_to_centimetres(tmp_path):
     report = json.loads((tmp_path / "p.report.json").read_text())
     assert report["platform"] == "mobile" and report["method"] == "lines"
     text = (tmp_path / "p.csv").read_text()
-    assert "# quality: good" in text and "time,x,y,z,miss_m" in text
+    assert "# quality: good" in text and "\ntime,x,y,z\n" in text and "miss_m:" in text
 
 
 def test_flight_single_return_uses_scan_angle_and_warns(tmp_path):

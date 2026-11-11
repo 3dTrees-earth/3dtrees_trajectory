@@ -35,19 +35,15 @@ def _header(info: CloudInfo, result: Result, quality_label: str, median_miss: fl
 
 
 def write_csv(path: Path, info: CloudInfo, result: Result) -> None:
-    """Columns as the standard (time or name, x, y, z), then ``miss_m`` for the line and scan-angle fits: how far the
-    pulse lines (or scan-angle cones) miss the position, a per-position uncertainty. Readers that take the first four
-    columns by position, like the platform's preview, are unaffected."""
+    """Columns exactly as the standard (time or name, x, y, z), so the file reads like a delivered one. How well the
+    pulse lines meet is only summarised in the header (``median_miss_m``)."""
     miss = np.array([f.miss for f in result.fits], float)
     median = float(np.nanmedian(miss)) if np.isfinite(miss).any() else None
     rows = _header(info, result, quality(result, miss), median)
-    with_miss = result.method != "density"
-    first = "time" if result.platform == "mobile" else "name"
-    rows.append(f"{first},x,y,z" + (",miss_m" if with_miss else ""))
+    rows.append(("time" if result.platform == "mobile" else "name") + ",x,y,z")
     labels = [f"{f.time:.6f}" for f in result.fits] if result.platform == "mobile" else result.names
     for label, f in zip(labels, result.fits):
-        row = f"{label},{f.xyz[0]:.4f},{f.xyz[1]:.4f},{f.xyz[2]:.4f}"
-        rows.append(row + (f",{f.miss:.4f}" if with_miss else ""))
+        rows.append(f"{label},{f.xyz[0]:.4f},{f.xyz[1]:.4f},{f.xyz[2]:.4f}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
