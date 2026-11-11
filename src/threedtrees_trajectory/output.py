@@ -19,13 +19,13 @@ TYPICAL_ERROR_M = {"lines": "0.01", "scan_angle": "1 horizontal, 0.1 vertical", 
 
 def _header(info: CloudInfo, result: Result, quality_label: str, median_miss: float | None) -> list[str]:
     """The converter's keys, then the estimate's own (extra ``#`` lines; the platform's reader skips unknown keys)."""
-    time_system = info.time_system if result.platform == "mobile" else "none"
+    time_system = info.time_system if _has_times(info, result) else "none"
     lines = [f"# format: {FORMAT}", f"# crs: {info.crs}", "# vertical_crs: unknown", f"# time_system: {time_system}"]
     if time_system == "gps_sow":
         lines.append("# gps_week: unknown")
     lines += [f"# source_layout: estimated_{result.method}", f"# source_file: {Path(info.files[0]).name}",
               f"# converter: 3dtrees_trajectory {__version__}",
-              "# estimated: true", f"# method: {result.method}", f"# quality: {quality_label}",
+              "# estimated: true", f"# platform: {result.platform}", f"# method: {result.method}", f"# quality: {quality_label}",
               f"# typical_error_m: {TYPICAL_ERROR_M[result.method]}"]
     if median_miss is not None:
         lines.append(f"# median_miss_m: {median_miss:.4f}")
@@ -34,16 +34,38 @@ def _header(info: CloudInfo, result: Result, quality_label: str, median_miss: fl
     return lines
 
 
+def _has_times(info: CloudInfo, result: Result) -> bool:
+    return info.time_system != "none" and all(f.time for f in result.fits)
+
+
+def speeds(time: np.ndarray, xyz: np.ndarray, gap: float = 5.0) -> np.ndarray:
+    """Speed over ground and height (m/s) at each position, from its neighbours within ``gap`` seconds; NaN where a
+    position has none (alone between two gaps)."""
+    out = np.full(len(time), np.nan)
+    for part in np.split(np.arange(len(time)), np.flatnonzero(np.diff(time) > gap) + 1):
+        if len(part) > 1:
+            step = np.linalg.norm(np.diff(xyz[part], axis=0), axis=1) / np.diff(time[part])
+            out[part] = np.r_[step[0], (step[:-1] + step[1:]) / 2, step[-1]] if len(part) > 2 else step[0]
+    return out
+
+
 def write_csv(path: Path, info: CloudInfo, result: Result) -> None:
-    """Columns exactly as the standard (time or name, x, y, z), so the file reads like a delivered one. How well the
-    pulse lines meet is only summarised in the header (``median_miss_m``)."""
+    """One layout for paths and stations: ``time,x,y,z,speed_m_s,scan``. The first four columns are the standard's,
+    so readers that take them by position are unaffected. A path leaves ``scan`` empty; a station has its scan name,
+    the mean GPS time of its pulses (empty without GPS time) and no speed. How well the pulse lines meet is only
+    summarised in the header (``median_miss_m``)."""
     miss = np.array([f.miss for f in result.fits], float)
     median = float(np.nanmedian(miss)) if np.isfinite(miss).any() else None
     rows = _header(info, result, quality(result, miss), median)
-    rows.append(("time" if result.platform == "mobile" else "name") + ",x,y,z")
-    labels = [f"{f.time:.6f}" for f in result.fits] if result.platform == "mobile" else result.names
-    for label, f in zip(labels, result.fits):
-        rows.append(f"{label},{f.xyz[0]:.4f},{f.xyz[1]:.4f},{f.xyz[2]:.4f}")
+    rows.append("time,x,y,z,speed_m_s,scan")
+    timed = _has_times(info, result)
+    time = np.array([f.time for f in result.fits], float)
+    xyz = np.array([f.xyz for f in result.fits], float).reshape(-1, 3)
+    mobile = result.platform == "mobile"
+    speed = speeds(time, xyz) if mobile and len(time) else np.full(len(time), np.nan)
+    names = [""] * len(result.fits) if mobile else result.names
+    for t, (x, y, z), v, name in zip(time, xyz, speed, names):
+        rows.append(f"{f'{t:.6f}' if timed else ''},{x:.4f},{y:.4f},{z:.4f},{'' if np.isnan(v) else f'{v:.2f}'},{name}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
@@ -154,7 +176,7 @@ def write_geojson(path: Path, data: dict) -> None:
 
 
 def geojson_from_csv(path: Path) -> dict:
-    """The map layer for a trajectory CSV this tool wrote (header keys crs, method, quality, time_system)."""
+    """The map layer for a trajectory CSV this tool wrote (header keys crs, platform, method, time_system)."""
     from .solve import Fit
 
     meta, rows = {}, []
@@ -162,13 +184,12 @@ def geojson_from_csv(path: Path) -> dict:
         if line.startswith("#"):
             key, _, value = line[1:].partition(":")
             meta[key.strip()] = value.strip()
-        elif line and not line.startswith(("time,", "name,")):
+        elif line and not line.startswith("time,"):
             rows.append(line.split(","))
-    mobile = path.read_text(encoding="utf-8").count("\ntime,") > 0
-    fits = [Fit(float(r[0]) if mobile else 0.0, np.array(r[1:4], float), 0,
-                float(r[4]) if len(r) > 4 else float("nan")) for r in rows]
+    mobile = meta.get("platform", "mobile") == "mobile"
+    fits = [Fit(float(r[0]) if r[0] else 0.0, np.array(r[1:4], float), 0, float("nan")) for r in rows]
     result = Result("mobile" if mobile else "static", meta.get("method", "lines"), fits,
-                    [] if mobile else [r[0] for r in rows])
+                    [] if mobile else [r[5] for r in rows])
     info = CloudInfo(meta.get("crs", "unknown"), meta.get("time_system", "none"), 0, [meta.get("source_file", "")], (1, 1))
     return geojson(info, result)
 

@@ -8,30 +8,31 @@ from synthetic import flight, scan
 
 
 def _read(path):
-    """The standard's columns (time or name, x, y, z)."""
+    """Column names and rows: time, x, y, z, speed_m_s, scan."""
     lines = [l for l in path.read_text().splitlines() if not l.startswith("#")]
-    return lines[0].split(",")[:4], [l.split(",")[:4] for l in lines[1:]]
+    return lines[0].split(","), [l.split(",") for l in lines[1:]]
 
 
 def test_flight_multi_return_recovers_path_to_centimetres(tmp_path):
     time, sensor = flight(tmp_path / "f.laz")
     assert main([str(tmp_path / "f.laz"), "-o", str(tmp_path / "p.csv")]) == 0
     columns, rows = _read(tmp_path / "p.csv")
-    assert columns == ["time", "x", "y", "z"]
-    est = np.array(rows, float)
+    assert columns == ["time", "x", "y", "z", "speed_m_s", "scan"]
+    est = np.array([r[:4] for r in rows], float)
+    assert all(r[4] and not r[5] for r in rows)  # a path has speeds and no scan names
     truth = np.c_[np.interp(est[:, 0], time, sensor[:, 0]), np.interp(est[:, 0], time, sensor[:, 1]), np.interp(est[:, 0], time, sensor[:, 2])]
     assert len(est) >= 35
     assert np.abs(est[:, 1:] - truth).max() < 0.05
     report = json.loads((tmp_path / "p.report.json").read_text())
     assert report["platform"] == "mobile" and report["method"] == "lines"
     text = (tmp_path / "p.csv").read_text()
-    assert "# quality: good" in text and "\ntime,x,y,z\n" in text and "miss_m:" in text
+    assert "# quality: good" in text and "# platform: mobile" in text and "miss_m:" in text
 
 
 def test_flight_single_return_uses_scan_angle_and_warns(tmp_path):
     time, sensor = flight(tmp_path / "f.laz", single_return=True)
     assert main([str(tmp_path / "f.laz"), "-o", str(tmp_path / "p.csv"), "--platform", "mobile"]) == 0
-    est = np.array(_read(tmp_path / "p.csv")[1], float)
+    est = np.array([r[:4] for r in _read(tmp_path / "p.csv")[1]], float)
     h = np.hypot(est[:, 1] - np.interp(est[:, 0], time, sensor[:, 0]), est[:, 2] - np.interp(est[:, 0], time, sensor[:, 1]))
     assert np.median(h) < 1.0
     assert np.median(np.abs(est[:, 3] - 60.0)) < 0.5
@@ -44,8 +45,9 @@ def test_tls_one_file_per_scan_gives_each_station(tmp_path):
     scan(tmp_path / "b.laz", (25.0, -7.0, 1.6), seed=2)
     assert main([str(tmp_path / "a.laz"), str(tmp_path / "b.laz"), "-o", str(tmp_path / "s.csv")]) == 0
     columns, rows = _read(tmp_path / "s.csv")
-    assert columns == ["name", "x", "y", "z"]
-    xyz = np.array([r[1:] for r in rows], float)
+    assert columns == ["time", "x", "y", "z", "speed_m_s", "scan"]
+    xyz = np.array([r[1:4] for r in rows], float)
+    assert [r[5] for r in rows] == ["scan0", "scan1"] and not any(r[4] for r in rows)  # stations: names, no speed
     assert np.abs(xyz - [[3.0, 4.0, 1.5], [25.0, -7.0, 1.6]]).max() < 0.02
 
 
@@ -61,14 +63,14 @@ def test_tls_merged_cloud_is_split_at_time_jumps(tmp_path):
         setattr(merged, name, np.concatenate([np.asarray(getattr(a, name)), np.asarray(getattr(b, name))]))
     merged.write(tmp_path / "m.laz")
     assert main([str(tmp_path / "m.laz"), "-o", str(tmp_path / "s.csv"), "--platform", "static"]) == 0
-    xyz = np.array([r[1:] for r in _read(tmp_path / "s.csv")[1]], float)
+    xyz = np.array([r[1:4] for r in _read(tmp_path / "s.csv")[1]], float)
     assert np.abs(xyz - [[0.0, 0.0, 1.5], [20.0, 0.0, 1.5]]).max() < 0.02
 
 
 def test_tls_single_return_falls_back_to_density(tmp_path):
     scan(tmp_path / "a.laz", (3.0, 4.0, 1.5), single_return=True, seed=1, rays=200000)
     assert main([str(tmp_path / "a.laz"), "-o", str(tmp_path / "s.csv"), "--platform", "static"]) == 0
-    xyz = np.array([r[1:] for r in _read(tmp_path / "s.csv")[1]], float)
+    xyz = np.array([r[1:4] for r in _read(tmp_path / "s.csv")[1]], float)
     assert np.hypot(xyz[0, 0] - 3.0, xyz[0, 1] - 4.0) < 1.0
     report = json.loads((tmp_path / "s.report.json").read_text())
     assert report["method"] == "density"
