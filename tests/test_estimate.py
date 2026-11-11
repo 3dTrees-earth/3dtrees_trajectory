@@ -26,7 +26,8 @@ def test_flight_multi_return_recovers_path_to_centimetres(tmp_path):
     report = json.loads((tmp_path / "p.report.json").read_text())
     assert report["platform"] == "mobile" and report["method"] == "lines"
     text = (tmp_path / "p.csv").read_text()
-    assert "# quality: good" in text and "# platform: mobile" in text and "miss_m:" in text
+    assert "# quality: good" in text and "# platform: mobile" in text and "miss_m" not in text
+    assert report["median_miss_m"] < 0.05 and report["typical_error_m"] == "0.01"
 
 
 def test_flight_single_return_uses_scan_angle_and_warns(tmp_path):

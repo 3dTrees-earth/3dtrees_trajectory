@@ -17,7 +17,7 @@ FORMAT = "3dtrees-trajectory/1"
 TYPICAL_ERROR_M = {"lines": "0.01", "scan_angle": "1 horizontal, 0.1 vertical", "density": "0.5 horizontal"}
 
 
-def _header(info: CloudInfo, result: Result, quality_label: str, median_miss: float | None) -> list[str]:
+def _header(info: CloudInfo, result: Result, quality_label: str) -> list[str]:
     """The converter's keys, then the estimate's own (extra ``#`` lines; the platform's reader skips unknown keys)."""
     time_system = info.time_system if _has_times(info, result) else "none"
     lines = [f"# format: {FORMAT}", f"# crs: {info.crs}", "# vertical_crs: unknown", f"# time_system: {time_system}"]
@@ -25,10 +25,7 @@ def _header(info: CloudInfo, result: Result, quality_label: str, median_miss: fl
         lines.append("# gps_week: unknown")
     lines += [f"# source_layout: estimated_{result.method}", f"# source_file: {Path(info.files[0]).name}",
               f"# converter: 3dtrees_trajectory {__version__}",
-              "# estimated: true", f"# platform: {result.platform}", f"# method: {result.method}", f"# quality: {quality_label}",
-              f"# typical_error_m: {TYPICAL_ERROR_M[result.method]}"]
-    if median_miss is not None:
-        lines.append(f"# median_miss_m: {median_miss:.4f}")
+              "# estimated: true", f"# platform: {result.platform}", f"# method: {result.method}", f"# quality: {quality_label}"]
     if result.method == "density":
         lines.append("# z: ground under the scanner")
     return lines
@@ -52,11 +49,9 @@ def speeds(time: np.ndarray, xyz: np.ndarray, gap: float = 5.0) -> np.ndarray:
 def write_csv(path: Path, info: CloudInfo, result: Result) -> None:
     """One layout for paths and stations: ``time,x,y,z,speed_m_s,scan``. The first four columns are the standard's,
     so readers that take them by position are unaffected. A path leaves ``scan`` empty; a station has its scan name,
-    the mean GPS time of its pulses (empty without GPS time) and no speed. How well the pulse lines meet is only
-    summarised in the header (``median_miss_m``)."""
-    miss = np.array([f.miss for f in result.fits], float)
-    median = float(np.nanmedian(miss)) if np.isfinite(miss).any() else None
-    rows = _header(info, result, quality(result, miss), median)
+    the mean GPS time of its pulses (empty without GPS time) and no speed. How well the pulse lines meet (median
+    miss, typical error) is in the report, not the CSV."""
+    rows = _header(info, result, quality(result, np.array([f.miss for f in result.fits], float)))
     rows.append("time,x,y,z,speed_m_s,scan")
     timed = _has_times(info, result)
     time = np.array([f.time for f in result.fits], float)
@@ -97,6 +92,7 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
         "multi_return_share": round(multi_share, 4),
         "positions": len(result.fits),
         "median_miss_m": None if not np.isfinite(miss).any() else round(float(np.nanmedian(miss)), 4),
+        "typical_error_m": TYPICAL_ERROR_M[result.method],
         "quality": quality(result, miss),
         "warnings": result.warnings,
     }
