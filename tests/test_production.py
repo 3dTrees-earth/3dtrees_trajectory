@@ -81,6 +81,8 @@ def test_laz_traversal_recovers_bounded_separated_echoes(tmp_path, monkeypatch):
     expected, _ = trace(original)
     actual, recovered = trace(separated)
     assert recovered["recovered_echoes"] > 100 and recovered["unpaired_echoes"] == 0
+    endpoints, info = pulses.read_pulses([separated], full=True)
+    assert len(endpoints) == len(time) and info.unpaired_multi_echoes == 0
     for a, b in zip(expected, actual):
         np.testing.assert_array_equal(a, b)
 

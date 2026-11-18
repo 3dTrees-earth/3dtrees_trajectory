@@ -29,7 +29,7 @@ import numpy as np
 from laspy.copc import Bounds
 
 from .cloud import CHUNK, TimeSortedCopc, is_copc, point_chunks, pulse_chunks, sorted_copc
-from .pulses import Pulses, _crs, _sample, _time_system
+from .pulses import MAX_STRAY, Pulses, _crs, _sample, _time_system
 from .resources import RunResources
 
 FILLED, EMPTY, OCCLUDED, UNOBSERVED = 1, 2, 3, 4  # OccPy's classes
@@ -41,7 +41,9 @@ HARD_BUDGET = 64 * GIB
 GRID_BYTES_PER_VOXEL = 72
 GRID_BYTES_PER_COLUMN = 320
 WORKING_BYTES = 2 * GIB
-MAX_FRAGMENT_ECHOES = 5_000_000
+MAX_FRAGMENT_ECHOES = MAX_STRAY
+FRAGMENT_BYTES_PER_ECHO = 112
+FRAGMENT_BATCH = 1_000_000
 WINDOW = 128  # XY block size for deriving and writing the products
 BAND_M = 1.0  # height band of the COG
 SPIKE_M = 2.0  # a lowest-hit ground this far above its neighbourhood is vegetation, not ground
@@ -176,14 +178,23 @@ def _trace_multi(tracer, coords, sensor, time, rn, nr, source, channel, ordered=
 
 
 def _recover_fragments(tracer, fragments, time, xyz) -> int:
-    values = [np.concatenate(parts) for parts in zip(*fragments)]
-    x, y, z, t, rn, nr, source, channel = values
+    x, y, z, t, rn, nr, source, channel = (np.concatenate(parts) for parts in zip(*fragments))
+    fragments.clear()
     order = np.lexsort((rn, channel, source, t))
-    coords = [axis[order] for axis in (x, y, z)]
-    t = t[order]
-    unpaired = _trace_multi(tracer, coords, _positions(t, time, xyz), t, rn[order], nr[order],
-                            source[order], channel[order], ordered=True)
-    return int(unpaired.sum())
+    ordered_time = t[order]
+    start = unpaired = 0
+    while start < len(order):
+        nominal_stop = min(len(order), start + FRAGMENT_BATCH)
+        stop = int(np.searchsorted(ordered_time, ordered_time[nominal_stop - 1], side="right"))
+        if stop - start > 2 * FRAGMENT_BATCH:
+            raise ValueError("Too many separated echoes share a GPS time to reconstruct the LAZ pulses safely.")
+        idx, times = order[start:stop], ordered_time[start:stop]
+        coords = [axis[idx] for axis in (x, y, z)]
+        missing = _trace_multi(tracer, coords, _positions(times, time, xyz), times, rn[idx], nr[idx],
+                                source[idx], channel[idx], ordered=True)
+        unpaired += int(missing.sum())
+        start = stop
+    return unpaired
 
 
 def _trace_file(path: Path, tracer, grid: Grid, time: np.ndarray, xyz: np.ndarray, counters: dict,
@@ -397,14 +408,14 @@ def _extent_pass(paths, grid, time, xyz, dtm, crs_wkt, include_sample, stats):
     return cropped, high - offset, ground, spikes, percentile
 
 
-def _grid_bytes(shape, whole_columns=0):
+def _grid_bytes(shape, whole_columns=0, fragment_bytes=0):
     nx, ny, _ = shape
-    return WORKING_BYTES + GRID_BYTES_PER_VOXEL * math.prod(shape) + GRID_BYTES_PER_COLUMN * nx * ny + 32 * whole_columns
+    return WORKING_BYTES + fragment_bytes + GRID_BYTES_PER_VOXEL * math.prod(shape) + GRID_BYTES_PER_COLUMN * nx * ny + 32 * whole_columns
 
 
-def _tile_layout(grid, budget, buffer_m):
+def _tile_layout(grid, budget, buffer_m, fragment_bytes=0):
     nx, ny, nz = grid.shape
-    if _grid_bytes(grid.shape, nx * ny) <= budget:
+    if _grid_bytes(grid.shape, nx * ny, fragment_bytes) <= budget:
         return [(slice(0, nx), slice(0, ny))], 0
     halo = min(math.ceil(buffer_m / grid.voxel), math.floor(100.0 / grid.voxel + 1e-12))
     # Use the full length if one XY axis already fits across the buffered tile.
@@ -413,7 +424,7 @@ def _tile_layout(grid, budget, buffer_m):
 
     # Use the hard allowance for the smallest tile when the requested buffer
     # and the global surfaces alone exceed the soft target.
-    minimum = _grid_bytes(footprint(1), nx * ny)
+    minimum = _grid_bytes(footprint(1), nx * ny, fragment_bytes)
     if minimum > HARD_BUDGET:
         raise ValueError(f"Even a one-column occlusion tile with the {buffer_m:.1f} m buffer "
                          "would exceed 64 GiB; increase --voxel or restrict the acquisition.")
@@ -421,7 +432,7 @@ def _tile_layout(grid, budget, buffer_m):
     low, high = 1, max(nx, ny)
     while low < high:
         middle = (low + high + 1) // 2
-        if _grid_bytes(footprint(middle), nx * ny) <= budget:
+        if _grid_bytes(footprint(middle), nx * ny, fragment_bytes) <= budget:
             low = middle
         else:
             high = middle - 1
@@ -431,7 +442,7 @@ def _tile_layout(grid, budget, buffer_m):
             for x in range(0, nx, low) for y in range(0, ny, low)], halo
 
 
-def _traversal_tiles(paths, grid, time, xyz, layout, halo, prepared, work, resources, counters):
+def _traversal_tiles(paths, grid, time, xyz, layout, halo, prepared, work, resources, counters, fragment_bytes):
     tiled = len(layout) > 1
     for number, core in enumerate(layout):
         x, y = core
@@ -443,7 +454,7 @@ def _traversal_tiles(paths, grid, time, xyz, layout, halo, prepared, work, resou
         bounds = Bounds(origin[:2], grid.origin[:2] + end * grid.voxel) if tiled else None
         with _stage(resources, "traversal") as stage:
             stage.update(tile=number + 1, grid_voxels=math.prod(tile.shape),
-                         estimated_grid_bytes=_grid_bytes(tile.shape, math.prod(grid.shape[:2])))
+                         estimated_grid_bytes=_grid_bytes(tile.shape, math.prod(grid.shape[:2]), fragment_bytes))
             if bounds is not None and prepared is not None:
                 with TemporaryDirectory(dir=work, prefix="tile-sort-") as folder:
                     selected = TimeSortedCopc(paths[0], Path(folder), CHUNK, bounds)
@@ -599,7 +610,7 @@ def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, re
 def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: Path, voxel: float = 0.5,
         dtm: Path | None = None, scratch: Path | None = None, source: str = "estimated", *,
         quality: str | None = None, delivered_check: dict | None = None, prepared: TimeSortedCopc | None = None,
-        budget: int = DEFAULT_BUDGET, resources: RunResources | None = None) -> dict:
+        budget: int = DEFAULT_BUDGET, resources: RunResources | None = None, fragment_echoes: int | None = None) -> dict:
     """Trace, classify and write both products; returns the report section."""
     validate_trajectory(time, xyz)
     scratch = scratch or copc.parent
@@ -614,11 +625,18 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         work = Path(folder)
         with _stage(resources, "grid extent/crop pass") as stage:
             full_grid, crs_wkt = _grid(paths, voxel)
-            sample = _grid_bytes(full_grid.shape, math.prod(full_grid.shape[:2])) > budget
+            if stream is None and fragment_echoes is None:
+                fragment_echoes = 0
+                for path in paths:
+                    with laspy.open(path, read_evlrs=False) as reader:
+                        fragment_echoes = max(fragment_echoes, reader.header.point_count)
+            fragment_bytes = (0 if stream is not None
+                              else FRAGMENT_BYTES_PER_ECHO * min(fragment_echoes, MAX_FRAGMENT_ECHOES))
+            sample = _grid_bytes(full_grid.shape, math.prod(full_grid.shape[:2]), fragment_bytes) > budget
             grid, top, ground, spikes, percentile = _extent_pass(paths, full_grid, time, xyz, dtm, crs_wkt, sample, stage)
         ground_source = "dtm" if dtm is not None else "lowest_hit"
         buffer = min(100.0, percentile)
-        layout, halo = _tile_layout(grid, budget, buffer)
+        layout, halo = _tile_layout(grid, budget, buffer, fragment_bytes)
         if stream is not None and len(layout) > 1:
             # Tiles reread and sort their COPC windows. The acquisition sort
             # used to estimate/check the path is no longer needed.
@@ -632,7 +650,8 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             if flag is not None:
                 tags["OCCLUSION_DELIVERED_MISS_MEDIAN_M"] = str(delivered_check["median_m"])
         staged_copc, staged_cog = work / "voxels.copc.laz", Path(cog_folder) / "occlusion.tif"
-        tiles = _traversal_tiles(paths, grid, time, xyz, layout, halo, stream, work, resources, counters)
+        tiles = _traversal_tiles(paths, grid, time, xyz, layout, halo, stream, work, resources, counters,
+                                 fragment_bytes)
         products = _write_products(grid, tiles, top, ground, staged_copc, staged_cog, crs_wkt, tags, work, resources)
         os.replace(staged_copc, copc)
         os.replace(staged_cog, cog)

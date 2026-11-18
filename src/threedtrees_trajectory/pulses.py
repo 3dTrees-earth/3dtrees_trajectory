@@ -64,6 +64,9 @@ class CloudInfo:
     incomplete_multi_pulses: int = 0
     multi_pulses: int = 0
     joined_out_of_order_points: int = 0
+    fragment_echoes: int = 0
+    complete_multi_echoes: int = 0
+    unpaired_multi_echoes: int = 0
 
     @classmethod
     def from_paths(cls, paths: list[Path]) -> CloudInfo:
@@ -103,7 +106,7 @@ class _Store:
         return np.empty((0, width) if width else 0, dtype)
 
 
-def _join_stray(stray: _Store, pulses: _Store) -> None:
+def _join_stray(stray: _Store, pulses: _Store) -> tuple[int, int]:
     """Recover separated returns only when their complete, unambiguous sequence is present."""
     t, xyz, number = stray.array("time", np.float64), stray.array("xyz", np.float32, 3), stray.array("number", np.uint8)
     source, file, angle = stray.array("source", np.uint16), stray.array("file", np.uint16), stray.array("angle", np.float32)
@@ -120,6 +123,7 @@ def _join_stray(stray: _Store, pulses: _Store) -> None:
     start, end = start[good], end[good]
     pulses.add(time=t[start], first=xyz[order[start]], last=xyz[order[end]],
                returns=(end - start + 1).astype(np.uint8), source=source[start], file=file[start], angle=angle[order[start]])
+    return len(start), int((end - start + 1).sum())
 
 
 def _sample(time: np.ndarray, stride: int) -> np.ndarray:
@@ -182,11 +186,13 @@ def _collect_chunk(chunk: laspy.ScaleAwarePointRecord, time: np.ndarray, file: i
     counts += [int(complete.sum()), int(single.sum())]
     info.incomplete_multi_pulses += int(incomplete.sum())
     info.multi_pulses += int(complete.sum())
+    sizes = end - start + 1
+    info.fragment_echoes += int(sizes[incomplete].sum())
+    info.complete_multi_echoes += int(sizes[complete].sum())
     keep = (complete & _sample(time[start], multi_every)) | (single & _sample(time[start], single_every))
     lone_idx = None
     # Retain every record of any incomplete LAZ pulse so it can be repaired.
     if not copc and incomplete.any():
-        sizes = end - start + 1
         lone_idx = np.flatnonzero(np.repeat(incomplete & _sample(time[start], multi_every), sizes))
     start, end = start[keep], end[keep]
     first = _coordinates(chunk, start, shift)
@@ -296,13 +302,14 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
     if time_min == time_max:
         raise ValueError("GPS time must vary across the input points.")
 
+    recovered_echoes = 0
     if stray_count:
         info.joined_out_of_order_points = stray_count
-        before = sum(map(len, pulses.columns["time"]))
-        _join_stray(stray, pulses)
-        recovered = sum(map(len, pulses.columns["time"])) - before
-        counts[0] += recovered * info.kept_every[0]
-    if info.incomplete_multi_pulses > max(100, 2 * int(counts[0])):
+        recovered_pulses, sampled_echoes = _join_stray(stray, pulses)
+        counts[0] += recovered_pulses * info.kept_every[0]
+        recovered_echoes = min(info.fragment_echoes, sampled_echoes * info.kept_every[0])
+    info.unpaired_multi_echoes = info.fragment_echoes - recovered_echoes
+    if info.unpaired_multi_echoes > max(200, info.complete_multi_echoes + recovered_echoes):
         raise ValueError("Too many declared multi-return records cannot be paired. Check return numbering and GPS time "
                          "or provide the original LAS/LAZ strips in acquisition order.")
     angle = pulses.array("angle", np.float32)

@@ -103,6 +103,7 @@ def refusal(info: CloudInfo, pulses: Pulses | None, reason: str) -> dict:
             "complete_multi_pulses": info.multi_pulses,
             "incomplete_multi_pulses": info.incomplete_multi_pulses,
             "out_of_order_records_sampled": info.joined_out_of_order_points,
+            "unpaired_multi_echoes": info.unpaired_multi_echoes,
         },
         "quality": "none",
         "error": reason,

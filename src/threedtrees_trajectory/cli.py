@@ -179,13 +179,14 @@ def main(argv: list[str] | None = None) -> int:
                     "has_scan_angle": pulses.has_scan_angle, "complete_multi_pulses": info.multi_pulses,
                     "incomplete_multi_pulses": info.incomplete_multi_pulses,
                     "out_of_order_records_sampled": info.joined_out_of_order_points,
+                    "unpaired_multi_echoes": info.unpaired_multi_echoes,
                 }
             except (OSError, ValueError, MemoryError, LaspyException, LazrsError, StructError, EOFError) as error:
                 error_message = str(error) or "The job could not read its input or ran out of memory."
         if error_message is None and occlusion_paths:
             path_inputs = _occlusion_path(args, result, pulses, resources)
             pulses = None
-            data["occlusion"] = _occlusion(args, path_inputs, prepared, resources)
+            data["occlusion"] = _occlusion(args, path_inputs, prepared, resources, info.fragment_echoes)
             if "error" in data["occlusion"]:
                 if result is None:
                     error_message = data["occlusion"]["error"]
@@ -246,7 +247,7 @@ def _occlusion_path(args, result, pulses, resources):
     return time, xyz, result.method, None
 
 
-def _occlusion(args, path_inputs, prepared, resources) -> dict:
+def _occlusion(args, path_inputs, prepared, resources, fragment_echoes) -> dict:
     """Run the occlusion part; a failure is reported in its section instead of failing the trajectory."""
     from laspy.errors import LaspyException
     from lazrs import LazrsError
@@ -261,7 +262,7 @@ def _occlusion(args, path_inputs, prepared, resources) -> dict:
             args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=float(args.voxel),
             dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
             quality="rough" if method == "scan_angle" else None, delivered_check=check, prepared=prepared,
-            budget=int(args.grid_memory_gib * 2**30), resources=resources,
+            budget=int(args.grid_memory_gib * 2**30), resources=resources, fragment_echoes=fragment_echoes,
         )
     except (OSError, ValueError, MemoryError, ImportError, LaspyException, LazrsError) as error:
         return {**({"delivered_path_check": check} if check else {}),
