@@ -146,6 +146,21 @@ def test_buffered_tiles_match_single_grid_on_short_rays(tmp_path, monkeypatch):
     assert abs(reference["occluded_share"] - tiled["occluded_share"]) <= 0.01
 
 
+def test_tiled_plan_crops_the_local_terrain_envelope(monkeypatch):
+    monkeypatch.setattr(occlusion, "WORKING_BYTES", 0)
+    grid = occlusion.Grid(np.zeros(3), (80, 60, 150), 1)
+    ground = np.broadcast_to(np.where(np.arange(80) < 40, 1, 120)[:, None], grid.shape[:2])
+    top = ground + 10
+    budget = occlusion._grid_bytes((40, 60, 16), 80 * 60)
+    layout, halo = occlusion._tile_layout(grid, top, ground, budget, 0)
+    assert len(layout) == 2 and halo == 0
+    for tile in layout:
+        xy = tile.extent[:2]
+        assert tile.extent[2].start == ground[xy].min() - 1
+        assert tile.extent[2].stop > top[xy].max()
+        assert tile.shape[2] < 16
+
+
 @needs_untwine
 def test_delivered_miss_flag_is_written_without_replacing_path(tmp_path):
     import rasterio

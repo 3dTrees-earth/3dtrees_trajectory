@@ -413,47 +413,61 @@ def _grid_bytes(shape, whole_columns=0, fragment_bytes=0):
     return WORKING_BYTES + fragment_bytes + GRID_BYTES_PER_VOXEL * math.prod(shape) + GRID_BYTES_PER_COLUMN * nx * ny + 32 * whole_columns
 
 
-def _tile_layout(grid, budget, buffer_m, fragment_bytes=0):
+@dataclass(frozen=True)
+class Tile:
+    core: tuple[slice, slice]
+    extent: tuple[slice, slice, slice]
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return tuple(part.stop - part.start for part in self.extent)
+
+
+def _tile_layout(grid, top, ground, budget, buffer_m, fragment_bytes=0):
     nx, ny, nz = grid.shape
+    core = (slice(0, nx), slice(0, ny))
     if _grid_bytes(grid.shape, nx * ny, fragment_bytes) <= budget:
-        return [(slice(0, nx), slice(0, ny))], 0
+        return [Tile(core, (*core, slice(0, nz)))], 0
     halo = min(math.ceil(buffer_m / grid.voxel), math.floor(100.0 / grid.voxel + 1e-12))
-    # Use the full length if one XY axis already fits across the buffered tile.
-    def footprint(edge):
-        return min(nx, edge + 2 * halo), min(ny, edge + 2 * halo), nz
-
-    # Use the hard allowance for the smallest tile when the requested buffer
-    # and the global surfaces alone exceed the soft target.
-    minimum = _grid_bytes(footprint(1), nx * ny, fragment_bytes)
-    if minimum > HARD_BUDGET:
-        raise ValueError(f"Even a one-column occlusion tile with the {buffer_m:.1f} m buffer "
-                         "would exceed 64 GiB; increase --voxel or restrict the acquisition.")
-    budget = max(budget, minimum)
-    low, high = 1, max(nx, ny)
-    while low < high:
-        middle = (low + high + 1) // 2
-        if _grid_bytes(footprint(middle), nx * ny, fragment_bytes) <= budget:
-            low = middle
+    minimum = _grid_bytes((min(nx, 1 + 2 * halo), min(ny, 1 + 2 * halo), nz), nx * ny, fragment_bytes)
+    budget = max(budget, min(minimum, HARD_BUDGET))
+    layout, pending = [], [core]
+    while pending:
+        core = pending.pop()
+        if (top[core] < 0).all():
+            continue
+        buffered = tuple(slice(max(0, part.start - halo), min(size, part.stop + halo))
+                         for part, size in zip(core, (nx, ny)))
+        low = math.floor((float(ground[buffered].min()) - 1 - grid.origin[2]) / grid.voxel)
+        bottom = min(nz - 1, max(0, low))
+        high = math.ceil(float(top[buffered].max()) + 0.5 + 1 / grid.voxel)
+        tile = Tile(core, (*buffered, slice(bottom, min(nz, max(bottom + 1, high)))))
+        amount = _grid_bytes(tile.shape, nx * ny, fragment_bytes)
+        if amount <= budget:
+            layout.append(tile)
         else:
-            high = middle - 1
-    if -(-nx // low) * -(-ny // low) > 10_000:
-        raise ValueError("The occlusion grid requires more than 10,000 tiles; increase --voxel or the grid budget.")
-    return [(slice(x, min(nx, x + low)), slice(y, min(ny, y + low)))
-            for x in range(0, nx, low) for y in range(0, ny, low)], halo
+            axis = int(core[1].stop - core[1].start > core[0].stop - core[0].start)
+            part = core[axis]
+            middle = (part.start + part.stop) // 2
+            if middle == part.start:
+                raise ValueError(f"Even a one-column occlusion tile with the {buffer_m:.1f} m buffer "
+                                 "would exceed 64 GiB; increase --voxel or restrict the acquisition.")
+            for split in (slice(middle, part.stop), slice(part.start, middle)):
+                pending.append((split, core[1]) if axis == 0 else (core[0], split))
+        if len(layout) + len(pending) > 10_000:
+            raise ValueError("The occlusion grid requires more than 10,000 tiles; increase --voxel or the grid budget.")
+    return layout, halo
 
 
-def _traversal_tiles(paths, grid, time, xyz, layout, halo, prepared, work, resources, counters, fragment_bytes):
-    tiled = len(layout) > 1
-    for number, core in enumerate(layout):
-        x, y = core
-        start = np.maximum([x.start - halo, y.start - halo], 0)
-        end = np.minimum([x.stop + halo, y.stop + halo], grid.shape[:2])
-        origin = grid.origin.copy()
-        origin[:2] += start * grid.voxel
-        tile = Grid(origin, (*map(int, end - start), grid.shape[2]), grid.voxel)
-        bounds = Bounds(origin[:2], grid.origin[:2] + end * grid.voxel) if tiled else None
+def _traversal_tiles(paths, grid, time, xyz, layout, prepared, tiled, work, resources, counters, fragment_bytes):
+    for number, plan in enumerate(layout):
+        start = np.array([part.start for part in plan.extent])
+        origin = grid.origin + start * grid.voxel
+        tile = Grid(origin, plan.shape, grid.voxel)
+        upper = origin[:2] + np.array(tile.shape[:2]) * grid.voxel
+        bounds = Bounds(origin[:2], upper) if tiled else None
         with _stage(resources, "traversal") as stage:
-            stage.update(tile=number + 1, grid_voxels=math.prod(tile.shape),
+            stage.update(tile=number + 1, grid_voxels=math.prod(tile.shape), grid_shape=list(tile.shape),
                          estimated_grid_bytes=_grid_bytes(tile.shape, math.prod(grid.shape[:2]), fragment_bytes))
             if bounds is not None and prepared is not None:
                 with TemporaryDirectory(dir=work, prefix="tile-sort-") as folder:
@@ -465,8 +479,9 @@ def _traversal_tiles(paths, grid, time, xyz, layout, halo, prepared, work, resou
                 stage["bytes_read"] = (prepared.bytes_written if prepared is not None
                                        else sum(p.stat().st_size for p in paths))
                 counts = _trace_grid(paths, tile, time, xyz, counters, prepared=prepared, bounds=bounds)
-        keep = (slice(x.start - start[0], x.stop - start[0]), slice(y.start - start[1], y.stop - start[1]))
-        yield core, tuple(a[keep] for a in counts)
+        keep = tuple(slice(part.start - offset, part.stop - offset)
+                     for part, offset in zip(plan.core, start[:2]))
+        yield plan.core, plan.extent[2], tuple(a[keep] for a in counts)
         del counts
 
 
@@ -562,7 +577,7 @@ def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, re
         with laspy.open(flat, "w", header=_copc_header(grid, crs_wkt)) as writer, rasterio.open(raster, "w", **profile) as out:
             out.descriptions = tuple(names)
             out.update_tags(OCCLUSION_BAND_M=str(BAND_M), **tags, OCCLUSION_VALUE="occluded / (filled + empty + occluded)")
-            for number, (core, counts) in enumerate(tiles):
+            for number, (core, z, counts) in enumerate(tiles):
                 with _stage(resources, "classify + ground") as stage:
                     stage["tile"] = number + 1
                     offset = np.array([part.start for part in core])
@@ -571,15 +586,15 @@ def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, re
                         local_counts = tuple(count[xy] for count in counts)
                         xs, ys = tuple(slice(part.start + start, part.stop + start) for part, start in zip(xy, offset))
                         hits = local_counts[0] > 0
-                        local_top = np.where(hits.any(axis=2), nz - 1 - hits[:, :, ::-1].argmax(axis=2), -1)
-                        heights = (centres - ground[xs, ys, None]).astype(np.float32)
+                        local_top = np.where(hits.any(axis=2), z.stop - 1 - hits[:, :, ::-1].argmax(axis=2), -1)
+                        heights = (centres[z] - ground[xs, ys, None]).astype(np.float32)
                         threshold = np.minimum(top[xs, ys], local_top)
-                        inside = (heights >= 0) & (layers <= threshold[:, :, None])
+                        inside = (heights >= 0) & (layers[z] <= threshold[:, :, None])
                         if not inside.any():
                             continue
                         classes = classify(*local_counts)
                         classes_total += np.bincount(classes[inside], minlength=5)
-                        _write_voxels(writer, grid, (xs, ys), centres, heights, classes, inside, local_counts)
+                        _write_voxels(writer, grid, (xs, ys), centres[z], heights, classes, inside, local_counts)
                         shares, seen, hidden = _band_shares(classes, heights, inside, n_bands)
                         out.write(shares, window=Window(xs.start, ny - ys.stop, xs.stop - xs.start, ys.stop - ys.start))
                         seen_total += seen
@@ -636,8 +651,9 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             grid, top, ground, spikes, percentile = _extent_pass(paths, full_grid, time, xyz, dtm, crs_wkt, sample, stage)
         ground_source = "dtm" if dtm is not None else "lowest_hit"
         buffer = min(100.0, percentile)
-        layout, halo = _tile_layout(grid, budget, buffer, fragment_bytes)
-        if stream is not None and len(layout) > 1:
+        layout, halo = _tile_layout(grid, top, ground, budget, buffer, fragment_bytes)
+        tiled = _grid_bytes(grid.shape, math.prod(grid.shape[:2]), fragment_bytes) > budget
+        if stream is not None and tiled:
             # Tiles reread and sort their COPC windows. The acquisition sort
             # used to estimate/check the path is no longer needed.
             stream.discard()
@@ -650,7 +666,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             if flag is not None:
                 tags["OCCLUSION_DELIVERED_MISS_MEDIAN_M"] = str(delivered_check["median_m"])
         staged_copc, staged_cog = work / "voxels.copc.laz", Path(cog_folder) / "occlusion.tif"
-        tiles = _traversal_tiles(paths, grid, time, xyz, layout, halo, stream, work, resources, counters,
+        tiles = _traversal_tiles(paths, grid, time, xyz, layout, stream, tiled, work, resources, counters,
                                  fragment_bytes)
         products = _write_products(grid, tiles, top, ground, staged_copc, staged_cog, crs_wkt, tags, work, resources)
         os.replace(staged_copc, copc)
