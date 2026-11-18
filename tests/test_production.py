@@ -164,6 +164,17 @@ def test_tiled_plan_crops_the_local_terrain_envelope(monkeypatch):
         assert tile.shape[2] < 16
 
 
+def test_copc_tiles_stay_within_native_echo_count():
+    grid = occlusion.Grid(np.zeros(3), (80, 64, 20), 1)
+    ground = np.zeros(grid.shape[:2])
+    top = np.full(grid.shape[:2], 10)
+    echo_bins = np.full((5, 4), 150_000_000, np.int64)
+    layout, _ = occlusion._tile_layout(grid, top, ground, occlusion.DEFAULT_BUDGET, 0, echo_bins=echo_bins)
+    assert echo_bins.sum() > occlusion.NATIVE_ECHO_LIMIT
+    assert len(layout) == 2
+    assert all(tile.echo_upper_bound <= occlusion.NATIVE_ECHO_LIMIT for tile in layout)
+
+
 @needs_untwine
 def test_delivered_miss_flag_is_written_without_replacing_path(tmp_path):
     import rasterio

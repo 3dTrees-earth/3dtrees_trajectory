@@ -87,7 +87,8 @@ each column at its highest registered hit. If the estimate for the cropped grid 
 Each tile uses its local ground and canopy envelope to size the vertical grid.
 It estimates the buffer from the 99.9th percentile of horizontal ray distance through the vegetation band on a
 deterministic 1% pulse sample, rounds to a voxel boundary, and caps the applied halo at 100 m. An unworkable grid under the
-64 GiB planning ceiling fails with a report. COPC tiles use octree spatial reads. LAS/LAZ tiles scan the strips in
+64 GiB planning ceiling fails with a report. COPC jobs above the native echo count limit also use a
+spatial count bound to size tiles. COPC tiles use octree spatial reads. LAS/LAZ tiles scan the strips in
 their original order. Rays longer than the buffer and non-collinear returns can change results near tile seams.
 
 The delivered path is used for every occlusion ray when supplied. The report and COG metadata flag a median

@@ -44,6 +44,8 @@ WORKING_BYTES = 2 * GIB
 MAX_FRAGMENT_ECHOES = MAX_STRAY
 FRAGMENT_BYTES_PER_ECHO = 112
 FRAGMENT_BATCH = 1_000_000
+NATIVE_ECHO_LIMIT = int(np.iinfo(np.int32).max)
+ECHO_BIN = 16
 WINDOW = 128  # XY block size for deriving and writing the products
 BAND_M = 1.0  # height band of the COG
 SPIKE_M = 2.0  # a lowest-hit ground this far above its neighbourhood is vegetation, not ground
@@ -57,6 +59,7 @@ class Grid:
     origin: np.ndarray  # min x, y, z of the grid
     shape: tuple[int, int, int]
     voxel: float
+    points: int = 0
 
 
 def read_trajectory(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -104,7 +107,7 @@ def _grid(paths: list[Path], voxel: float) -> tuple[Grid, str | None]:
     lo = np.floor(lo / voxel) * voxel
     # Include returns at the maximum, even when it falls on a voxel face.
     shape = tuple(math.floor(float(n)) + 1 for n in np.round((hi - lo) / voxel, 9))
-    return Grid(lo, shape, voxel), crs.to_wkt() if crs else None
+    return Grid(lo, shape, voxel, point_count), crs.to_wkt() if crs else None
 
 
 def validate_trajectory(time: np.ndarray, xyz: np.ndarray) -> None:
@@ -215,7 +218,7 @@ def _trace_file(path: Path, tracer, grid: Grid, time: np.ndarray, xyz: np.ndarra
             continue
         t = np.ascontiguousarray(t[keep])
         traced_records += len(t)
-        if traced_records > np.iinfo(np.int32).max:
+        if traced_records > NATIVE_ECHO_LIMIT:
             raise ValueError("More than 2.1 billion echoes in one traversal. Reduce --grid-memory-gib "
                              "to use smaller tiles or split the acquisition.")
         # OccPy normalises by the box size before flooring. Nudge exact faces
@@ -353,7 +356,7 @@ def _stage(resources, name, **kwargs):
     return resources.stage(name, **kwargs) if resources is not None else nullcontext({})
 
 
-def _extent_pass(paths, grid, time, xyz, dtm, crs_wkt, include_sample, stats, prepared=None):
+def _extent_pass(paths, grid, time, xyz, dtm, crs_wkt, include_sample, stats, prepared=None, echo_bins=None):
     nx, ny, nz = grid.shape
     if nx * ny * 96 > HARD_BUDGET - WORKING_BYTES or nz > np.iinfo(np.int32).max:
         raise ValueError(f"The occlusion extent {grid.shape} exceeds the 64 GiB surface budget; "
@@ -375,6 +378,9 @@ def _extent_pass(paths, grid, time, xyz, dtm, crs_wkt, include_sample, stats, pr
             flat = cells[:, 0] * ny + cells[:, 1]
             np.minimum.at(low, flat, cells[:, 2])
             np.maximum.at(high, flat, cells[:, 2])
+            if echo_bins is not None:
+                bins = (cells[:, 0] // ECHO_BIN) * echo_bins.shape[1] + cells[:, 1] // ECHO_BIN
+                echo_bins += np.bincount(bins, minlength=echo_bins.size).reshape(echo_bins.shape)
             if include_sample:
                 pulse_t = t[keep]
                 samples = (np.asarray(chunk.return_number)[keep] <= 1) & _sample(pulse_t, 100)
@@ -419,17 +425,22 @@ def _grid_bytes(shape, whole_columns=0, fragment_bytes=0):
 class Tile:
     core: tuple[slice, slice]
     extent: tuple[slice, slice, slice]
+    echo_upper_bound: int | None = None
 
     @property
     def shape(self) -> tuple[int, int, int]:
         return tuple(part.stop - part.start for part in self.extent)
 
 
-def _tile_layout(grid, top, ground, budget, buffer_m, fragment_bytes=0):
+def _tile_layout(grid, top, ground, budget, buffer_m, fragment_bytes=0, echo_bins=None):
     nx, ny, nz = grid.shape
     core = (slice(0, nx), slice(0, ny))
-    if _grid_bytes(grid.shape, nx * ny, fragment_bytes) <= budget:
-        return [Tile(core, (*core, slice(0, nz)))], 0
+    total_echoes = int(echo_bins.sum()) if echo_bins is not None else None
+    if (_grid_bytes(grid.shape, nx * ny, fragment_bytes) <= budget
+            and (total_echoes is None or total_echoes <= NATIVE_ECHO_LIMIT)):
+        return [Tile(core, (*core, slice(0, nz)), total_echoes)], 0
+    prefix = (np.pad(echo_bins.cumsum(axis=0).cumsum(axis=1), ((1, 0), (1, 0)))
+              if echo_bins is not None else None)
     halo = min(math.ceil(buffer_m / grid.voxel), math.floor(100.0 / grid.voxel + 1e-12))
     minimum = _grid_bytes((min(nx, 1 + 2 * halo), min(ny, 1 + 2 * halo), nz), nx * ny, fragment_bytes)
     budget = max(budget, min(minimum, HARD_BUDGET))
@@ -443,15 +454,26 @@ def _tile_layout(grid, top, ground, budget, buffer_m, fragment_bytes=0):
         low = math.floor((float(ground[buffered].min()) - 1 - grid.origin[2]) / grid.voxel)
         bottom = min(nz - 1, max(0, low))
         high = math.ceil(float(top[buffered].max()) + 0.5 + 1 / grid.voxel)
-        tile = Tile(core, (*buffered, slice(bottom, min(nz, max(bottom + 1, high)))))
+        upper_bound = None
+        if prefix is not None:
+            # The spatial query includes points on the upper faces. Cover
+            # every intersecting bin to bound the number of input echoes.
+            x, y = buffered
+            x0, y0 = x.start // ECHO_BIN, y.start // ECHO_BIN
+            x1 = min(prefix.shape[0] - 1, x.stop // ECHO_BIN + 1)
+            y1 = min(prefix.shape[1] - 1, y.stop // ECHO_BIN + 1)
+            upper_bound = int(prefix[x1, y1] - prefix[x0, y1] - prefix[x1, y0] + prefix[x0, y0])
+        tile = Tile(core, (*buffered, slice(bottom, min(nz, max(bottom + 1, high)))), upper_bound)
         amount = _grid_bytes(tile.shape, nx * ny, fragment_bytes)
-        if amount <= budget:
+        if amount <= budget and (upper_bound is None or upper_bound <= NATIVE_ECHO_LIMIT):
             layout.append(tile)
         else:
             axis = int(core[1].stop - core[1].start > core[0].stop - core[0].start)
             part = core[axis]
             middle = (part.start + part.stop) // 2
             if middle == part.start:
+                if upper_bound is not None and upper_bound > NATIVE_ECHO_LIMIT:
+                    raise ValueError("A buffered tile exceeds the native 2.1 billion-echo limit. Split the acquisition.")
                 raise ValueError(f"Even a one-column occlusion tile with the {buffer_m:.1f} m buffer "
                                  "would exceed 64 GiB; increase --voxel or restrict the acquisition.")
             for split in (slice(middle, part.stop), slice(part.start, middle)):
@@ -471,6 +493,8 @@ def _traversal_tiles(paths, grid, time, xyz, layout, prepared, tiled, work, reso
         with _stage(resources, "traversal") as stage:
             stage.update(tile=number + 1, grid_voxels=math.prod(tile.shape), grid_shape=list(tile.shape),
                          estimated_grid_bytes=_grid_bytes(tile.shape, math.prod(grid.shape[:2]), fragment_bytes))
+            if plan.echo_upper_bound is not None:
+                stage["echo_upper_bound"] = plan.echo_upper_bound
             if bounds is not None and prepared is not None:
                 with TemporaryDirectory(dir=work, prefix="tile-sort-") as folder:
                     selected = TimeSortedCopc(paths[0], Path(folder), CHUNK, bounds)
@@ -649,15 +673,20 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
                         fragment_echoes = max(fragment_echoes, reader.header.point_count)
             fragment_bytes = (0 if stream is not None
                               else FRAGMENT_BYTES_PER_ECHO * min(fragment_echoes, MAX_FRAGMENT_ECHOES))
-            sample = _grid_bytes(full_grid.shape, math.prod(full_grid.shape[:2]), fragment_bytes) > budget
+            echo_bins = None
+            if stream is not None and full_grid.points > NATIVE_ECHO_LIMIT:
+                dimensions = tuple(-(-length // ECHO_BIN) for length in full_grid.shape[:2])
+                echo_bins = np.zeros(dimensions, np.int64)
+            sample = (_grid_bytes(full_grid.shape, math.prod(full_grid.shape[:2]), fragment_bytes) > budget
+                      or echo_bins is not None)
             grid, top, ground, spikes, percentile = _extent_pass(paths, full_grid, time, xyz, dtm, crs_wkt,
-                                                                  sample, stage, prepared=stream)
+                                                                  sample, stage, prepared=stream, echo_bins=echo_bins)
             buffer = min(100.0, percentile)
-            layout, halo = _tile_layout(grid, top, ground, budget, buffer, fragment_bytes)
+            layout, halo = _tile_layout(grid, top, ground, budget, buffer, fragment_bytes, echo_bins)
             stage.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape),
                          planned_tiles=len(layout), buffer_m=halo * grid.voxel)
         ground_source = "dtm" if dtm is not None else "lowest_hit"
-        tiled = _grid_bytes(grid.shape, math.prod(grid.shape[:2]), fragment_bytes) > budget
+        tiled = len(layout) != 1 or layout[0].shape != grid.shape
         if stream is not None and tiled:
             # Tiles reread and sort their COPC windows. The acquisition sort
             # used to estimate/check the path is no longer needed.
