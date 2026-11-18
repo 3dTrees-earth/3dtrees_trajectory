@@ -47,7 +47,8 @@ def test_static_scans_are_refused(tmp_path, capsys):
     scan(tmp_path / "b.laz", (25.0, -7.0, 1.6), seed=2)
     assert main([str(tmp_path / "a.laz"), str(tmp_path / "b.laz"), "-o", str(tmp_path / "s.csv")]) == 2
     assert "static (TLS)" in capsys.readouterr().err
-    assert not (tmp_path / "s.csv").exists()
+    assert (tmp_path / "s.csv").stat().st_size == 0
+    assert (tmp_path / "s.geojson").stat().st_size == 0
     assert json.loads((tmp_path / "s.report.json").read_text())["quality"] == "none"
 
 

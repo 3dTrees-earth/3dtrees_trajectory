@@ -3,13 +3,15 @@ share; this tool writes paths) and a JSON quality report."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 
 from . import __version__
 from .estimate import Result
-from .pulses import CloudInfo
+from .pulses import CloudInfo, Pulses
 
 FORMAT = "3dtrees-trajectory/2"
 COLUMNS = "time,x,y,z,roll,pitch,yaw,name"
@@ -20,7 +22,7 @@ TYPICAL_ERROR_M = {"lines": "0.01", "scan_angle": "1 horizontal, 0.1 vertical"}
 
 def _header(info: CloudInfo, result: Result, quality_label: str) -> list[str]:
     """The standard's keys, then the estimate's own (``method``, ``quality``)."""
-    time_system = info.time_system if _has_times(info, result) else "none"
+    time_system = info.time_system
     lines = [f"# format: {FORMAT}", "# kind: path", "# origin: estimated", f"# crs: {info.crs}",
              "# vertical_crs: unknown", f"# time_system: {time_system}"]
     if time_system == "gps_sow":
@@ -31,10 +33,6 @@ def _header(info: CloudInfo, result: Result, quality_label: str) -> list[str]:
     return lines
 
 
-def _has_times(info: CloudInfo, result: Result) -> bool:
-    return info.time_system != "none" and all(f.time for f in result.fits)
-
-
 def write_csv(path: Path, info: CloudInfo, result: Result) -> None:
     """``time,x,y,z,roll,pitch,yaw,name``, the layout delivered paths and scan positions share; the name comes last so
     readers that take time, x, y, z by position are unaffected. A path leaves the name empty. Roll, pitch and yaw stay
@@ -42,12 +40,11 @@ def write_csv(path: Path, info: CloudInfo, result: Result) -> None:
     (in the report)."""
     rows = _header(info, result, quality(result, np.array([f.miss for f in result.fits], float)))
     rows.append(COLUMNS)
-    timed = _has_times(info, result)
+    timed = info.time_system != "none"
     for f in result.fits:
         x, y, z = f.xyz
         rows.append(f"{f'{f.time:.6f}' if timed else ''},{x:.4f},{y:.4f},{z:.4f},,,,")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    _write_text(path, "\n".join(rows) + "\n")
 
 
 def quality(result: Result, miss: np.ndarray) -> str:
@@ -90,7 +87,7 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
     return out
 
 
-def refusal(info: CloudInfo, pulses, reason: str) -> dict:
+def refusal(info: CloudInfo, pulses: Pulses | None, reason: str) -> dict:
     """Report for a cloud the tool can't estimate from: what it found, and why it stopped."""
     return {
         "tool": f"3dtrees_trajectory {__version__}",
@@ -98,18 +95,34 @@ def refusal(info: CloudInfo, pulses, reason: str) -> dict:
         "points": info.points,
         "crs": info.crs,
         "time_system": info.time_system,
-        "multi_return_share": round(pulses.multi_share, 4),
-        "has_gps_time": pulses.has_time,
-        "has_scan_angle": pulses.has_scan_angle,
+        "multi_return_share": round(pulses.multi_share, 4) if pulses is not None else None,
+        "has_gps_time": pulses.has_time if pulses is not None else None,
+        "has_scan_angle": pulses.has_scan_angle if pulses is not None else None,
         "positions": 0,
         "quality": "none",
         "error": reason,
     }
 
 
-def write_report(path: Path, data: dict) -> None:
+def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+    temporary = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def write_empty(path: Path) -> None:
+    _write_text(path, "")
+
+
+def write_report(path: Path, data: dict) -> None:
+    _write_text(path, json.dumps(data, indent=1, allow_nan=False) + "\n")
 
 
 def geojson(info: CloudInfo, result: Result, gap: float = 5.0, spacing: float = 1.0) -> dict:
@@ -121,7 +134,7 @@ def geojson(info: CloudInfo, result: Result, gap: float = 5.0, spacing: float = 
     known = info.crs != "unknown" and len(xyz)
     if known:
         from pyproj import Transformer
-        lon, lat = Transformer.from_crs(info.crs, "EPSG:4326", always_xy=True).transform(xyz[:, 0], xyz[:, 1])
+        lon, lat = Transformer.from_crs(info.crs, "EPSG:4326", always_xy=True).transform(xyz[:, 0], xyz[:, 1], errcheck=True)
         lonlat = np.c_[lon, lat]
     digits = 7 if known else 3
     properties = {"estimated": True, "method": result.method,
@@ -140,15 +153,15 @@ def geojson(info: CloudInfo, result: Result, gap: float = 5.0, spacing: float = 
             if len(keep) > 1:
                 lines.append([[round(float(a), digits), round(float(b), digits), round(float(z), 2)]
                               for (a, b), z in zip(lonlat[keep], xyz[keep, 2])])
-        features.append({"type": "Feature", "geometry": {"type": "MultiLineString", "coordinates": lines},
-                         "properties": properties | {"time_start": float(time.min()), "time_end": float(time.max()),
-                                                     "time_system": info.time_system, "segments": len(lines)}})
+        if lines:
+            features.append({"type": "Feature", "geometry": {"type": "MultiLineString", "coordinates": lines},
+                             "properties": properties | {"time_start": float(time.min()), "time_end": float(time.max()),
+                                                         "time_system": info.time_system, "segments": len(lines)}})
     return {"type": "FeatureCollection", "features": features}
 
 
 def write_geojson(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, separators=(",", ":")) + "\n", encoding="utf-8")
+    _write_text(path, json.dumps(data, separators=(",", ":"), allow_nan=False) + "\n")
 
 
 def geojson_from_csv(path: Path) -> dict:

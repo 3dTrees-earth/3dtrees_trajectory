@@ -29,12 +29,28 @@ class Fit:
     miss: float  # median distance of the used pulses from the fit, metres (method-specific)
 
 
-def _lines(p: Pulses, min_length: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    first, last = p.first.astype(np.float64), p.last.astype(np.float64)
-    line = first - last
+def _line_vectors(p: Pulses, index: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    first = p.first[index].astype(np.float64)
+    line = first - p.last[index]
     length = np.linalg.norm(line, axis=1)
-    keep = p.multi & (length >= min_length)
-    return first[keep], line[keep] / length[keep, None], p.time[keep]
+    return first, line, length
+
+
+def _line_indices(p: Pulses, min_length: float, group: np.ndarray | None = None) -> np.ndarray:
+    """Find usable lines in bounded batches while preserving the original pulse order."""
+    parts = []
+    count = len(p) if group is None else len(group)
+    block = 500_000
+    for lo in range(0, count, block):
+        hi = min(lo + block, count)
+        if group is None:
+            index = lo + np.flatnonzero(p.returns[lo:hi] > 1)
+        else:
+            index = group[lo:hi]
+            index = index[p.returns[index] > 1]
+        _, _, length = _line_vectors(p, index)
+        parts.append(index[length >= min_length])
+    return np.concatenate(parts) if parts else np.empty(0, dtype=np.intp)
 
 
 def _closest_point(origin: np.ndarray, direction: np.ndarray, dt: np.ndarray | None, cond_max: float):
@@ -79,17 +95,21 @@ def fit_lines(origin: np.ndarray, direction: np.ndarray, time: np.ndarray, movin
 
 def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_length: float = 1.0) -> list[Fit]:
     """Moving sensor: one position (with velocity) per time window and point source."""
-    origin, direction, time = _lines(p, min_length)
-    source = p.source[p.multi & (np.linalg.norm(p.first.astype(np.float64) - p.last, axis=1) >= min_length)]
-    window = np.floor(time / interval).astype(np.int64)
+    index = _line_indices(p, min_length)
+    if len(index) < min_pulses:
+        return []
+    source = p.source[index]
+    window = np.floor(p.time[index] / interval).astype(np.int64)
     order = np.lexsort((source, window))
-    origin, direction, time, source, window = origin[order], direction[order], time[order], source[order], window[order]
+    index, source, window = index[order], source[order], window[order]
     starts = np.flatnonzero(np.r_[True, (window[1:] != window[:-1]) | (source[1:] != source[:-1])])
     fits = []
-    for lo, hi in zip(starts, np.r_[starts[1:], len(time)]):
+    for lo, hi in zip(starts, np.r_[starts[1:], len(index)]):
         if hi - lo < min_pulses:
             continue
-        fit = fit_lines(origin[lo:hi], direction[lo:hi], time[lo:hi], True, min_pulses)
+        selected = index[lo:hi]
+        origin, line, length = _line_vectors(p, selected)
+        fit = fit_lines(origin, line / length[:, None], p.time[selected], True, min_pulses)
         if fit is not None:
             fits.append(fit)
     # A window whose lines don't meet (median miss 0.7-30 m against 0.02 m) fitted noise or mixed pulses: drop it.
@@ -99,33 +119,33 @@ def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_
     return sorted(fits, key=lambda f: f.time)
 
 
-def station_from_lines(p: Pulses, min_pulses: int = 2000, min_length: float = 0.5, max_pulses: int = 200_000) -> Fit | None:
-    """One fixed position from the lines of one scan, to recognise a static scanner (an even sample of at most ``max_pulses``; more add
-    nothing to a fit that is already good to about 1 cm)."""
-    origin, direction, time = _lines(p, min_length)
-    if len(origin) < min_pulses:
+def station_from_lines(p: Pulses, min_pulses: int = 2000, min_length: float = 0.5,
+                       max_pulses: int = 200_000, *, group: np.ndarray | None = None) -> Fit | None:
+    """One fixed position from an even sample of lines to recognise a static scanner."""
+    index = _line_indices(p, min_length, group)
+    if len(index) < min_pulses:
         return None
-    if len(origin) > max_pulses:
-        pick = np.random.default_rng(0).choice(len(origin), max_pulses, replace=False)
-        origin, direction, time = origin[pick], direction[pick], time[pick]
-    return fit_lines(origin, direction, time, False, min_pulses)
+    if len(index) > max_pulses:
+        index = index[np.random.default_rng(0).choice(len(index), max_pulses, replace=False)]
+    origin, line, length = _line_vectors(p, index)
+    return fit_lines(origin, line / length[:, None], p.time[index], False, min_pulses)
 
 
 def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200) -> list[Fit]:
     """Moving sensor, single returns: per window, the position from which each point is seen at its scan angle."""
-    xyz, time = p.first.astype(np.float64), p.time
-    tangent = np.tan(np.radians(np.abs(p.scan_angle.astype(float))))
-    centre = xyz.mean(axis=0)
-    rel = xyz - centre
-    order = np.argsort(time, kind="stable")
-    rel, time, tangent = rel[order], time[order], tangent[order]
+    # Preserve the mean reduction order, but expand coordinates and angles only for the current window.
+    centre = p.first.astype(np.float64).mean(axis=0)
+    order = np.argsort(p.time, kind="stable")
+    time = p.time[order]
     window = np.floor(time / interval).astype(np.int64)
     starts = np.flatnonzero(np.r_[True, window[1:] != window[:-1]])
     fits = []
     for lo, hi in zip(starts, np.r_[starts[1:], len(time)]):
         if hi - lo < min_pulses:
             continue
-        x, y, z, tn = rel[lo:hi, 0], rel[lo:hi, 1], rel[lo:hi, 2], tangent[lo:hi]
+        selected = order[lo:hi]
+        x, y, z = (p.first[selected].astype(np.float64) - centre).T
+        tn = np.tan(np.radians(np.abs(p.scan_angle[selected].astype(float))))
         dt = time[lo:hi] - time[lo:hi].mean()
 
         def residual(q, x=x, y=y, z=z, tn=tn, dt=dt):
@@ -153,12 +173,8 @@ def _peak(points: np.ndarray, cell: float, smooth: float, extent_max: float) -> 
     return lo[0] + (i + 0.5) * cell, lo[1] + (j + 0.5) * cell
 
 
-def _near_ground(p: Pulses, ground_band: float, max_points: int) -> np.ndarray:
-    """Points within ``ground_band`` above the local ground (5th percentile height per 1 m column), from an even
-    sample of at most ``max_points`` points."""
-    xyz = p.first
-    if len(xyz) > max_points:
-        xyz = xyz[np.random.default_rng(0).choice(len(xyz), max_points, replace=False)]
+def _near_ground(xyz: np.ndarray, ground_band: float) -> np.ndarray:
+    """Points within the ground band above the 5th percentile height per 1 m column."""
     xyz = xyz.astype(np.float64)
     gx, gy = np.floor(xyz[:, 0]).astype(np.int64), np.floor(xyz[:, 1]).astype(np.int64)
     key = (gx - gx.min()) * (gy.max() - gy.min() + 1) + (gy - gy.min())
@@ -171,11 +187,16 @@ def _near_ground(p: Pulses, ground_band: float, max_points: int) -> np.ndarray:
     return xyz[xyz[:, 2] - ground < ground_band]
 
 
-def density_concentration(p: Pulses, radius: float = 5.0, max_points: int = 2_000_000) -> float:
+def density_concentration(p: Pulses, radius: float = 5.0, max_points: int = 2_000_000,
+                          *, group: np.ndarray | None = None) -> float:
     """How strongly near-ground points pile up around one spot: their share within ``radius`` of the density peak,
     over the share an even spread over the covered ground would give. A static scanner's density falls with range,
     so its scans score far higher than a flight or a walk, whose density is even along the path."""
-    near = _near_ground(p, 0.5, max_points)
+    size = len(p) if group is None else len(group)
+    if size > max_points:
+        pick = np.random.default_rng(0).choice(size, max_points, replace=False)
+        group = pick if group is None else group[pick]
+    near = _near_ground(p.first if group is None else p.first[group], 0.5)
     if len(near) < 1000:
         return 0.0
     cx, cy = _peak(near[:, :2], 0.5, 2.0, 500.0)
@@ -193,11 +214,14 @@ def drop_outliers(fits: list[Fit], window: float = 1.5, limit: float = 1.0) -> l
     time = np.array([f.time for f in fits])
     xyz = np.array([f.xyz for f in fits])
     keep = np.ones(len(fits), bool)
-    for i, t in enumerate(time):
-        before = (time >= t - window) & (time < t)
-        after = (time > t) & (time <= t + window)
-        if before.sum() < 2 or after.sum() < 2:
-            continue
+    before_start = np.searchsorted(time, time - window, side="left")
+    before_end = np.searchsorted(time, time, side="left")
+    after_start = np.searchsorted(time, time, side="right")
+    after_end = np.searchsorted(time, time + window, side="right")
+    for i in np.flatnonzero((before_end - before_start >= 2) & (after_end - after_start >= 2)):
+        t = time[i]
+        before = slice(before_start[i], before_end[i])
+        after = slice(after_start[i], after_end[i])
         tb, ta = np.median(time[before]), np.median(time[after])
         pb, pa = np.median(xyz[before], axis=0), np.median(xyz[after], axis=0)
         expected = pb + (pa - pb) * (t - tb) / (ta - tb)
