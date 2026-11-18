@@ -175,12 +175,14 @@ tiles, so one point can contribute to multiple tiles.
 | 1807 YellowScan | COPC | 52.7 M | 15.8 M | 2 | 176.9 | 3.16 | 3.19 |
 | 2014 DJI L3 | LAZ | 52.7 M | 773.2 M | 9 | 451.9 | 6.61 | 6.76 |
 | 2014 DJI L3 | COPC | 52.7 M | 773.2 M | 9 | 452.8 | 9.30 | 10.18 |
+| 1844 YellowScan | LAZ | 678.1 M | 203.6 M | 2 | 1440.1 | 7.58 | 14.96 |
+| 1844 YellowScan | COPC | 678.1 M | 203.6 M | 2 | 1901.9 | 6.24 | 32.57 |
 
 ## Galaxy resource proposal
 
 Use the cropped buffered tile size for memory planning. The tool estimates `2 GiB + 72 × tile voxels
-+ 320 × tile XY columns + 32 × acquisition XY columns` bytes, plus a reserve for separated LAZ echoes. Allow separate headroom for the path solver,
-the job runtime and COPC file cache. COPC acquisition sorting also needs about 38 GB of working disk per
++ 320 × tile XY columns + 32 × acquisition XY columns` bytes, plus up to 4.2 GiB for separated LAZ
+echoes. Allow separate headroom for the path solver, the job runtime and COPC file cache. COPC acquisition sorting also needs about 38 GB of working disk per
 billion points. With tiled LAZ, budget time for a complete scan per tile. With tiled COPC, budget for one
 acquisition sort and spatial reads and sorts for the buffered tiles.
 
