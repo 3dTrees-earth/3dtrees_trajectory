@@ -200,7 +200,7 @@ def _occlusion(args, result, voxel: float) -> dict:
             source = "estimated"
         return occlusion.run(args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=voxel,
                              dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source=source)
-    except (OSError, ValueError, MemoryError, LaspyException, LazrsError) as error:
+    except (OSError, ValueError, MemoryError, ImportError, LaspyException, LazrsError) as error:
         return {"error": str(error) or "The occlusion step ran out of memory."}
 
 
