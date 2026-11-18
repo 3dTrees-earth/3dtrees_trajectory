@@ -6,10 +6,10 @@ NumberOfReturns wrongly, so the file order is what ties a pulse together. Some s
 acquisition order (2587, LiDAR360); records of a multi-return pulse that end up alone are then collected and joined
 by GPS time and point source after reading.
 
-Memory stays bounded: coordinates are float32 relative to ``origin`` (sub-millimetre within 10 km), and at most
-MAX_MULTI multi-return and MAX_SINGLE single-return pulses are kept, as every n-th pulse so the whole acquisition
-time stays covered; a cloud whose first million points hold no multi-return pulses keeps MAX_SINGLE_ONLY single
-returns instead. ``full`` keeps every pulse.
+Coordinates use float32 relative to a common kilometre-aligned origin. The default budgets keep approximately
+MAX_MULTI multi-return and MAX_SINGLE single-return pulses with a deterministic timestamp hash. A cloud whose
+first million points hold few multi-return pulses uses the MAX_SINGLE_ONLY single-return budget. ``full``
+keeps every pulse.
 """
 from __future__ import annotations
 
@@ -23,14 +23,13 @@ from lazrs import LazrsError
 from pyproj import CRS
 from pyproj.exceptions import CRSError
 
-CHUNK = 5_000_000
+from .cloud import CHUNK, is_copc, open_cloud, point_chunks, pulse_chunks, sorted_copc
+
 PROBE = 1_000_000  # points read first to tell a single-return cloud
 MAX_MULTI = 40_000_000
 MAX_SINGLE = 10_000_000  # single returns next to multi-return pulses
 MAX_SINGLE_ONLY = 40_000_000  # clouds without multi-return pulses, where single returns are all there is
 MAX_STRAY = 40_000_000  # separate limit for records that need a global sort to reconstruct pulses
-LAZ_FIELDS = (laspy.DecompressionSelection.base().decompress_z().decompress_gps_time()
-              .decompress_scan_angle().decompress_point_source_id())
 
 
 @dataclass
@@ -62,6 +61,9 @@ class CloudInfo:
     files: list[str]
     kept_every: tuple[int, int] = (1, 1)  # (multi-return, single-return) pulse strides
     points_read: int = 0
+    incomplete_multi_pulses: int = 0
+    multi_pulses: int = 0
+    joined_out_of_order_points: int = 0
 
     @classmethod
     def from_paths(cls, paths: list[Path]) -> CloudInfo:
@@ -73,14 +75,6 @@ def _crs(header: laspy.LasHeader) -> CRS | None:
         return header.parse_crs()
     except (CRSError, ValueError):
         return None  # a malformed CRS record leaves the CRS unknown
-
-
-def _open(path: Path) -> laspy.LasReader:
-    reader = laspy.open(path, decompression_selection=LAZ_FIELDS)
-    if any(type(vlr).__name__ == "CopcInfoVlr" for vlr in reader.header.vlrs):
-        # COPC uses variable-sized chunks, which break the parallel decoder.
-        reader.laz_backend = laspy.LazBackend.Lazrs
-    return reader
 
 
 def _time_system(header: laspy.LasHeader, names: set[str]) -> str:
@@ -110,16 +104,34 @@ class _Store:
 
 
 def _join_stray(stray: _Store, pulses: _Store) -> None:
-    """Pulses from lone records: same file, source and GPS time, first and last by return number."""
+    """Recover separated returns only when their complete, unambiguous sequence is present."""
     t, xyz, number = stray.array("time", np.float64), stray.array("xyz", np.float32, 3), stray.array("number", np.uint8)
     source, file, angle = stray.array("source", np.uint16), stray.array("file", np.uint16), stray.array("angle", np.float32)
-    order = np.lexsort((number, t, source, file))
-    t, source, file = t[order], source[order], file[order]
-    same = (t[1:] == t[:-1]) & (source[1:] == source[:-1]) & (file[1:] == file[:-1])
+    total, channel = stray.array("total", np.uint8), stray.array("channel", np.uint8)
+    order = np.lexsort((number, channel, t, source, file))
+    t, source, file, channel = t[order], source[order], file[order], channel[order]
+    same = (t[1:] == t[:-1]) & (source[1:] == source[:-1]) & (file[1:] == file[:-1]) & (channel[1:] == channel[:-1])
+    # A repeated/skipped return number invalidates the complete group.
+    sequential = np.diff(number[order].astype(np.int16)) == 1
     start = np.flatnonzero(np.r_[True, ~same])
     end = np.r_[start[1:], len(t)] - 1
-    pulses.add(time=t[start], first=xyz[order[start]], last=xyz[order[end]], returns=np.minimum(end - start + 1, 255).astype(np.uint8),
-               source=source[start], file=file[start], angle=angle[order[start]])
+    broken = np.logical_or.reduceat(np.r_[same & ~sequential, False], start)
+    good = (~broken) & (number[order[start]] == 1) & (end - start + 1 == total[order[start]])
+    start, end = start[good], end[good]
+    pulses.add(time=t[start], first=xyz[order[start]], last=xyz[order[end]],
+               returns=(end - start + 1).astype(np.uint8), source=source[start], file=file[start], angle=angle[order[start]])
+
+
+def _sample(time: np.ndarray, stride: int) -> np.ndarray:
+    if stride == 1:
+        return np.ones(len(time), bool)
+    # A deterministic hash of the timestamp, independent of COPC order, file
+    # boundaries, and whether a return had to be joined out of order.
+    key = time.view(np.uint64).copy()
+    key ^= key >> 33
+    key *= np.uint64(0xff51afd7ed558ccd)
+    key ^= key >> 33
+    return key % stride == 0
 
 
 def _looks_single_return(chunk: laspy.ScaleAwarePointRecord) -> bool:
@@ -145,25 +157,37 @@ def _angles(chunk: laspy.ScaleAwarePointRecord, index: np.ndarray) -> np.ndarray
 
 
 def _collect_chunk(chunk: laspy.ScaleAwarePointRecord, time: np.ndarray, file: int, shift: np.ndarray,
-                   strides: tuple[int, int], counts: np.ndarray, pulses: _Store, stray: _Store) -> int:
+                   strides: tuple[int, int], counts: np.ndarray, pulses: _Store, stray: _Store, info: CloudInfo,
+                   copc: bool) -> int:
     multi_every, single_every = strides
-    rn = np.asarray(chunk.return_number)
+    rn, nr = np.asarray(chunk.return_number), np.asarray(chunk.number_of_returns)
     source = chunk.point_source_id
-    joined = (time[1:] == time[:-1]) & (source[1:] == source[:-1]) & (rn[1:] == rn[:-1] + 1)
+    channel = np.asarray(chunk.scanner_channel) if chunk.point_format.id >= 6 else np.zeros(len(chunk), np.uint8)
+    same = (time[1:] == time[:-1]) & (source[1:] == source[:-1]) & (channel[1:] == channel[:-1])
+    joined = same & (rn[1:] == rn[:-1] + 1)
     start = np.flatnonzero(np.r_[True, ~joined])
     end = np.r_[start[1:], len(chunk)] - 1
-    single = start == end
-    # A lone record of a multi-return pulse has its partners elsewhere in the file.
-    lone = single & (np.asarray(chunk.number_of_returns)[start] > 1)
-    keep = np.zeros(len(start), bool)
-    multi_idx, single_idx = np.flatnonzero(~single), np.flatnonzero(single & ~lone)
-    counts += [len(multi_idx) + int(lone.sum()) // 2, len(single_idx)]
-    keep[multi_idx[::multi_every]] = True
-    keep[single_idx[::single_every]] = True
-    lone_idx = start[lone]
-    if multi_every > 1:
-        # Thin by time so a pulse's records are kept or dropped together.
-        lone_idx = lone_idx[time[lone_idx].view(np.int64) % multi_every == 0]
+    single = (start == end) & (rn[start] <= 1) & (nr[start] <= 1)
+    complete = ((start != end) & (rn[start] == 1) & ((nr[start] <= 1) | (rn[end] == nr[start])))
+    if copc:
+        # Time/source/channel only identify one multi-return shot when each
+        # declared return has a unique number in the group.
+        repeated = same & (rn[1:] == rn[:-1]) & ((nr[1:] > 1) | (nr[:-1] > 1))
+        if repeated.any():
+            groups = np.cumsum(np.r_[0, ~same], dtype=np.int64)
+            ambiguous = np.zeros(groups[-1] + 1, bool)
+            ambiguous[groups[:-1][repeated]] = True
+            complete &= ~ambiguous[groups[start]]
+    incomplete = ~single & ~complete
+    counts += [int(complete.sum()), int(single.sum())]
+    info.incomplete_multi_pulses += int(incomplete.sum())
+    info.multi_pulses += int(complete.sum())
+    keep = (complete & _sample(time[start], multi_every)) | (single & _sample(time[start], single_every))
+    lone_idx = None
+    # Retain every record of any incomplete LAZ pulse so it can be repaired.
+    if not copc and incomplete.any():
+        sizes = end - start + 1
+        lone_idx = np.flatnonzero(np.repeat(incomplete & _sample(time[start], multi_every), sizes))
     start, end = start[keep], end[keep]
     first = _coordinates(chunk, start, shift)
     multi = start != end
@@ -173,39 +197,56 @@ def _collect_chunk(chunk: laspy.ScaleAwarePointRecord, time: np.ndarray, file: i
         last[multi] = _coordinates(chunk, end[multi], shift)
     pulses.add(time=time[start], first=first, last=last, returns=(end - start + 1).astype(np.uint8),
                source=source[start], file=np.full(len(start), file, dtype=np.uint16), angle=_angles(chunk, start))
-    if len(lone_idx):
-        stray.add(time=time[lone_idx], xyz=_coordinates(chunk, lone_idx, shift), number=rn[lone_idx],
-                  source=source[lone_idx], file=np.full(len(lone_idx), file, dtype=np.uint16),
+    if lone_idx is not None and len(lone_idx):
+        stray.add(time=time[lone_idx], xyz=_coordinates(chunk, lone_idx, shift), number=rn[lone_idx], total=nr[lone_idx],
+                  channel=channel[lone_idx], source=source[lone_idx], file=np.full(len(lone_idx), file, dtype=np.uint16),
                   angle=_angles(chunk, lone_idx))
-    return len(lone_idx)
+        return len(lone_idx)
+    return 0
 
 
 def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int = MAX_SINGLE,
-                full: bool = False, *, info: CloudInfo | None = None) -> tuple[Pulses, CloudInfo]:
-    """Read LAS/LAZ pulse endpoints and retain every n-th pulse past the sampling budgets."""
+                full: bool = False, *, info: CloudInfo | None = None, prepared=None) -> tuple[Pulses, CloudInfo]:
+    """Build pulse endpoints from LAS/LAZ or a time-sorted COPC within the sampling budgets."""
     info = CloudInfo.from_paths(paths) if info is None else info
     if len(paths) > np.iinfo(np.uint16).max + 1:
         raise ValueError("At most 65,536 input files can be combined.")
+    origins = []
+    copc_paths = []
     for path in paths:
         try:
             if not path.is_file():
                 raise ValueError("Input must be an existing regular file.")
             with laspy.open(path, read_evlrs=False) as reader:
+                if reader.header.point_count:
+                    origins.append(reader.header.mins)
                 info.points += reader.header.point_count
+                if is_copc(reader.header):
+                    copc_paths.append(path)
         except (OSError, laspy.errors.LaspyException, StructError, ValueError, OverflowError, EOFError) as error:
             raise ValueError(f"{path}: unable to read the LAS/LAZ header ({error}).") from error
     if not info.points:
         raise ValueError("The cloud has no points.")
 
-    origin = crs = None
+    if copc_paths and (len(paths) != 1 or len(copc_paths) != 1):
+        raise ValueError("Use one merged COPC or a list of per-file LAS/LAZ inputs.")
+    if copc_paths and prepared is None:
+        # Library callers have the same semantics as the CLI.
+        info.points = 0
+        with sorted_copc(paths, Path.cwd(), CHUNK) as sorted_input:
+            return read_pulses(paths, max_multi, max_single, full, info=info, prepared=sorted_input)
+
+    origin = np.floor(np.min(origins, axis=0) / 1000) * 1000
+    crs = None
+    first_chunk = True
     counts = np.zeros(2, np.int64)
     pulses = _Store("time", "first", "last", "returns", "source", "file", "angle")
-    stray = _Store("time", "xyz", "number", "source", "file", "angle")
+    stray = _Store("time", "xyz", "number", "source", "file", "angle", "total", "channel")
     stray_count = 0
     time_min, time_max = np.inf, -np.inf
     for index, path in enumerate(paths):
         try:
-            with _open(path) as reader:
+            with open_cloud(path) as reader:
                 header = reader.header
                 if not header.point_count:
                     continue
@@ -230,28 +271,23 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                 if not np.isfinite(header.maxs - header.mins).all():
                     raise ValueError("LAS coordinate bounds must be finite.")
 
-                first_file = origin is None
-                if first_file:
-                    origin = header.offsets.copy()
                 shift = header.offsets - origin
-                while reader.points_read < header.point_count:
-                    expected = min(CHUNK, header.point_count - reader.points_read)
-                    chunk = reader.read_points(expected)
+                chunks = prepared.chunks() if prepared is not None else pulse_chunks(point_chunks(path, CHUNK), CHUNK)
+                for chunk in chunks:
                     info.points_read += len(chunk)
-                    if len(chunk) != expected:
-                        raise ValueError(f"Truncated point data: expected {expected:,} records, read {len(chunk):,}.")
-                    if first_file:
+                    if first_chunk:
                         single_limit = MAX_SINGLE_ONLY if _looks_single_return(chunk) else max_single
                         multi_every = 1 if full else max(1, -(-info.points // max_multi))
                         single_every = 1 if full else max(1, -(-info.points // single_limit))
                         info.kept_every = (multi_every, single_every)
-                        first_file = False
+                        first_chunk = False
                     time = chunk.gps_time
                     low, high = float(time.min()), float(time.max())
                     if not np.isfinite([low, high]).all():
                         raise ValueError("GPS times must be finite.")
                     time_min, time_max = min(time_min, low), max(time_max, high)
-                    stray_count += _collect_chunk(chunk, time, index, shift, info.kept_every, counts, pulses, stray)
+                    stray_count += _collect_chunk(chunk, time, index, shift, info.kept_every, counts, pulses, stray,
+                                                  info, prepared is not None)
                     if stray_count > MAX_STRAY:
                         raise ValueError("Too many separated multi-return records to join. Provide the original "
                                          "LAS/LAZ strips in acquisition order.")
@@ -261,7 +297,14 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
         raise ValueError("GPS time must vary across the input points.")
 
     if stray_count:
+        info.joined_out_of_order_points = stray_count
+        before = sum(map(len, pulses.columns["time"]))
         _join_stray(stray, pulses)
+        recovered = sum(map(len, pulses.columns["time"])) - before
+        counts[0] += recovered * info.kept_every[0]
+    if info.incomplete_multi_pulses > max(100, 2 * int(counts[0])):
+        raise ValueError("Too many declared multi-return records cannot be paired. Check return numbering and GPS time "
+                         "or provide the original LAS/LAZ strips in acquisition order.")
     angle = pulses.array("angle", np.float32)
     first = pulses.array("first", np.float32, 3)
     returns = pulses.array("returns", np.uint8)
