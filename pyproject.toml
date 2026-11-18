@@ -1,7 +1,7 @@
 [project]
 name = "threedtrees-trajectory"
 version = "0.1.0"
-description = "Moving lidar sensor trajectory (ULS/MLS/ALS) estimated from the point cloud alone"
+description = "Moving lidar sensor trajectory (ULS/MLS/ALS) estimated from the point cloud alone, and the occlusion along it"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -12,7 +12,11 @@ dependencies = [
   "numpy==2.3.5",
   "scipy==1.16.3",
   "pyproj==3.7.2",  # laspy needs it to read the CRS from the header
+  "rasterio==1.4.3",  # occlusion COG
 ]
+# Occlusion also needs OccPy's compiled voxel traversal and untwine (for the COPC):
+#   pip install --no-deps occpy_ls==0.3.0   (its Python layer would pull open3d, pyvista and OpenCV)
+#   untwine 1.5.1 from conda-forge at /opt/untwine/bin/untwine, or set TRAJECTORY_UNTWINE
 
 [project.optional-dependencies]
 test = ["pytest==8.3.4"]

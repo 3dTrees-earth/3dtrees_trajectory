@@ -1,4 +1,5 @@
-"""Estimate the sensor path of moving lidar (ULS, MLS, ALS) from its point cloud."""
+"""Estimate the sensor path of moving lidar (ULS, MLS, ALS) from its point cloud, and map what the sensor could not
+see (occlusion) along that path or along a delivered one."""
 from __future__ import annotations
 
 import argparse
@@ -38,14 +39,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
     parser.add_argument("--threads", help="maximum LAZ decoding threads (defaults to GALAXY_SLOTS or 8)")
     parser.add_argument("--full", action="store_true", help="keep all pulses (requires more memory)")
+    parser.add_argument("--trajectory", type=Path,
+                        help="delivered path (3Dtrees trajectory CSV); used for occlusion instead of estimating one")
+    parser.add_argument("--occlusion-copc", type=Path, help="occlusion voxels as COPC (with --occlusion-cog)")
+    parser.add_argument("--occlusion-cog", type=Path, help="occluded share per metre above ground as a multiband COG")
+    parser.add_argument("--voxel", default="0.5", help="occlusion voxel size in metres (default 0.5)")
+    parser.add_argument("--dtm", type=Path, help="terrain raster for heights above ground (default: lowest hits)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args, unknown = parser.parse_known_intermixed_args(argv)
     if args.output is None and args.report is None:
         parser.error("the following argument is required: -o/--output")
 
+    occlusion_paths = tuple(p for p in (args.occlusion_copc, args.occlusion_cog) if p is not None)
     report_path = args.report or args.output.with_suffix(".report.json")
     geojson_path = args.geojson or (args.output.with_suffix(".geojson") if args.output is not None else None)
-    products = (args.output, geojson_path) if args.output is not None else ()
+    products = ((args.output, geojson_path) if args.output is not None else ()) + occlusion_paths
     threads = None
     error_message = None
     safe_products = False
@@ -60,8 +68,18 @@ def main(argv: list[str] | None = None) -> int:
         safe_products = bool(products)
         if unknown:
             raise ValueError(f"Unrecognized arguments: {' '.join(unknown)}")
-        if args.output is None:
+        if args.output is None and args.trajectory is None:
             raise ValueError("Specify the trajectory CSV with -o/--output.")
+        if len(occlusion_paths) == 1:
+            raise ValueError("Occlusion writes both products: give --occlusion-copc and --occlusion-cog.")
+        if args.trajectory is not None and not occlusion_paths:
+            raise ValueError("A delivered --trajectory is only used for occlusion: add --occlusion-copc and --occlusion-cog.")
+        try:
+            voxel = float(args.voxel)
+        except ValueError:
+            voxel = math.nan
+        if not math.isfinite(voxel) or not 0.05 <= voxel <= 10:
+            raise ValueError("--voxel must be between 0.05 and 10 m.")
         if not args.clouds:
             raise ValueError("Provide at least one LAS/LAZ file.")
         try:
@@ -95,26 +113,40 @@ def main(argv: list[str] | None = None) -> int:
 
     info = CloudInfo.from_paths(args.clouds)
     pulses = None
+    result = None
+    data = None
     if error_message is None:
         try:
-            pulses, _ = read_pulses(args.clouds, full=args.full, info=info)
-            result = estimate(pulses, check_platform=not args.no_platform_check, interval=interval)
-            try:
-                layer = geojson(info, result)
-            except ProjError:
-                layer = None
-                result.warnings.append("The map layer could not be projected to WGS84.")
-            write_csv(args.output, info, result)
-            if layer is None or not layer["features"]:
-                write_empty(geojson_path)
+            if args.trajectory is None:
+                pulses, _ = read_pulses(args.clouds, full=args.full, info=info)
+                result = estimate(pulses, check_platform=not args.no_platform_check, interval=interval)
+                try:
+                    layer = geojson(info, result)
+                except ProjError:
+                    layer = None
+                    result.warnings.append("The map layer could not be projected to WGS84.")
+                write_csv(args.output, info, result)
+                if layer is None or not layer["features"]:
+                    write_empty(geojson_path)
+                else:
+                    write_geojson(geojson_path, layer)
+                data = report(info, result, pulses.multi_share)
             else:
-                write_geojson(geojson_path, layer)
-            data = report(info, result, pulses.multi_share)
+                data = {"tool": f"3dtrees_trajectory {__version__}", "files": info.files, "trajectory": "delivered"}
         except (OSError, ValueError, MemoryError) as error:
             error_message = str(error) or "The job ran out of memory."
+    if error_message is None and occlusion_paths:
+        data["occlusion"] = _occlusion(args, result, voxel)
+        if "error" in data["occlusion"]:
+            for path in occlusion_paths:
+                write_empty(path)
+            if result is None:
+                error_message = data["occlusion"]["error"]
+            else:
+                result.warnings.append(f"Occlusion: {data['occlusion']['error']}")
     if error_message is not None:
         print(f"error: {error_message}", file=sys.stderr)
-        data = refusal(info, pulses, error_message)
+        data = {**refusal(info, pulses, error_message), **({"occlusion": data["occlusion"]} if data and "occlusion" in data else {})}
         if safe_products:
             for path in products:
                 try:
@@ -130,10 +162,34 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     if error_message is not None:
         return 2
-    print(f"path ({result.evidence}) via {result.method}: {len(result.fits)} positions -> {args.output}")
-    for warning in result.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
+    if result is not None:
+        print(f"path ({result.evidence}) via {result.method}: {len(result.fits)} positions -> {args.output}")
+        for warning in result.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+    if occlusion_paths and "error" not in data["occlusion"]:
+        print(f"occlusion: {data['occlusion']['occluded_share']} of the observed voxels hidden -> "
+              f"{args.occlusion_copc}, {args.occlusion_cog}")
     return 0
+
+
+def _occlusion(args, result, voxel: float) -> dict:
+    """Run the occlusion part; a failure is reported in its section instead of failing the trajectory."""
+    import numpy as np
+
+    from . import occlusion
+
+    try:
+        if args.trajectory is not None:
+            time, xyz = occlusion.read_trajectory(args.trajectory)
+            source = "delivered"
+        else:
+            time = np.array([f.time for f in result.fits], float)
+            xyz = np.array([f.xyz for f in result.fits], float).reshape(-1, 3)
+            source = "estimated"
+        return occlusion.run(args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=voxel,
+                             dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source=source)
+    except (OSError, ValueError, MemoryError) as error:
+        return {"error": str(error) or "The occlusion step ran out of memory."}
 
 
 if __name__ == "__main__":
