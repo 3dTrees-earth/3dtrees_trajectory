@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!requirements.txt
+!src/
+!src/run.py
+!src/threedtrees_trajectory/
+!src/threedtrees_trajectory/*.py

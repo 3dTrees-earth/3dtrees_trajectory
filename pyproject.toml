@@ -1,11 +1,14 @@
 [project]
 name = "threedtrees-trajectory"
 version = "0.1.0"
-description = "Sensor trajectory (ULS/MLS/ALS) or scan positions (TLS) estimated from a lidar point cloud alone"
+description = "Moving lidar sensor trajectory (ULS/MLS/ALS) estimated from the point cloud alone"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
   "laspy[lazrs]==2.6.1",
+  "lazrs==0.7.0",
   "numpy==2.3.5",
   "scipy==1.16.3",
   "pyproj==3.7.2",  # laspy needs it to read the CRS from the header

@@ -1,0 +1,5 @@
+laspy[lazrs]==2.6.1
+lazrs==0.7.0
+numpy==2.3.5
+scipy==1.16.3
+pyproj==3.7.2
