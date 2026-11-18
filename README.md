@@ -36,7 +36,7 @@ existing trajectory CSV.
 | `0` | At least one valid position was estimated. |
 | `2` | Invalid arguments, unreadable or unsuitable cloud, static scan, no reliable fit, or an output write failed. The JSON report records the reason when the report path is available and writable. Safe, writable CSV and GeoJSON destinations receive zero-byte files. |
 
-Supply at least one LAS/LAZ input and an output CSV path. The CSV, GeoJSON, report and input paths must be distinct.
+Supply one to 65,536 LAS/LAZ inputs and an output CSV path. The CSV, GeoJSON, report and input paths must be distinct.
 If you set `--interval`, use a positive finite number of seconds (default 0.5). An interval must be long enough for
 the cloud's GPS times to fit into a signed 64-bit window index. `--threads` takes a positive integer.
 
@@ -70,7 +70,8 @@ the path tool's scope.
 - The default retains roughly up to 40 million multi-return pulses and 10 million single returns, or 40 million
   single returns when the first block looks single-return. The tool thins by stride across the acquisition.
   `--full` retains all pulses and requires memory proportional to the cloud size. The path fit keeps the selected
-  pulse columns and processes one fitting window at a time.
+  pulse columns and processes one fitting window at a time. Endpoint coordinates use float32 relative to the first
+  nonempty file's LAS offset. Widely separated clouds reduce sub-metre precision.
 - The report's `resources` object includes `points_read`, `wall_seconds`, `cpu_seconds`, `peak_rss_bytes`
   and `decoding_threads`. On cgroup v2 it also records current and peak memory, the local limit, and the change
   in CPU usage. Cgroup values describe the entire cgroup, including charged file cache and other processes in a
@@ -81,6 +82,22 @@ the path tool's scope.
   remove pulse structure.
 - Paths cover the times represented by points. Turns or transit legs omitted from the cloud leave gaps. GPS week
   rolls and files from different acquisitions should be processed separately.
+
+## Local replay
+
+A replay of 36 archived 3Dtrees ULS/MLS datasets matched the time and XYZ bytes of all 35 prior paths.
+Dataset 2018 reproduced its refusal because it has single returns without a usable scan angle.
+The archive and replay ran separately on geos. Replay jobs used eight decoder slots with a ten-CPU affinity mask.
+
+| Dataset | Points read | Archived → replay wall time | Archived → replay peak RSS |
+| --- | ---: | ---: | ---: |
+| 1807 YellowScan | 52.7 M | 23.14 → 11.28 s | 2.21 → 1.06 GB |
+| 2018 MLS | 1.95 B | 188.48 → 161.52 s | 6.86 → 2.70 GB |
+| 2585 DJI | 7.04 B | 646.63 → 712.40 s | 3.57 → 2.34 GB |
+
+Across all 36 jobs the median wall time was 17.06 s, compared with 26.97 s in the archive. Peak replay process
+RSS was 3.56 GB. The largest input charged 77.30 GB to its cgroup, which also accounted for file cache.
+For 2585, the delivered-path median horizontal error remains 37.8 m. Quality labels measure pulse fit residuals.
 
 ## Development and container
 
@@ -105,8 +122,8 @@ docker run --rm --name trajectory-local --user "$(id -u):$(id -g)" \
 ```
 
 A future Galaxy wrapper can pass the selected cloud files and output paths, with a positive finite interval if
-exposed. The wrapper can take slots from `GALAXY_SLOTS` and collect the three fixed outputs; sampling and platform
-diagnostic switches are CLI options. File metadata and geometry refusals are checked at runtime. A published release
-with a tag matching the CLI and package versions publishes `ghcr.io/3dtrees-earth/3dtrees_trajectory:<version>` and
-a SIF built from the same Docker digest at
+exposed. Pass `--threads "${GALAXY_SLOTS:-4}"` from the job allocation and collect the three fixed outputs.
+Keep sampling and platform diagnostics in the CLI. File metadata and geometry refusals are checked at runtime.
+A published release tag that matches the CLI and package versions publishes
+`ghcr.io/3dtrees-earth/3dtrees_trajectory:<version>` and a SIF built from the same Docker digest at
 `oras://ghcr.io/3dtrees-earth/3dtrees_trajectory:<version>-sif`.
