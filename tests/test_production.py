@@ -30,12 +30,15 @@ def test_spatial_copc_rebuilds_pulses_across_small_sort_runs(tmp_path, monkeypat
     work.mkdir()
     source = TimeSortedCopc(copc, work, 15)
     assert len(source.runs) > 100
+    assert source.keys.stat().st_size == source.points_read * np.dtype(np.float64).itemsize
     first = [chunk.gps_time.copy() for chunk in source.chunks()]
     assert max(map(len, first)) <= 15
     assert all(p[-1] < q[0] for p, q in zip(first, first[1:]))
     gps = np.concatenate(first)
     assert np.all(gps[1:] >= gps[:-1])
     assert source.points_read == len(gps)
+    from_spool = np.concatenate([chunk.gps_time for chunk in source.spooled_chunks()])
+    np.testing.assert_array_equal(np.sort(from_spool), gps)
 
     monkeypatch.setattr(pulses, "CHUNK", 15)
     a, _ = pulses.read_pulses([original], max_multi=1000, max_single=1000)

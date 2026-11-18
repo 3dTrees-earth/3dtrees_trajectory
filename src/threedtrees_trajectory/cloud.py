@@ -16,7 +16,8 @@ CHUNK = 5_000_000
 LAZ_FIELDS = (laspy.DecompressionSelection.base().decompress_z().decompress_gps_time()
               .decompress_scan_angle().decompress_point_source_id())
 FORMAT = laspy.PointFormat(6)
-SORT_BYTES_PER_POINT = FORMAT.size
+TIME_BYTES = np.dtype(np.float64).itemsize
+SORT_BYTES_PER_POINT = FORMAT.size + TIME_BYTES
 SORT_LIMIT = 750_000_000_000
 
 
@@ -129,70 +130,92 @@ class TimeSortedCopc:
                 raise ValueError(f"{path.name}: COPC time sort needs {expected / 1e9:.1f} GB of temporary disk "
                                  "within the sort budget.")
         self.path = folder / "runs.bin"
+        self.keys = folder / "times.bin"
         self.runs = []
         self.bytes_written = 0
         self.points_read = 0
         samples = []
         # Keep all sorted runs in one file. The number of runs can exceed the
         # process's file descriptor limit for billion-point acquisitions.
-        with self.path.open("xb") as spool:
+        with self.path.open("xb") as spool, self.keys.open("xb") as keys:
             for chunk in point_chunks(path, size, bounds):
                 if not np.isfinite(chunk.gps_time).all():
                     raise ValueError(f"{path.name}: GPS times must be finite.")
                 if self.bytes_written + len(chunk) * SORT_BYTES_PER_POINT > SORT_LIMIT:
                     raise ValueError(f"{path.name}: COPC time sort exceeds the temporary disk budget.")
                 data = _sorted_records(chunk)
-                self.runs.append((self.bytes_written, len(data)))
+                self.runs.append((self.points_read, len(data)))
                 data.tofile(spool)
+                # Searching an unaligned strided structured field makes NumPy
+                # copy the entire field. Contiguous keys keep each search sparse.
+                times = np.ascontiguousarray(data["gps_time"])
+                times.tofile(keys)
                 self.points_read += len(data)
-                self.bytes_written += data.nbytes
-                samples.append(data["gps_time"][::max(1, size // 256)].copy())
+                self.bytes_written += data.nbytes + times.nbytes
+                samples.append(times[::max(1, size // 256)].copy())
         n_groups = max(1, -(-self.points_read // size))
         self.edges = (np.unique(np.quantile(np.concatenate(samples), np.arange(1, n_groups) / n_groups))
                       if self.runs else np.empty(0))
 
     def discard(self) -> None:
         self.path.unlink(missing_ok=True)
+        self.keys.unlink(missing_ok=True)
 
-    def _merge(self, arrays, starts, ends):
+    def _merge(self, arrays, times, starts, ends):
         count = int(np.sum(ends - starts))
         if count == 0:
             return
         if count > self.size:
             largest = int(np.argmax(ends - starts))
-            values = arrays[largest]["gps_time"]
+            values = times[largest]
             middle = values[(starts[largest] + ends[largest]) // 2]
-            split = np.array([min(hi, max(lo, np.searchsorted(arr["gps_time"], middle, side="left")))
-                              for arr, lo, hi in zip(arrays, starts, ends)], dtype=np.int64)
+            split = np.array([min(hi, max(lo, np.searchsorted(arr, middle, side="left")))
+                              for arr, lo, hi in zip(times, starts, ends)], dtype=np.int64)
             if np.array_equal(split, starts):
-                split = np.array([min(hi, max(lo, np.searchsorted(arr["gps_time"], middle, side="right")))
-                                  for arr, lo, hi in zip(arrays, starts, ends)], dtype=np.int64)
+                split = np.array([min(hi, max(lo, np.searchsorted(arr, middle, side="right")))
+                                  for arr, lo, hi in zip(times, starts, ends)], dtype=np.int64)
             if np.array_equal(split, ends) or np.array_equal(split, starts):
                 if count > max(4096, self.size):
                     raise ValueError("Too many COPC records share a GPS timestamp to reconstruct pulses safely.")
             else:
-                yield from self._merge(arrays, starts, split)
-                yield from self._merge(arrays, split, ends)
+                yield from self._merge(arrays, times, starts, split)
+                yield from self._merge(arrays, times, split, ends)
                 return
         records = np.concatenate([arr[lo:hi] for arr, lo, hi in zip(arrays, starts, ends) if lo < hi])
         yield laspy.ScaleAwarePointRecord(_ordered(records), FORMAT, self.header.scales, self.header.offsets)
+
+    def spooled_chunks(self):
+        """Read each disk run without the merge when a scan only needs point values."""
+        with self.path.open("rb") as stream:
+            for _, size in self.runs:
+                records = np.fromfile(stream, dtype=FORMAT.dtype(), count=size)
+                if len(records) != size:
+                    raise ValueError("A temporary COPC sort run was truncated.")
+                yield laspy.ScaleAwarePointRecord(records, FORMAT, self.header.scales, self.header.offsets)
 
     def chunks(self):
         if not self.runs:
             return
         # Drop resident mapping pages after each batch while the file remains
         # available to later batches. This bounds resident sort memory.
-        with self.path.open("rb") as spool, mmap.mmap(spool.fileno(), 0, access=mmap.ACCESS_READ) as mapping:
-            arrays = [np.ndarray((size,), FORMAT.dtype(), buffer=mapping, offset=offset)
+        with self.path.open("rb") as spool, self.keys.open("rb") as key_file, \
+             mmap.mmap(spool.fileno(), 0, access=mmap.ACCESS_READ) as records, \
+             mmap.mmap(key_file.fileno(), 0, access=mmap.ACCESS_READ) as keys:
+            arrays = [np.ndarray((size,), FORMAT.dtype(), buffer=records, offset=offset * FORMAT.size)
                       for offset, size in self.runs]
+            times = [np.ndarray((size,), np.float64, buffer=keys, offset=offset * TIME_BYTES)
+                     for offset, size in self.runs]
             starts = np.zeros(len(arrays), np.int64)
             try:
                 for edge in (*self.edges, np.inf):
-                    ends = np.array([np.searchsorted(a["gps_time"], edge) for a in arrays], dtype=np.int64)
-                    yield from self._merge(arrays, starts, ends)
-                    mapping.madvise(mmap.MADV_DONTNEED)
+                    ends = np.array([np.searchsorted(t, edge) for t in times], dtype=np.int64)
+                    for batch in self._merge(arrays, times, starts, ends):
+                        yield batch
+                        records.madvise(mmap.MADV_DONTNEED)
+                        keys.madvise(mmap.MADV_DONTNEED)
                     starts = ends
             finally:
+                times.clear()
                 arrays.clear()
 
 

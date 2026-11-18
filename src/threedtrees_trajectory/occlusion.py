@@ -353,7 +353,7 @@ def _stage(resources, name, **kwargs):
     return resources.stage(name, **kwargs) if resources is not None else nullcontext({})
 
 
-def _extent_pass(paths, grid, time, xyz, dtm, crs_wkt, include_sample, stats):
+def _extent_pass(paths, grid, time, xyz, dtm, crs_wkt, include_sample, stats, prepared=None):
     nx, ny, nz = grid.shape
     if nx * ny * 96 > HARD_BUDGET - WORKING_BYTES or nz > np.iinfo(np.int32).max:
         raise ValueError(f"The occlusion extent {grid.shape} exceeds the 64 GiB surface budget; "
@@ -362,7 +362,8 @@ def _extent_pass(paths, grid, time, xyz, dtm, crs_wkt, include_sample, stats):
     high = np.full(nx * ny, -1, np.int32)
     sample_parts = []
     for path in paths:
-        for chunk in point_chunks(path, CHUNK):
+        chunks = prepared.spooled_chunks() if prepared is not None else point_chunks(path, CHUNK)
+        for chunk in chunks:
             t = chunk.gps_time
             keep = _time_mask(t, time)
             if not keep.any():
@@ -381,7 +382,8 @@ def _extent_pass(paths, grid, time, xyz, dtm, crs_wkt, include_sample, stats):
                     d = np.column_stack(_positions(pulse_t[samples], time, xyz)) - coord[samples]
                     sample_parts.append((flat[samples], (np.hypot(d[:, 0], d[:, 1]) /
                                                         np.maximum(np.abs(d[:, 2]), 1e-9)).astype(np.float32)))
-        stats["bytes_read"] = stats.get("bytes_read", 0) + path.stat().st_size
+        size = prepared.path.stat().st_size if prepared is not None else path.stat().st_size
+        stats["bytes_read"] = stats.get("bytes_read", 0) + size
     if (high < 0).all():
         raise ValueError("The point cloud and path have no overlapping GPS times. "
                          "Check GPS week seconds versus adjusted GPS time.")
@@ -648,7 +650,8 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             fragment_bytes = (0 if stream is not None
                               else FRAGMENT_BYTES_PER_ECHO * min(fragment_echoes, MAX_FRAGMENT_ECHOES))
             sample = _grid_bytes(full_grid.shape, math.prod(full_grid.shape[:2]), fragment_bytes) > budget
-            grid, top, ground, spikes, percentile = _extent_pass(paths, full_grid, time, xyz, dtm, crs_wkt, sample, stage)
+            grid, top, ground, spikes, percentile = _extent_pass(paths, full_grid, time, xyz, dtm, crs_wkt,
+                                                                  sample, stage, prepared=stream)
         ground_source = "dtm" if dtm is not None else "lowest_hit"
         buffer = min(100.0, percentile)
         layout, halo = _tile_layout(grid, top, ground, budget, buffer, fragment_bytes)

@@ -138,8 +138,9 @@ the path tool's scope.
   CPU affinity and the cgroup v2 quota. The default is eight. COPC sequential decoding and numerical reductions
   are serial.
 - The COPC input is externally sorted by GPS time, point source, scanner channel and return number in the job
-  working directory. Temporary runs use about 30 bytes per input point. When tiling, the acquisition sort
-  is released before sorting the active COPC tile. The tool removes the temporary runs on exit. GPS time groups stay together across disk runs
+  working directory. Temporary runs use about 38 bytes per input point, including contiguous time keys. When tiling, the acquisition sort
+  supplies the extent pass and is released before sorting the active COPC tile. The tool removes the
+  temporary runs on exit. GPS time groups stay together across disk runs
   and read chunks. A merged COPC must preserve return numbers, GPS time and source/channel identity. Duplicate
   multi-return numbers with the same time, source and channel are ambiguous.
 - Per-file LAS/LAZ retains the original point order and avoids the time sort. The trajectory reader can recover
@@ -178,7 +179,7 @@ tiles, so one point can contribute to multiple tiles.
 
 Use the cropped buffered tile size for memory planning. The tool estimates `2 GiB + 72 × tile voxels
 + 320 × tile XY columns + 32 × acquisition XY columns` bytes, plus a reserve for separated LAZ echoes. Allow separate headroom for the path solver,
-the job runtime and COPC file cache. COPC acquisition sorting also needs about 30 GB of working disk per
+the job runtime and COPC file cache. COPC acquisition sorting also needs about 38 GB of working disk per
 billion points. With tiled LAZ, budget time for a complete scan per tile. With tiled COPC, budget for one
 acquisition sort and spatial reads and sorts for the buffered tiles.
 
