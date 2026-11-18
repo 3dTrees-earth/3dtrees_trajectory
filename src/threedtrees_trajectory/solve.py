@@ -6,8 +6,9 @@ lines       A pulse's first and last return lie on a line through the sensor. Th
 scan_angle  Single returns with a scan angle: the sensor sits where every point is seen at its scan angle off nadir
             (a cone around each point). Level flight and a line scanner are assumed; about 1 m horizontally and
             0.1 m vertically on the RIEGL and DJI flights tested, much worse on YellowScan (8 m).
-density     Single returns of one static scan: the scanner stands where ground points are densest (they thin out
-            with range). Rough, 0.5-0.7 m on the FARO and BLK360 scans tested, and only inside the scanned area.
+
+A fixed position from all lines of a scan (``station_from_lines``) and the ground-density concentration only serve to
+recognise a static (TLS) cloud, which 1.0.0 refuses.
 """
 from __future__ import annotations
 
@@ -99,7 +100,7 @@ def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_
 
 
 def station_from_lines(p: Pulses, min_pulses: int = 2000, min_length: float = 0.5, max_pulses: int = 200_000) -> Fit | None:
-    """Static scanner: one position from the lines of one scan (an even sample of at most ``max_pulses``; more add
+    """One fixed position from the lines of one scan, to recognise a static scanner (an even sample of at most ``max_pulses``; more add
     nothing to a fit that is already good to about 1 cm)."""
     origin, direction, time = _lines(p, min_length)
     if len(origin) < min_pulses:
@@ -181,24 +182,6 @@ def density_concentration(p: Pulses, radius: float = 5.0, max_points: int = 2_00
     share = float((np.hypot(near[:, 0] - cx, near[:, 1] - cy) < radius).mean())
     covered = len(np.unique(np.floor(near[:, :2]).astype(np.int64), axis=0))  # m2 of ground with points
     return share / min(1.0, np.pi * radius**2 / max(covered, 1))
-
-
-def station_from_density(p: Pulses, cell: float = 0.1, ground_band: float = 0.5, smooth: float = 1.0,
-                         max_points: int = 5_000_000) -> Fit | None:
-    """Static scanner, single returns: the peak of near-ground point density (density falls with range).
-
-    Coarse peak on a 0.5 m grid first, then the fine peak on a ``cell`` grid within 10 m of it; at most ``max_points``
-    points (an even sample) are used, so memory stays bounded for any scan size."""
-    if len(p) < 1000:
-        return None
-    near = _near_ground(p, ground_band, max_points)
-    if len(near) < 1000:
-        return None
-    cx, cy = _peak(near[:, :2], 0.5, 2.0, 500.0)
-    close = near[np.hypot(near[:, 0] - cx, near[:, 1] - cy) < 10]
-    x, y = _peak(close[:, :2], cell, smooth, 20.0)  # smoothing bridges the blind spot under the tripod
-    z = float(np.median(near[np.hypot(near[:, 0] - x, near[:, 1] - y) < 2, 2]))
-    return Fit(float(np.median(p.time)) if p.has_time else 0.0, np.array([x, y, z]), len(near), float("nan"))
 
 
 def drop_outliers(fits: list[Fit], window: float = 1.5, limit: float = 1.0) -> list[Fit]:

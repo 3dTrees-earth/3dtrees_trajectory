@@ -1,5 +1,5 @@
-"""Write results as the 3Dtrees trajectory CSV (``3dtrees-trajectory/2``: paths and scan positions in one layout,
-shared with uploaded files) and a JSON quality report."""
+"""Write results as the 3Dtrees trajectory CSV (``3dtrees-trajectory/2``, the layout delivered paths and scan positions
+share; this tool writes paths) and a JSON quality report."""
 from __future__ import annotations
 
 import json
@@ -15,27 +15,19 @@ FORMAT = "3dtrees-trajectory/2"
 COLUMNS = "time,x,y,z,roll,pitch,yaw,name"
 
 
-TYPICAL_ERROR_M = {"lines": "0.01", "scan_angle": "1 horizontal, 0.1 vertical", "density": "0.5 horizontal"}
-
-
-def kind(result: Result) -> str:
-    return "path" if result.platform == "mobile" else "stations"
+TYPICAL_ERROR_M = {"lines": "0.01", "scan_angle": "1 horizontal, 0.1 vertical"}
 
 
 def _header(info: CloudInfo, result: Result, quality_label: str) -> list[str]:
     """The standard's keys, then the estimate's own (``method``, ``quality``)."""
     time_system = info.time_system if _has_times(info, result) else "none"
-    lines = [f"# format: {FORMAT}", f"# kind: {kind(result)}", "# origin: estimated", f"# crs: {info.crs}",
+    lines = [f"# format: {FORMAT}", "# kind: path", "# origin: estimated", f"# crs: {info.crs}",
              "# vertical_crs: unknown", f"# time_system: {time_system}"]
     if time_system == "gps_sow":
         lines.append("# gps_week: unknown")
-    if result.platform == "static":
-        lines.append("# position_type: estimated")
     lines += ["# attitude: none", f"# source_layout: estimated_{result.method}",
               f"# source_file: {Path(info.files[0]).name}", f"# converter: 3dtrees_trajectory {__version__}",
               f"# method: {result.method}", f"# quality: {quality_label}"]
-    if result.method == "density":
-        lines.append("# z: ground under the scanner")
     return lines
 
 
@@ -45,23 +37,22 @@ def _has_times(info: CloudInfo, result: Result) -> bool:
 
 def write_csv(path: Path, info: CloudInfo, result: Result) -> None:
     """``time,x,y,z,roll,pitch,yaw,name``, the layout delivered paths and scan positions share; the name comes last so
-    readers that take time, x, y, z by position are unaffected. A path leaves the name empty; a station has its scan
-    name and the mean GPS time of its pulses (empty without GPS time). Roll, pitch and yaw stay empty: estimation gives
-    positions only. Speed is not stored (viewers derive it), nor how well the pulse lines meet (in the report)."""
+    readers that take time, x, y, z by position are unaffected. A path leaves the name empty. Roll, pitch and yaw stay
+    empty: estimation gives positions only. Speed is not stored (viewers derive it), nor how well the pulse lines meet
+    (in the report)."""
     rows = _header(info, result, quality(result, np.array([f.miss for f in result.fits], float)))
     rows.append(COLUMNS)
     timed = _has_times(info, result)
-    names = [""] * len(result.fits) if result.platform == "mobile" else result.names
-    for f, name in zip(result.fits, names):
+    for f in result.fits:
         x, y, z = f.xyz
-        rows.append(f"{f'{f.time:.6f}' if timed else ''},{x:.4f},{y:.4f},{z:.4f},,,,{name}")
+        rows.append(f"{f'{f.time:.6f}' if timed else ''},{x:.4f},{y:.4f},{z:.4f},,,,")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
 def quality(result: Result, miss: np.ndarray) -> str:
-    """good: pulse lines meet within 10 cm (cm-accurate on every checked dataset); rough: scan-angle or density
-    positions (0.5-8 m); unreliable: pulse lines miss by more than 0.5 m (1815, whose return numbers are broken,
+    """good: pulse lines meet within 10 cm (cm-accurate on every checked dataset); rough: 0.1-0.5 m, or scan-angle
+    positions (1-8 m); unreliable: pulse lines miss by more than 0.5 m (1815, whose return numbers are broken,
     sits at 6.7 m and 25 m off); none: no positions."""
     if not result.fits:
         return "none"
@@ -80,7 +71,6 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
         "kept_every": dict(zip(("multi_return_pulse", "single_return_pulse"), info.kept_every)),
         "crs": info.crs,
         "time_system": info.time_system,
-        "platform": result.platform,
         "platform_evidence": result.evidence,
         "method": result.method,
         "multi_return_share": round(multi_share, 4),
@@ -90,7 +80,7 @@ def report(info: CloudInfo, result: Result, multi_share: float) -> dict:
         "quality": quality(result, miss),
         "warnings": result.warnings,
     }
-    if result.platform == "mobile" and result.fits:
+    if result.fits:
         t = np.array([f.time for f in result.fits])
         out["time_span"] = [round(float(t.min()), 6), round(float(t.max()), 6)]
         gaps = np.diff(t)
@@ -124,7 +114,7 @@ def write_report(path: Path, data: dict) -> None:
 
 def geojson(info: CloudInfo, result: Result, gap: float = 5.0, spacing: float = 1.0) -> dict:
     """A light map layer: the path as lines split where positions are more than ``gap`` seconds apart (no line drawn
-    across unscanned turns), thinned to about one vertex per ``spacing`` metres; TLS stations as points. WGS84 when
+    across unscanned turns), thinned to about one vertex per ``spacing`` metres. WGS84 when
     the cloud's CRS is known, else the cloud's own coordinates with ``crs`` set to unknown in the properties."""
     xyz = np.array([f.xyz for f in result.fits], float).reshape(-1, 3)
     lonlat = xyz[:, :2]
@@ -138,7 +128,7 @@ def geojson(info: CloudInfo, result: Result, gap: float = 5.0, spacing: float = 
                   "quality": quality(result, np.array([f.miss for f in result.fits], float)),
                   "crs": "EPSG:4326" if known else "unknown (cloud coordinates)", "source_crs": info.crs}
     features = []
-    if result.platform == "mobile" and len(xyz):
+    if len(xyz):
         time = np.array([f.time for f in result.fits])
         lines = []
         for part in np.split(np.arange(len(time)), np.flatnonzero(np.diff(time) > gap) + 1):
@@ -153,10 +143,6 @@ def geojson(info: CloudInfo, result: Result, gap: float = 5.0, spacing: float = 
         features.append({"type": "Feature", "geometry": {"type": "MultiLineString", "coordinates": lines},
                          "properties": properties | {"time_start": float(time.min()), "time_end": float(time.max()),
                                                      "time_system": info.time_system, "segments": len(lines)}})
-    else:
-        for name, (a, b), z in zip(result.names, lonlat, xyz[:, 2]):
-            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [
-                round(float(a), digits), round(float(b), digits), round(float(z), 2)]}, "properties": properties | {"name": name}})
     return {"type": "FeatureCollection", "features": features}
 
 
@@ -166,7 +152,7 @@ def write_geojson(path: Path, data: dict) -> None:
 
 
 def geojson_from_csv(path: Path) -> dict:
-    """The map layer for a trajectory CSV this tool wrote (header keys crs, kind, method, time_system)."""
+    """The map layer for a path CSV this tool wrote (header keys crs, kind, method, time_system)."""
     from .solve import Fit
 
     meta, rows = {}, []
@@ -176,10 +162,10 @@ def geojson_from_csv(path: Path) -> dict:
             meta[key.strip()] = value.strip()
         elif line and not line.startswith("time,"):
             rows.append(line.split(","))
-    mobile = meta.get("kind", "path") == "path"
-    fits = [Fit(float(r[0]) if r[0] else 0.0, np.array(r[1:4], float), 0, float("nan")) for r in rows]
-    result = Result("mobile" if mobile else "static", meta.get("method", "lines"), fits,
-                    [] if mobile else [r[7] for r in rows])
+    if meta.get("kind", "path") != "path":
+        raise ValueError(f"{path}: kind {meta['kind']!r}; this version draws paths only")
+    fits = [Fit(float(r[0]), np.array(r[1:4], float), 0, float("nan")) for r in rows]
+    result = Result(meta.get("method", "lines"), fits)
     info = CloudInfo(meta.get("crs", "unknown"), meta.get("time_system", "none"), 0, [meta.get("source_file", "")], (1, 1))
     return geojson(info, result)
 

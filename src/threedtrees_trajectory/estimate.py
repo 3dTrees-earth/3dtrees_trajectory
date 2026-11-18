@@ -1,4 +1,5 @@
-"""Choose the platform and method for a cloud, split static scans, and run the solvers."""
+"""Check that a cloud comes from a moving sensor and run the path solvers. Static (TLS) clouds are refused in 1.0.0:
+the output format can hold scan positions, but this version estimates paths only."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -10,91 +11,37 @@ from .pulses import Pulses
 
 MULTI_SHARE_MIN = 0.005  # below this share of multi-return pulses the line method has too little to work with
 STATIC_MISS_MAX = 0.05  # one position explaining all lines within 5 cm = a static scan
-SCAN_GAP = 30.0  # seconds; a jump in file-order time this large starts a new scan in a merged TLS cloud
+SCAN_GAP = 30.0  # seconds; a jump in file-order time this large separates scans of a merged TLS cloud
 MIN_LINE_POSITIONS = 10  # fewer positions from pulse lines than this: fall back to scan angles
 CONCENTRATION_MIN = 15.0  # ground density piling up this much around one spot = a static scanner
+STATIC_REFUSAL = ("This looks like a static (TLS) scan ({evidence}). Trajectory 1.0.0 estimates paths of moving "
+                  "sensors (ULS, MLS) only.")
 
 
 @dataclass
 class Result:
-    platform: str  # mobile | static
-    method: str  # lines | scan_angle | density
+    method: str  # lines | scan_angle
     fits: list[solve.Fit]
-    names: list[str] = field(default_factory=list)  # static: one name per station
     warnings: list[str] = field(default_factory=list)
-    evidence: str = "given"  # why this platform
+    evidence: str = "given"  # why the cloud counts as a moving sensor
 
 
-MIN_SCAN_PULSES = 2000  # smaller groups are fragments, not scans
-
-
-def _time_blocks(time: np.ndarray) -> np.ndarray:
-    """Scan block per pulse. Merged clouds concatenate scans, so a jump of SCAN_GAP in file order starts a new one.
-    When that leaves over 10 % of pulses in crumbs (points stored out of acquisition order), blocks are gaps in sorted
-    time instead."""
-    block = np.r_[0, np.cumsum(np.abs(np.diff(time)) > SCAN_GAP)]
-    sizes = np.bincount(block)
-    if len(time) and sizes[sizes >= MIN_SCAN_PULSES].sum() >= 0.9 * len(time):
-        return block
-    order = np.argsort(time, kind="stable")
-    sorted_block = np.r_[0, np.cumsum(np.diff(time[order]) > SCAN_GAP)]
-    block = np.empty(len(time), np.int64)
-    block[order] = sorted_block
-    return block
-
-
-def split_scans(p: Pulses, by: str) -> tuple[list[str], np.ndarray]:
-    """Scan names and one label per pulse (index into names). by = file | source | time | auto.
-
-    auto, with GPS time: every file and point source cut into time blocks (a source id, where set, may hold several
-    scans). Without time: point sources if there are several (a registered project exported as spatial tiles keeps one
-    source per scan), else files (one file per scan), else one scan."""
-    if by == "auto":
-        if p.has_time:
-            keys = np.c_[p.file, p.source, _time_blocks(p.time)]
-            label = np.unique(keys, axis=0, return_inverse=True)[1].ravel()
-            return [f"scan{k}" for k in range(label.max() + 1)], label
-        by = "source" if len(np.unique(p.source)) > 1 else "file" if len(np.unique(p.file)) > 1 else "one"
-    if by in ("file", "source"):
-        values, label = np.unique(p.file if by == "file" else p.source, return_inverse=True)
-        return [f"{by}{v}" for v in values], label.ravel()
-    if by == "time" and p.has_time:
-        label = _time_blocks(p.time)
-        return [f"scan{k}" for k in range(label.max() + 1)], label
-    return ["scan0"], np.zeros(len(p), np.int64)
-
-
-def scan_groups(p: Pulses, by: str):
-    """(name, pulse indices) per scan with at least MIN_SCAN_PULSES pulses, and the number of smaller fragments."""
-    names, label = split_scans(p, by)
-    order = np.argsort(label, kind="stable")
-    bounds = np.r_[0, np.cumsum(np.bincount(label, minlength=len(names)))]
-    groups = [(names[k], order[bounds[k]:bounds[k + 1]]) for k in range(len(names))]
-    big = [g for g in groups if len(g[1]) >= MIN_SCAN_PULSES]
-    return big, len(groups) - len(big)
-
-
-def merge_stations(fits: list[solve.Fit], names: list[str], radius: float = 0.05):
-    """One station per position: scans split into several time blocks give the same position more than once."""
-    kept_fits, kept_names = [], []
-    for fit, name in sorted(zip(fits, names), key=lambda pair: -pair[0].pulses):
-        if all(np.linalg.norm(fit.xyz - k.xyz) > radius for k in kept_fits):
-            kept_fits.append(fit)
-            kept_names.append(name)
-    order = np.argsort([names.index(n) for n in kept_names])
-    return [kept_fits[i] for i in order], [kept_names[i] for i in order]
+def _largest_block(p: Pulses) -> np.ndarray:
+    """Pulses of the largest file x point source x time block: one scan, if the cloud is a merged TLS project."""
+    block = np.r_[0, np.cumsum(np.abs(np.diff(p.time)) > SCAN_GAP)] if p.has_time else np.zeros(len(p), np.int64)
+    label = np.unique(np.c_[p.file, p.source, block], axis=0, return_inverse=True)[1].ravel()
+    return label == np.argmax(np.bincount(label))
 
 
 def detect_platform(p: Pulses) -> tuple[str, str]:
-    """mobile or static, and the evidence, from the largest scan group.
+    """mobile or static, and the evidence, from the largest scan block.
 
     Multi-return pulses with time: static when one position explains their lines within 5 cm. Otherwise: static when
     near-ground points pile up around one spot (CONCENTRATION_MIN times an even spread), as a fixed scanner's do.
     Checked on 3Dtrees data: TLS 22 to 128, ULS 1.8 to 7.7, MLS 4.3."""
     if not p.has_time:
         return "static", "no GPS time, so it can't be a path"
-    names, label = split_scans(p, "auto")
-    part = p.subset(label == np.argmax(np.bincount(label)))
+    part = p.subset(_largest_block(p))
     if part.has_time and p.multi_share >= MULTI_SHARE_MIN:
         fit = solve.station_from_lines(part, min_pulses=500)
         if fit is not None:
@@ -105,57 +52,35 @@ def detect_platform(p: Pulses) -> tuple[str, str]:
     return platform, f"ground density around its peak is {concentration:.1f} times an even spread"
 
 
-def estimate(p: Pulses, platform: str = "auto", split: str = "auto", interval: float = 0.5) -> Result:
-    """Positions in the cloud's coordinates (the solvers work relative to ``p.origin``)."""
-    result = _estimate(p, platform, split, interval)
+def estimate(p: Pulses, check_platform: bool = True, interval: float = 0.5) -> Result:
+    """Path positions in the cloud's coordinates (the solvers work relative to ``p.origin``)."""
+    result = _estimate(p, check_platform, interval)
     result.fits = [solve.Fit(f.time, f.xyz + p.origin, f.pulses, f.miss) for f in result.fits]
     return result
 
 
-def _estimate(p: Pulses, platform: str, split: str, interval: float) -> Result:
+def _estimate(p: Pulses, check_platform: bool, interval: float) -> Result:
     if len(p) == 0:
         raise ValueError("The cloud has no points.")
     multi_share = p.multi_share
     warnings = []
     evidence = "given"
-    if platform == "auto":
+    if check_platform:
         platform, evidence = detect_platform(p)
-    if platform == "mobile":
-        if not p.has_time:
-            raise ValueError("A moving sensor's path needs GPS time per point; this cloud has none.")
-        lines = solve.path_from_lines(p, interval=interval) if multi_share >= MULTI_SHARE_MIN else []
-        if len(lines) >= MIN_LINE_POSITIONS:  # a gappy path from lines beats a full one from scan angles (metres off)
-            fits = lines
-            kept = solve.drop_outliers(fits)
-            if len(kept) < len(fits):
-                warnings.append(f"{len(fits) - len(kept)} of {len(fits)} positions were more than 1 m off the path of "
-                                "their neighbours and were dropped.")
-            return Result("mobile", "lines", kept, warnings=warnings, evidence=evidence)
-        if p.has_scan_angle:
-            warnings.append("Single returns only: path from scan angles, about 1 m horizontally and 0.1 m vertically on "
-                            "RIEGL and DJI flights, much worse where the scan angle isn't measured off nadir (YellowScan 8 m).")
-            return Result("mobile", "scan_angle", solve.path_from_scan_angle(p, interval=interval), warnings=warnings,
-                          evidence=evidence)
-        raise ValueError("Single returns without scan angle: the path can't be estimated from this cloud. "
-                         "Please provide the trajectory file.")
-    method = "lines" if p.has_time and multi_share >= MULTI_SHARE_MIN else "density"
-    scans, fragments = scan_groups(p, split)
-    if len(scans) == 1 and split == "auto":
-        warnings.append("No way to tell scans apart (one file, one point source, no time jumps): treated as one scan.")
-    if fragments:
-        warnings.append(f"{fragments} fragments under {MIN_SCAN_PULSES} pulses were left out.")
-    if method == "density":
-        warnings.append("Single returns: each scanner position is the peak of near-ground point density, about 0.5-0.7 m "
-                        "off on the scans tested; z is the ground under the scanner, not the scanner itself.")
-    fits, names = [], []
-    for name, index in scans:
-        part = p.subset(index)
-        fit = solve.station_from_lines(part) if method == "lines" else solve.station_from_density(part)
-        if fit is None:
-            warnings.append(f"{name}: no position (too few usable pulses).")
-            continue
-        fits.append(fit)
-        names.append(name)
-    if method == "lines":
-        fits, names = merge_stations(fits, names)
-    return Result("static", method, fits, names, warnings, evidence)
+        if platform == "static":
+            raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
+    if not p.has_time:
+        raise ValueError("A moving sensor's path needs GPS time per point; this cloud has none.")
+    lines = solve.path_from_lines(p, interval=interval) if multi_share >= MULTI_SHARE_MIN else []
+    if len(lines) >= MIN_LINE_POSITIONS:  # a gappy path from lines beats a full one from scan angles (metres off)
+        kept = solve.drop_outliers(lines)
+        if len(kept) < len(lines):
+            warnings.append(f"{len(lines) - len(kept)} of {len(lines)} positions were more than 1 m off the path of "
+                            "their neighbours and were dropped.")
+        return Result("lines", kept, warnings, evidence)
+    if p.has_scan_angle:
+        warnings.append("Single returns only: path from scan angles, about 1 m horizontally and 0.1 m vertically on "
+                        "RIEGL and DJI flights, much worse where the scan angle isn't measured off nadir (YellowScan 8 m).")
+        return Result("scan_angle", solve.path_from_scan_angle(p, interval=interval), warnings, evidence)
+    raise ValueError("Single returns without scan angle: the path can't be estimated from this cloud. "
+                     "Please provide the trajectory file.")
