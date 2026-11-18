@@ -6,16 +6,21 @@ import laspy
 import numpy as np
 
 
-def _write(path: Path, xyz, time, return_number, number_of_returns, scan_angle, source=None):
-    header = laspy.LasHeader(point_format=6, version="1.4")
+def _write(path: Path, xyz, time, return_number, number_of_returns, scan_angle, source=None, *,
+           point_format=6, version="1.4"):
+    header = laspy.LasHeader(point_format=point_format, version=version)
     header.offsets = np.floor(xyz.min(axis=0))
     header.scales = [0.001, 0.001, 0.001]
     las = laspy.LasData(header)
     las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-    las.gps_time = time
+    if "gps_time" in header.point_format.dimension_names:
+        las.gps_time = time
     las.return_number = return_number
     las.number_of_returns = number_of_returns
-    las.scan_angle = np.round(scan_angle / 0.006).astype(np.int16)
+    if point_format >= 6:
+        las.scan_angle = np.round(scan_angle / 0.006).astype(np.int16)
+    else:
+        las.scan_angle_rank = np.round(scan_angle).astype(np.int8)
     if source is not None:
         las.point_source_id = source
     las.write(path)
@@ -37,18 +42,25 @@ def _records(time, first, last, has_two, angle, single_return):
         start = np.where(has_two[:, None], first, last)
         n = len(time)
         return start, time, np.ones(n, np.uint8), np.ones(n, np.uint8), angle
-    order = []
     xyz, t, rn, nr, ang = [], [], [], [], []
     for i in range(len(time)):  # small synthetic sets only
         if has_two[i]:
-            xyz += [first[i], last[i]]; t += [time[i]] * 2; rn += [1, 2]; nr += [2, 2]; ang += [angle[i]] * 2
+            xyz.extend((first[i], last[i]))
+            t.extend((time[i], time[i]))
+            rn.extend((1, 2))
+            nr.extend((2, 2))
+            ang.extend((angle[i], angle[i]))
         else:
-            xyz.append(last[i]); t.append(time[i]); rn.append(1); nr.append(1); ang.append(angle[i])
-    del order
+            xyz.append(last[i])
+            t.append(time[i])
+            rn.append(1)
+            nr.append(1)
+            ang.append(angle[i])
     return np.array(xyz), np.array(t), np.array(rn, np.uint8), np.array(nr, np.uint8), np.array(ang)
 
 
-def flight(path: Path, single_return=False, seconds=20.0, rate=4000, seed=0):
+def flight(path: Path, single_return=False, seconds=20.0, rate=4000, seed=0, *,
+           point_format=6, version="1.4"):
     """Line scanner flying north at 5 m/s, 60 m above ground, scanning +-40 degrees across track."""
     rng = np.random.default_rng(seed)
     time = 300000.0 + np.arange(0, seconds, 1 / rate)
@@ -57,7 +69,8 @@ def flight(path: Path, single_return=False, seconds=20.0, rate=4000, seed=0):
     a = np.radians(angle)
     direction = np.c_[np.sin(a), np.zeros(len(a)), -np.cos(a)]
     first, last, two = _hits(sensor, direction, rng, 0.6)
-    _write(path, *_records(time, first, last, two, angle, single_return))
+    _write(path, *_records(time, first, last, two, angle, single_return),
+           point_format=point_format, version=version)
     return time, sensor
 
 

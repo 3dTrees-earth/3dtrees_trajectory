@@ -1,88 +1,112 @@
 # 3dtrees_trajectory
 
-Estimates the flight or walking path of a moving lidar sensor (ULS, MLS, ALS) from the point cloud alone. The output
-is the 3Dtrees trajectory CSV (`3dtrees-trajectory/2`), the layout delivered trajectories use on the platform, plus a
-JSON quality report and a GeoJSON map layer.
+Estimate the flight or walking path of a moving lidar sensor (ULS, MLS, ALS) from LAS or LAZ point clouds. The tool
+writes a 3Dtrees trajectory CSV, a quality and resource report, and a map layer. The current package version is
+0.1.0.
+
+## Run
 
 ```bash
-3dtrees-trajectory flight.laz -o flight_trajectory.csv
-3dtrees-trajectory strip1.laz strip2.laz strip3.laz -o flight_trajectory.csv
+3dtrees-trajectory flight.laz -o trajectory/trajectory.csv
+3dtrees-trajectory strip1.las strip2.laz -o trajectory/trajectory.csv
 ```
 
-Static (TLS) scans are refused in this version. The CSV layout can hold scan positions (`kind: stations`), so a later
-version can add them without a format change.
+Combine strips from the same acquisition and use a consistent file order. The reader supports LAS/LAZ 1.2–1.4,
+point formats 0–10, and COPC. Inputs need finite, varying GPS times in the same GPS time system and a shared metric
+coordinate system. When the CRS is missing, the tool assumes metre units and keeps the input coordinates. Inputs in
+formats 0 and 2 have no GPS time and receive a refusal report.
+
+### Outputs
+
+| File | Contents |
+| --- | --- |
+| `trajectory.csv` | `3dtrees-trajectory/2` with columns `time,x,y,z,roll,pitch,yaw,name`. Time and XYZ use the cloud's clock and coordinates. Attitude and name are empty. |
+| `trajectory.report.json` | Method, quality, reasons for refusing the input, point counts, and job resources. |
+| `trajectory.geojson` | Path segments separated at gaps over 5 seconds, thinned to about one vertex per metre. Uses WGS84 when the CRS is known and cloud coordinates otherwise. |
+
+`--report` and `--geojson` override the default paths next to the CSV. The tool creates their parent directories
+and publishes each file by rename. The GeoJSON file is zero bytes when there are no drawable segments or
+reprojection fails. `3dtrees-trajectory-geojson trajectory/trajectory.csv` can also draw the layer from an
+existing trajectory CSV.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | At least one valid position was estimated. |
+| `2` | Invalid arguments, unreadable or unsuitable cloud, static scan, no reliable fit, or an output write failed. The JSON report records the reason when the report path is available and writable. Safe, writable CSV and GeoJSON destinations receive zero-byte files. |
+
+Supply at least one LAS/LAZ input and an output CSV path. The CSV, GeoJSON, report and input paths must be distinct.
+If you set `--interval`, use a positive finite number of seconds (default 0.5). An interval must be long enough for
+the cloud's GPS times to fit into a signed 64-bit window index. `--threads` takes a positive integer.
 
 ## How it works
 
-| Cloud | Method | Accuracy on 3Dtrees data |
-| --- | --- | --- |
-| Multi-return pulses, GPS time | `lines`: a pulse's first and last return lie on a line through the sensor; per 0.5 s window, the position and velocity closest to all lines | under 0.5 m on 31 of 34 delivered trajectories, most YellowScan flights about 0.01 m |
-| Single returns, scan angle | `scan_angle`: the position from which every point is seen at its scan angle off nadir | about 1 m horizontally, 0.1 m vertically (RIEGL, DJI); 8 m on YellowScan |
-| Single returns without scan angle, or no GPS time | refused | provide the trajectory |
+| Input evidence | Method |
+| --- | --- |
+| Enough multi-return pulses with GPS time | `lines` fits the position and velocity in each time window from the line through each pulse's first and last returns. |
+| Usable scan angles and GPS time | `scan_angle` uses each point's angle off nadir. It assumes a line scanner in level flight. |
+| Too little geometric information for either method | The report asks for the delivered trajectory. |
 
-The GeoJSON layer draws the path as lines, split where positions are more than 5 s apart (so no line crosses
-unscanned turns), about one vertex per metre, in WGS84 when the cloud's CRS is known.
-`3dtrees-trajectory-geojson file.csv` makes the same layer from an existing path CSV.
+Line fits that miss their pulse lines by more than ten times the median, with a threshold of at least 0.25 m, are
+dropped. The tool also drops positions over 1 m from the path described by nearby fits. The line quality labels are
+`good` through a 0.1 m median miss, `rough` through 0.5 m, and `unreliable` above 0.5 m. Scan-angle fits are
+labelled `rough`. On the archived 3Dtrees comparison, most YellowScan multi-return paths were accurate to a few
+centimetres. Scan-angle estimates had about 1 m horizontal error on RIEGL and DJI flights and about 8 m on
+YellowScan.
 
-## Static scans are refused
+The tool checks for static scans using the largest block by file, point source and time. It looks for a single
+position that explains the pulse lines within 5 cm. For clouds without enough pulse lines, it checks whether
+near-ground points concentrate around one location at least 15 times more than an even spread would.
+`--no-platform-check` is a CLI diagnostic for known moving acquisitions. Static scan position estimation is outside
+the path tool's scope.
 
-On the largest block of the cloud (one file, point source and time block):
+## Resources and limits
 
-1. With multi-return pulses and GPS time: static when one position explains all pulse lines within 5 cm.
-2. Otherwise: static when near-ground points pile up around one spot at least 15 times more than an even spread
-   would (a fixed scanner's density falls with range). Measured on 3Dtrees data: TLS 22 to 128, ULS 1.8 to 7.7,
-   MLS 4.3.
+- The reader decodes five million points at a time and selects only the LAZ fields used by the solver when the
+  point format permits it. Non-COPC LAZ decoding uses `GALAXY_SLOTS` (default 8 locally) or the lower
+  `--threads` limit, capped by CPU affinity and available cgroup v2 CPU quota. COPC decoding and numerical
+  library reductions are serial.
+- The default retains roughly up to 40 million multi-return pulses and 10 million single returns, or 40 million
+  single returns when the first block looks single-return. The tool thins by stride across the acquisition.
+  `--full` retains all pulses and requires memory proportional to the cloud size. The path fit keeps the selected
+  pulse columns and processes one fitting window at a time.
+- The report's `resources` object includes `points_read`, `wall_seconds`, `cpu_seconds`, `peak_rss_bytes`
+  and `decoding_threads`. On cgroup v2 it also records current and peak memory, the local limit, and the change
+  in CPU usage. Cgroup values describe the entire cgroup, including charged file cache and other processes in a
+  shared cgroup. Use a dedicated job/container cgroup for per-run measurements.
+- Original LAS/LAZ strips retain the clearest pulse order. The tool can join separated returns by file, point
+  source and GPS time, up to 40 million retained stray records. Shared timestamps in multibeam or COPC exports
+  can mix pulses, and some pulses spanning read-chunk boundaries can be lost. Thinning or resampling upstream can
+  remove pulse structure.
+- Paths cover the times represented by points. Turns or transit legs omitted from the cloud leave gaps. GPS week
+  rolls and files from different acquisitions should be processed separately.
 
-A static cloud ends with exit code 2 and a report that names the evidence. `--no-platform-check` skips the check.
-
-Multi-file datasets are read together. Multi-return records that were stored apart from each other (some software
-sorts points spatially) are joined by GPS time and point source after reading.
-
-## Output and quality
-
-- Columns `time,x,y,z,roll,pitch,yaw,name`, name last so readers of the first four columns are unaffected. Roll, pitch
-  and yaw stay empty (positions only), the name is empty for a path, and speed is not stored (viewers derive it).
-- The header carries the standard keys plus `kind: path`, `origin: estimated`, `method` and `quality`; the report adds
-  `median_miss_m` (how far the pulse lines miss the positions, median) and `typical_error_m`.
-- `quality` is `good` when the lines meet within 10 cm, `rough` for 0.1 to 0.5 m and for scan-angle paths, and
-  `unreliable` when the lines miss by more than 0.5 m (broken return numbers).
-- A time window whose pulse lines miss the fitted position by more than 10 times the median (at least 0.25 m) is
-  dropped, and so is a position more than 1 m off the path of its neighbours (within 1.5 s).
-
-## Speed and memory
-
-LAZ is decoded in parallel (`--threads`, default 8; COPC is read serially). Coordinates are kept as float32 relative
-to the first file's offset. At most 40 M multi-return and 10 M single-return pulses are kept (40 M single returns when
-a cloud has no multi-return pulses), as every n-th pulse so the whole acquisition stays covered. `--full` keeps every
-pulse.
-
-| Dataset | Points | Before | Now |
-| --- | --- | --- | --- |
-| 1844 YellowScan, 3 flights | 678 M | 146 s, 13.5 GB | 119 s, 3.8 GB |
-| 2019 RIEGL ULS | 93 M | 69 s, 6.9 GB | 45 s, 3.5 GB |
-| 2018 MLS, single return | 2 B | 244 s, 19.7 GB | 213 s, 7.0 GB |
-
-Ground-truth backfill (36 flights and walks with delivered paths, `/mnt/data/kg281/3dtrees_trajectories` on geos):
-every run under 8 GB peak, most 20-60 s, the 70 GB DJI dataset 2585 12 min.
-
-## Limits
-
-- Positions exist only while the cloud has points. Many exports cut turns and transit legs, so those parts of a
-  flight have no positions.
-- Thinned or resampled clouds lose the pulse structure (re-sorted ones are joined again by time); the report's
-  `multi_return_share` shows what was found.
-- A pulse split across two read chunks (5 M points) is lost; a handful per chunk.
-- COPC works but loses accuracy: it stores points by octree node, not in acquisition order. Returns are then joined by
-  GPS time alone, which mixes pulses of multi-beam scanners (1807 YellowScan: 0.001 m median from LAZ, 0.075 m median
-  and 5 m at the 95th percentile from COPC). Original per-flight LAS/LAZ files are the better input.
-- Time stays in the cloud's own clock (GPS week seconds or adjusted GPS time, read from the LAS header). The CRS is
-  the cloud's.
-
-## Development
+## Development and container
 
 ```bash
-uv venv .venv && uv pip install -e ".[test]"
-.venv/bin/python -m pytest
+uv venv .venv
+uv pip install -e '.[test]'
+.venv/bin/python -m pytest -q
+docker build -t 3dtrees_trajectory:dev .
 ```
 
-The tests build synthetic clouds with a known sensor (`tests/synthetic.py`); no real data is checked in.
+Tests generate small LAS/LAZ clouds with known positions and verify the coordinates, refusals, resource reporting,
+and byte-for-byte stability across decoder thread counts.
+
+Call `python /src/run.py` from a writable job directory. The Docker image defaults to a non-root user. For a
+local bind-mounted job directory, run under the job owner's UID and GID.
+
+```bash
+docker run --rm --name trajectory-local --user "$(id -u):$(id -g)" \
+  --label "owner=$(id -un)" --label created-by=trajectory-local \
+  --mount "type=bind,source=$PWD,target=/data" \
+  3dtrees_trajectory:dev python /src/run.py flight.laz -o trajectory/trajectory.csv
+```
+
+A future Galaxy wrapper can pass the selected cloud files and output paths, with a positive finite interval if
+exposed. The wrapper can take slots from `GALAXY_SLOTS` and collect the three fixed outputs; sampling and platform
+diagnostic switches are CLI options. File metadata and geometry refusals are checked at runtime. A published release
+with a tag matching the CLI and package versions publishes `ghcr.io/3dtrees-earth/3dtrees_trajectory:<version>` and
+a SIF built from the same Docker digest at
+`oras://ghcr.io/3dtrees-earth/3dtrees_trajectory:<version>-sif`.
