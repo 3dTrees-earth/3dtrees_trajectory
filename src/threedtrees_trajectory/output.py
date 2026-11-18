@@ -99,6 +99,11 @@ def refusal(info: CloudInfo, pulses: Pulses | None, reason: str) -> dict:
         "has_gps_time": pulses.has_time if pulses is not None else None,
         "has_scan_angle": pulses.has_scan_angle if pulses is not None else None,
         "positions": 0,
+        "pairing": {
+            "complete_multi_pulses": info.multi_pulses,
+            "incomplete_multi_pulses": info.incomplete_multi_pulses,
+            "out_of_order_records_sampled": info.joined_out_of_order_points,
+        },
         "quality": "none",
         "error": reason,
     }

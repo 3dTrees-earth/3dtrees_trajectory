@@ -6,6 +6,7 @@ import argparse
 import math
 import os
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 from . import __version__
@@ -31,7 +32,7 @@ def _paths_overlap(first: Path, second: Path) -> bool:
 def main(argv: list[str] | None = None) -> int:
     resources = RunResources()
     parser = argparse.ArgumentParser(prog="3dtrees-trajectory", description=__doc__, allow_abbrev=False)
-    parser.add_argument("clouds", nargs="*", type=Path, help="LAS/LAZ files of one flight or walk")
+    parser.add_argument("clouds", nargs="*", type=Path, help="per-file LAS/LAZ or one merged COPC from the same acquisition")
     parser.add_argument("-o", "--output", type=Path, help="3Dtrees trajectory CSV")
     parser.add_argument("--report", type=Path, help="JSON quality report (default next to the CSV)")
     parser.add_argument("--geojson", type=Path, help="map layer of the path (default next to the CSV)")
@@ -44,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--occlusion-copc", type=Path, help="occlusion voxels as COPC (with --occlusion-cog)")
     parser.add_argument("--occlusion-cog", type=Path, help="occluded share per metre above ground as a multiband COG")
     parser.add_argument("--voxel", default="0.5", help="occlusion voxel size in metres (default 0.5)")
+    parser.add_argument("--grid-memory-gib", type=float, default=16,
+                        help="soft occlusion grid budget in GiB before tiling (default 16, maximum 64)")
     parser.add_argument("--dtm", type=Path, help="terrain raster for heights above ground (default: lowest hits)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args, unknown = parser.parse_known_intermixed_args(argv)
@@ -81,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
             voxel = math.nan
         if not math.isfinite(voxel) or not 0.05 <= voxel <= 10:
             raise ValueError("--voxel must be between 0.05 and 10 m.")
+        if not math.isfinite(args.grid_memory_gib) or not 0 < args.grid_memory_gib <= 64:
+            raise ValueError("--grid-memory-gib must be positive and at most 64.")
         if not args.clouds:
             raise ValueError("Provide at least one LAS/LAZ file.")
         try:
@@ -108,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from pyproj.exceptions import ProjError
 
+    from .cloud import sorted_copc
     from .estimate import STATIC_REFUSAL, detect_platform, estimate
     from .output import geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
     from .pulses import CloudInfo, read_pulses
@@ -116,47 +122,81 @@ def main(argv: list[str] | None = None) -> int:
     pulses = None
     result = None
     data = None
-    if error_message is None:
-        try:
-            pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info)
-            if args.trajectory is not None:
-                platform, evidence = detect_platform(pulses)
-                if platform == "static":
-                    raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
-            if args.output is not None:
-                result = estimate(pulses, check_platform=args.trajectory is None and not args.no_platform_check,
-                                  interval=interval)
-                try:
-                    layer = geojson(info, result)
-                except ProjError:
-                    layer = None
-                    result.warnings.append("The map layer could not be projected to WGS84.")
-                write_csv(args.output, info, result)
-                if layer is None or not layer["features"]:
-                    write_empty(geojson_path)
-                else:
-                    write_geojson(geojson_path, layer)
-                data = report(info, result, pulses.multi_share)
-            else:
+    with ExitStack() as scratch:
+        if error_message is None:
+            try:
+                prepared = scratch.enter_context(sorted_copc(args.clouds, Path.cwd(), resources=resources))
+                read_stage = "read/time-sort merge" if prepared is not None else "read/time-sort"
+                with resources.stage(read_stage) as stage:
+                    pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
+                                            prepared=prepared)
+                    stage["bytes_read"] = (prepared.bytes_written if prepared is not None
+                                           else sum(path.stat().st_size for path in args.clouds))
+                if not len(pulses):
+                    raise ValueError("No usable pulses could be reconstructed from the input.")
+                evidence = "given"
+                with resources.stage("platform check"):
+                    if args.trajectory is not None or not args.no_platform_check:
+                        platform, evidence = detect_platform(pulses)
+                        if platform == "static":
+                            raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
                 data = {"tool": f"3dtrees_trajectory {__version__}", "files": info.files, "trajectory": "delivered"}
-        except (OSError, ValueError, MemoryError) as error:
-            error_message = str(error) or "The job ran out of memory."
-    if error_message is None and occlusion_paths:
-        pulses = None
-        data["occlusion"] = _occlusion(args, result, voxel)
-        if "error" in data["occlusion"]:
-            if result is None:
-                error_message = data["occlusion"]["error"]
-            else:
-                result.warnings.append(f"Occlusion: {data['occlusion']['error']}")
-                for path in occlusion_paths:
-                    try:
-                        write_empty(path)
-                    except OSError as error:
-                        error_message = f"cannot publish empty output {path}: {error}"
+                if args.output is not None:
+                    with resources.stage("path estimation"):
+                        try:
+                            result = estimate(pulses, check_platform=False, interval=interval)
+                            result.evidence = evidence
+                            data_estimate = report(info, result, pulses.multi_share)
+                            if data_estimate["quality"] == "unreliable":
+                                result = None
+                                raise ValueError("Pulse lines miss the fitted path by more than 0.5 m at the median. "
+                                                 "Check return pairing or provide the delivered trajectory.")
+                        except ValueError as error:
+                            if args.trajectory is None:
+                                raise
+                            result = None
+                            data["estimated_path_error"] = str(error)
+                    if result is None:
+                        write_empty(args.output)
+                        write_empty(geojson_path)
+                    else:
+                        try:
+                            layer = geojson(info, result)
+                        except ProjError:
+                            layer = None
+                            result.warnings.append("The map layer could not be projected to WGS84.")
+                        write_csv(args.output, info, result)
+                        if layer is None or not layer["features"]:
+                            write_empty(geojson_path)
+                        else:
+                            write_geojson(geojson_path, layer)
+                        data = report(info, result, pulses.multi_share)
+                data["pulse_check"] = {
+                    "kept": len(pulses), "multi_return_share": round(pulses.multi_share, 6),
+                    "has_scan_angle": pulses.has_scan_angle, "complete_multi_pulses": info.multi_pulses,
+                    "incomplete_multi_pulses": info.incomplete_multi_pulses,
+                    "out_of_order_records_sampled": info.joined_out_of_order_points,
+                }
+            except (OSError, ValueError, MemoryError) as error:
+                error_message = str(error) or "The job ran out of memory."
+        if error_message is None and occlusion_paths:
+            path_inputs = _occlusion_path(args, result, pulses, resources)
+            pulses = None
+            data["occlusion"] = _occlusion(args, path_inputs, prepared, resources)
+            if "error" in data["occlusion"]:
+                if result is None:
+                    error_message = data["occlusion"]["error"]
+                else:
+                    result.warnings.append(f"Occlusion: {data['occlusion']['error']}")
+                    for path in occlusion_paths:
+                        try:
+                            write_empty(path)
+                        except OSError as error:
+                            error_message = f"cannot publish empty output {path}: {error}"
     if error_message is not None:
         print(f"error: {error_message}", file=sys.stderr)
-        data = {**refusal(info, pulses, error_message), **({"occlusion": data["occlusion"]} if data and "occlusion" in data else {})}
+        details = {field: data[field] for field in ("occlusion", "pulse_check") if data is not None and field in data}
+        data = refusal(info, pulses, error_message) | details
         if safe_products:
             for path in products:
                 try:
@@ -165,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"error: cannot publish empty output {path}: {error}", file=sys.stderr)
     if safe_report:
         data["resources"] = resources.report(threads, info.points_read)
+        data["stages"] = resources.stages
         try:
             write_report(report_path, data)
         except OSError as error:
@@ -182,26 +223,46 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _occlusion(args, result, voxel: float) -> dict:
-    """Run the occlusion part; a failure is reported in its section instead of failing the trajectory."""
+def _occlusion_path(args, result, pulses, resources):
     import numpy as np
+
+    from . import occlusion
+
+    if args.trajectory is not None:
+        with resources.stage("delivered-path check") as stats:
+            try:
+                time, xyz = occlusion.read_trajectory(args.trajectory)
+                occlusion.validate_trajectory(time, xyz)
+                check = occlusion.delivered_miss(pulses, time, xyz)
+                stats["bytes_read"] = args.trajectory.stat().st_size
+                return time, xyz, "delivered", check
+            except (OSError, ValueError, MemoryError) as error:
+                return {"error": str(error) or "The delivered-path check ran out of memory."}
+    time = np.array([f.time for f in result.fits], float)
+    xyz = np.array([f.xyz for f in result.fits], float).reshape(-1, 3)
+    return time, xyz, result.method, None
+
+
+def _occlusion(args, path_inputs, prepared, resources) -> dict:
+    """Run the occlusion part; a failure is reported in its section instead of failing the trajectory."""
     from laspy.errors import LaspyException
     from lazrs import LazrsError
 
     from . import occlusion
 
+    if isinstance(path_inputs, dict):
+        return path_inputs
+    time, xyz, method, check = path_inputs
     try:
-        if args.trajectory is not None:
-            time, xyz = occlusion.read_trajectory(args.trajectory)
-            source = "delivered"
-        else:
-            time = np.array([f.time for f in result.fits], float)
-            xyz = np.array([f.xyz for f in result.fits], float).reshape(-1, 3)
-            source = "estimated"
-        return occlusion.run(args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=voxel,
-                             dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source=source)
+        return occlusion.run(
+            args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=float(args.voxel),
+            dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
+            quality="rough" if method == "scan_angle" else None, delivered_check=check, prepared=prepared,
+            budget=int(args.grid_memory_gib * 2**30), resources=resources,
+        )
     except (OSError, ValueError, MemoryError, ImportError, LaspyException, LazrsError) as error:
-        return {"error": str(error) or "The occlusion step ran out of memory."}
+        return {**({"delivered_path_check": check} if check else {}),
+                "error": str(error) or "The occlusion step ran out of memory."}
 
 
 if __name__ == "__main__":
