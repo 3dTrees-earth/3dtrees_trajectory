@@ -478,9 +478,9 @@ def _traversal_tiles(paths, grid, time, xyz, layout, prepared, tiled, work, reso
                     stage["points_read"] = selected.points_read
                     counts = _trace_grid(paths, tile, time, xyz, counters, prepared=selected)
             else:
+                counts = _trace_grid(paths, tile, time, xyz, counters, prepared=prepared, bounds=bounds)
                 stage["bytes_read"] = (prepared.bytes_written if prepared is not None
                                        else sum(p.stat().st_size for p in paths))
-                counts = _trace_grid(paths, tile, time, xyz, counters, prepared=prepared, bounds=bounds)
         keep = tuple(slice(part.start - offset, part.stop - offset)
                      for part, offset in zip(plan.core, start[:2]))
         yield plan.core, plan.extent[2], tuple(a[keep] for a in counts)
@@ -652,9 +652,11 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             sample = _grid_bytes(full_grid.shape, math.prod(full_grid.shape[:2]), fragment_bytes) > budget
             grid, top, ground, spikes, percentile = _extent_pass(paths, full_grid, time, xyz, dtm, crs_wkt,
                                                                   sample, stage, prepared=stream)
+            buffer = min(100.0, percentile)
+            layout, halo = _tile_layout(grid, top, ground, budget, buffer, fragment_bytes)
+            stage.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape),
+                         planned_tiles=len(layout), buffer_m=halo * grid.voxel)
         ground_source = "dtm" if dtm is not None else "lowest_hit"
-        buffer = min(100.0, percentile)
-        layout, halo = _tile_layout(grid, top, ground, budget, buffer, fragment_bytes)
         tiled = _grid_bytes(grid.shape, math.prod(grid.shape[:2]), fragment_bytes) > budget
         if stream is not None and tiled:
             # Tiles reread and sort their COPC windows. The acquisition sort
