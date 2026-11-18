@@ -1,7 +1,8 @@
 # 3dtrees_trajectory
 
 Estimate the flight or walking path of a moving lidar sensor (ULS, MLS, ALS) from LAS or LAZ point clouds. The tool
-writes a 3Dtrees trajectory CSV, a quality and resource report, and a map layer. The current package version is
+writes a 3Dtrees trajectory CSV, a quality and resource report, and a map layer. It can also map occlusion along
+the estimated or delivered path. The current package version is
 0.1.0.
 
 ## Run
@@ -33,12 +34,63 @@ existing trajectory CSV.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | At least one valid position was estimated. |
+| `0` | The path was estimated or the delivered-path occlusion products were written. In a combined job, the estimated path may succeed with an occlusion error in the report. |
 | `2` | Invalid arguments, unreadable or unsuitable cloud, static scan, no reliable fit, or an output write failed. The JSON report records the reason when the report path is available and writable. Safe, writable CSV and GeoJSON destinations receive zero-byte files. |
 
 Supply one to 65,536 LAS/LAZ inputs and an output CSV path. The CSV, GeoJSON, report and input paths must be distinct.
 If you set `--interval`, use a positive finite number of seconds (default 0.5). An interval must be long enough for
 the cloud's GPS times to fit into a signed 64-bit window index. `--threads` takes a positive integer.
+
+## Occlusion
+
+```bash
+3dtrees-trajectory flight.laz -o trajectory.csv \
+  --occlusion-copc occlusion.copc.laz --occlusion-cog occlusion.tif
+
+3dtrees-trajectory flight.laz --trajectory delivered.csv --report occlusion.report.json \
+  --occlusion-copc occlusion.copc.laz --occlusion-cog occlusion.tif
+```
+
+Supply both occlusion destinations. When `--trajectory` is supplied, occlusion uses that path. With no
+`-o` the tool checks the cloud and writes the occlusion products and report without fitting a path.
+The delivered CSV starts with `time,x,y,z`, optionally preceded by `#` metadata. It needs at least two
+positions, finite coordinates, and unique timestamps in the cloud's GPS clock and coordinate system.
+Resolve week seconds versus adjusted GPS time before running. Both modes require a moving sensor.
+
+The compiled OccPy 0.3.0 traversal linearly interpolates the sensor position for each pulse. Echoes up
+to one second outside the path take the nearest endpoint. More distant echoes are counted and skipped.
+The tool refuses disjoint time ranges. A voxel is filled (1) if there is a registered return, empty (2)
+if seen clear, occluded (3) if only traversed behind returns, or unobserved (4) in the absence of traversal.
+
+Voxel size defaults to 0.5 m. `--voxel` accepts 0.05–10 m. Ground is the centre of the lowest filled voxel
+per column. Gaps take the nearest available ground estimate. Ground more than 2 m above its 5 m
+neighbourhood median is replaced by that median. With `--dtm terrain.tif`, ground comes from band 1 at
+each column centre. The DTM must cover part of the cloud with valid elevations and share its CRS if both
+declare one. Uncovered columns use the nearest sampled elevation. The highest filled voxel caps each
+column.
+
+| File | Contents |
+| --- | --- |
+| `occlusion.copc.laz` | One point at each filled, occluded or unobserved voxel centre from ground through canopy top. Extra dimensions are `occlusion`, `nhit`, `nmiss`, `nocc`, `occluded_fraction` and `height_above_ground`. The fraction is `nocc / (nhit + nmiss + nocc)`, with NaN for unobserved voxels. |
+| `occlusion.tif` | North-up COG with one pixel per voxel column. The 1 m bands are named `occluded_0-1m`, `occluded_1-2m` and so on. Each value is the occluded voxel count divided by the sum of filled, empty and occluded voxels, with NaN when the sum is zero. The final `unobserved_column` band gives the unobserved share of all voxels from ground through canopy top. |
+
+If there are no qualifying voxels, the COPC is zero bytes and the COG is valid with NaN values. On an
+occlusion error both destinations are zero bytes and the report gives the reason. A combined job can
+still return its estimated trajectory. The report includes traversal counts, in-range class totals,
+and the pooled occluded share per height band.
+
+OccPy holds three native count grids over the acquisition. Output windows limit additional memory
+and share the same traversal grid across boundaries. Grid size is limited to one billion voxels
+and three million XY columns, and input is limited to OccPy's signed 32-bit echo count. A coarser
+voxel can reduce grid memory. OccPy retains the remaining pulses in memory after it detects
+unsorted multi-return data. Separate pulses sharing one GPS time in a multi-return file can be
+merged or dropped by the OccPy core. Use original strips in acquisition order.
+
+COPC indexing and COG conversion use temporary files beside the product destinations. The job needs
+space for the uncompressed voxel LAS, intermediate TIFF and final outputs. Tune the job's CPU and RAM
+allocation using the report's process and dedicated cgroup measurements. The image includes Untwine
+1.5.1. For local runs, set `TRAJECTORY_UNTWINE` to an executable installation and install the compiled
+OccPy wheel with `python -m pip install --no-deps occpy_ls==0.3.0`.
 
 ## How it works
 
