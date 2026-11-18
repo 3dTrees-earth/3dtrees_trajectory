@@ -4,13 +4,12 @@ import math
 import laspy
 import numpy as np
 import pytest
+from laspy.copc import Bounds
 
 from synthetic import flight
 from test_occlusion import needs_untwine
 from threedtrees_trajectory import occlusion, pulses
 from threedtrees_trajectory.cli import main
-from laspy.copc import Bounds
-
 from threedtrees_trajectory.cloud import TimeSortedCopc
 
 
@@ -63,6 +62,27 @@ def test_copc_tile_stream_reads_only_buffered_bounds(tmp_path):
     selected = TimeSortedCopc(copc, tmp_path, 101, bounds)
     gps = np.concatenate([p.gps_time for p in selected.chunks()])
     np.testing.assert_array_equal(gps, np.sort(data.gps_time[np.asarray(data.x) >= midpoint]))
+
+
+def test_laz_traversal_recovers_bounded_separated_echoes(tmp_path, monkeypatch):
+    original, separated = tmp_path / "flight.las", tmp_path / "separated.laz"
+    time, xyz = flight(original, seconds=1, rate=100)
+    data = laspy.read(original)
+    order = np.argsort(np.asarray(data.return_number), kind="stable")
+    data.points = data.points[order]
+    data.write(separated)
+    grid, _ = occlusion._grid([original], 1)
+    monkeypatch.setattr(occlusion, "CHUNK", 47)
+
+    def trace(path):
+        stats = dict(echoes_read=0, echoes_outside_path=0, traversed_pulses=0, missing_returns=0)
+        return occlusion._trace_grid([path], grid, time, xyz, stats), stats
+
+    expected, _ = trace(original)
+    actual, recovered = trace(separated)
+    assert recovered["recovered_echoes"] > 100 and recovered["unpaired_echoes"] == 0
+    for a, b in zip(expected, actual):
+        np.testing.assert_array_equal(a, b)
 
 
 @needs_untwine

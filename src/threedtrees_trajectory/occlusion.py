@@ -41,6 +41,7 @@ HARD_BUDGET = 64 * GIB
 GRID_BYTES_PER_VOXEL = 72
 GRID_BYTES_PER_COLUMN = 320
 WORKING_BYTES = 2 * GIB
+MAX_FRAGMENT_ECHOES = 5_000_000
 WINDOW = 128  # XY block size for deriving and writing the products
 BAND_M = 1.0  # height band of the COG
 SPIKE_M = 2.0  # a lowest-hit ground this far above its neighbourhood is vegetation, not ground
@@ -150,14 +151,17 @@ def _xy_mask(chunk, bounds, time, keep):
     return keep & np.repeat(np.logical_or.reduceat(nearby, starts), np.diff(np.r_[starts, len(time)]))
 
 
-def _trace_multi(tracer, coords, sensor, time, rn, nr, source, channel) -> int:
-    """Submit only complete shots. OccPy retains incomplete shots after clearPulseDataset()."""
+def _trace_multi(tracer, coords, sensor, time, rn, nr, source, channel, ordered=False) -> np.ndarray:
+    """Trace complete shots. OccPy retains incomplete shots after clearPulseDataset()."""
     same = (time[1:] == time[:-1]) & (source[1:] == source[:-1]) & (channel[1:] == channel[:-1])
-    index = np.arange(len(time))
-    group_start = np.maximum.accumulate(np.where(np.r_[True, ~same], index, 0))
-    previous_first = np.maximum.accumulate(np.where(rn == 1, index, -1))
-    joined = same & ~((rn[1:] == 1) & (previous_first[:-1] >= group_start[1:]))
-    starts = np.flatnonzero(np.r_[True, ~joined])
+    if not ordered:
+        # On original strips, a second first return can start another shot
+        # at the same GPS time. Spatially ordered data cannot disambiguate it.
+        index = np.arange(len(time))
+        group_start = np.maximum.accumulate(np.where(np.r_[True, ~same], index, 0))
+        previous_first = np.maximum.accumulate(np.where(rn == 1, index, -1))
+        same &= ~((rn[1:] == 1) & (previous_first[:-1] >= group_start[1:]))
+    starts = np.flatnonzero(np.r_[True, ~same])
     counts = np.diff(np.r_[starts, len(time)])
     target = nr[starts]
     numbers = np.bitwise_or.reduceat(np.left_shift(np.uint32(1), rn), starts)
@@ -168,12 +172,25 @@ def _trace_multi(tracer, coords, sensor, time, rn, nr, source, channel) -> int:
         tracer.addPointData(*(axis[keep] for axis in (*coords, *sensor)), shot, rn[keep], nr[keep])
         tracer.doRaytracing()
         tracer.clearPulseDataset()
-    return len(keep) - int(keep.sum())
+    return ~keep
+
+
+def _recover_fragments(tracer, fragments, time, xyz) -> int:
+    values = [np.concatenate(parts) for parts in zip(*fragments)]
+    x, y, z, t, rn, nr, source, channel = values
+    order = np.lexsort((rn, channel, source, t))
+    coords = [axis[order] for axis in (x, y, z)]
+    t = t[order]
+    unpaired = _trace_multi(tracer, coords, _positions(t, time, xyz), t, rn[order], nr[order],
+                            source[order], channel[order], ordered=True)
+    return int(unpaired.sum())
 
 
 def _trace_file(path: Path, tracer, grid: Grid, time: np.ndarray, xyz: np.ndarray, counters: dict,
                 traced_records: int, prepared=None, bounds=None) -> int:
     chunks = prepared.chunks() if prepared is not None else pulse_chunks(point_chunks(path, CHUNK), CHUNK)
+    fragments = []
+    num_fragments = unpaired = 0
     for chunk in chunks:
         t = chunk.gps_time
         if not np.isfinite(t).all():
@@ -204,9 +221,23 @@ def _trace_file(path: Path, tracer, grid: Grid, time: np.ndarray, xyz: np.ndarra
         multi = ~single
         source = chunk.point_source_id[keep][multi]
         channel = np.asarray(chunk.scanner_channel)[keep][multi] if chunk.point_format.id >= 6 else np.zeros(len(source), np.uint8)
-        unpaired = _trace_multi(tracer, [axis[multi] for axis in coords], [axis[multi] for axis in sensor],
-                                t[multi], rn[multi], nr[multi], source, channel)
-        counters["unpaired_echoes"] = counters.get("unpaired_echoes", 0) + unpaired
+        multi_coords = [axis[multi] for axis in coords]
+        shot = (t[multi], rn[multi], nr[multi], source, channel)
+        pending = _trace_multi(tracer, multi_coords, [axis[multi] for axis in sensor], *shot,
+                               ordered=prepared is not None)
+        count = int(pending.sum())
+        if prepared is not None:
+            unpaired += count
+        elif count:
+            num_fragments += count
+            if num_fragments > MAX_FRAGMENT_ECHOES:
+                raise ValueError(f"{path.name}: too many separated multi-return echoes for the LAZ stream. "
+                                 "Provide acquisition-order strips or a merged COPC.")
+            fragments.append(tuple(axis[pending] for axis in (*multi_coords, *shot)))
+    if fragments:
+        unpaired = _recover_fragments(tracer, fragments, time, xyz)
+        counters["recovered_echoes"] = counters.get("recovered_echoes", 0) + num_fragments - unpaired
+    counters["unpaired_echoes"] = counters.get("unpaired_echoes", 0) + unpaired
     return traced_records
 
 
@@ -575,7 +606,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
     copc.parent.mkdir(parents=True, exist_ok=True)
     cog.parent.mkdir(parents=True, exist_ok=True)
     counters = {"echoes_read": 0, "echoes_outside_path": 0, "traversed_pulses": 0, "missing_returns": 0,
-                "unpaired_echoes": 0}
+                "unpaired_echoes": 0, "recovered_echoes": 0}
     budget = min(budget, HARD_BUDGET)
     with TemporaryDirectory(prefix=".occlusion-", dir=scratch) as folder, \
          TemporaryDirectory(prefix=".occlusion-", dir=cog.parent) as cog_folder, \
