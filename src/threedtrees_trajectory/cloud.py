@@ -4,6 +4,8 @@ from __future__ import annotations
 import mmap
 from contextlib import contextmanager
 from pathlib import Path
+from shutil import disk_usage
+from struct import error as StructError
 from tempfile import TemporaryDirectory
 
 import laspy
@@ -121,6 +123,11 @@ class TimeSortedCopc:
             self.header = reader.header
             if not is_copc(self.header):
                 raise ValueError(f"{path.name} is not a COPC point cloud.")
+        if bounds is None:
+            expected = self.header.point_count * SORT_BYTES_PER_POINT
+            if expected > SORT_LIMIT or expected > disk_usage(folder).free:
+                raise ValueError(f"{path.name}: COPC time sort needs {expected / 1e9:.1f} GB of temporary disk "
+                                 "within the sort budget.")
         self.path = folder / "runs.bin"
         self.runs = []
         self.bytes_written = 0
@@ -198,7 +205,7 @@ def sorted_copc(paths: list[Path], scratch: Path, size: int = CHUNK, resources=N
     try:
         with open_cloud(paths[0]) as reader:
             first_is_copc = is_copc(reader.header)
-    except (OSError, laspy.errors.LaspyException, ValueError, OverflowError, EOFError):
+    except (OSError, laspy.errors.LaspyException, StructError, ValueError, OverflowError, EOFError):
         # The pulse reader validates every header and formats the refusal.
         first_is_copc = False
     if not first_is_copc:

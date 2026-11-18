@@ -406,7 +406,7 @@ def _tile_layout(grid, budget, buffer_m):
     nx, ny, nz = grid.shape
     if _grid_bytes(grid.shape, nx * ny) <= budget:
         return [(slice(0, nx), slice(0, ny))], 0
-    halo = math.ceil(buffer_m / grid.voxel)
+    halo = min(math.ceil(buffer_m / grid.voxel), math.floor(100.0 / grid.voxel + 1e-12))
     # Use the full length if one XY axis already fits across the buffered tile.
     def footprint(edge):
         return min(nx, edge + 2 * halo), min(ny, edge + 2 * halo), nz

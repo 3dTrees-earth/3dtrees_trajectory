@@ -180,3 +180,25 @@ def test_single_return_scan_angle_occlusion_is_rough(tmp_path):
     assert data["occlusion"]["traversed_pulses"] > 0
     with rasterio.open(cog) as raster:
         assert raster.tags()["OCCLUSION_QUALITY"] == "rough"
+
+
+@needs_untwine
+def test_single_returns_without_an_angle_need_a_delivered_path(tmp_path):
+    cloud = tmp_path / "single.laz"
+    time, xyz = flight(cloud, seconds=5, rate=500, single_return=True)
+    data = laspy.read(cloud)
+    data.scan_angle[:] = 0
+    data.write(cloud)
+    path = tmp_path / "estimated.csv"
+    report = tmp_path / "report.json"
+    products = ["--occlusion-copc", str(tmp_path / "o.copc.laz"), "--occlusion-cog", str(tmp_path / "o.tif")]
+    args = [str(cloud), "--report", str(report), *products]
+    assert main([*args, "-o", str(path)]) == 2
+    assert "Single returns without scan angle" in json.loads(report.read_text())["error"]
+
+    delivered = tmp_path / "delivered.csv"
+    _delivered(delivered, time[::50], xyz[::50])
+    assert main([*args, "--trajectory", str(delivered)]) == 0
+    data = json.loads(report.read_text())["occlusion"]
+    assert data["trajectory"] == "delivered"
+    assert data["delivered_path_check"]["threshold_exceeded"] is None

@@ -8,6 +8,7 @@ import os
 import sys
 from contextlib import ExitStack
 from pathlib import Path
+from struct import error as StructError
 
 from . import __version__
 from .resources import RunResources, decoding_threads
@@ -111,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     for variable in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS"):
         os.environ[variable] = "1"
 
+    from laspy.errors import LaspyException
+    from lazrs import LazrsError
     from pyproj.exceptions import ProjError
 
     from .cloud import sorted_copc
@@ -177,8 +180,8 @@ def main(argv: list[str] | None = None) -> int:
                     "incomplete_multi_pulses": info.incomplete_multi_pulses,
                     "out_of_order_records_sampled": info.joined_out_of_order_points,
                 }
-            except (OSError, ValueError, MemoryError) as error:
-                error_message = str(error) or "The job ran out of memory."
+            except (OSError, ValueError, MemoryError, LaspyException, LazrsError, StructError, EOFError) as error:
+                error_message = str(error) or "The job could not read its input or ran out of memory."
         if error_message is None and occlusion_paths:
             path_inputs = _occlusion_path(args, result, pulses, resources)
             pulses = None
