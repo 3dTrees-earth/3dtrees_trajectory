@@ -12,13 +12,13 @@ from . import __version__
 from .resources import RunResources, decoding_threads
 
 
-def _validate_paths(outputs: tuple[Path, ...], clouds: list[Path]) -> None:
+def _validate_paths(outputs: tuple[Path, ...], inputs: list[Path]) -> None:
     """Keep output replacement away from inputs and other destinations."""
     for index, path in enumerate(outputs):
         for other in outputs[:index]:
             if _paths_overlap(path, other):
-                raise ValueError("CSV, GeoJSON and report need separate output paths.")
-    if not set(outputs).isdisjoint(clouds):
+                raise ValueError("All products and the report need separate output paths.")
+    if any(_paths_overlap(output, item) for output in outputs for item in inputs):
         raise ValueError("Output paths must differ from input paths.")
     # Publishing replaces the directory entry, so a hard link at an output
     # destination leaves the existing input inode untouched.
@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-o", "--output", type=Path, help="3Dtrees trajectory CSV")
     parser.add_argument("--report", type=Path, help="JSON quality report (default next to the CSV)")
     parser.add_argument("--geojson", type=Path, help="map layer of the path (default next to the CSV)")
-    parser.add_argument("--no-platform-check", action="store_true", help="skip static (TLS) cloud detection")
+    parser.add_argument("--no-platform-check", action="store_true", help="skip static (TLS) cloud detection when estimating a path")
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
     parser.add_argument("--threads", help="maximum LAZ decoding threads (defaults to GALAXY_SLOTS or 8)")
     parser.add_argument("--full", action="store_true", help="keep all pulses (requires more memory)")
@@ -60,11 +60,12 @@ def main(argv: list[str] | None = None) -> int:
     safe_report = False
     try:
         clouds = [path.resolve() for path in args.clouds]
+        inputs = clouds + [item.resolve() for item in (args.trajectory, args.dtm) if item is not None]
         resolved_report = report_path.resolve()
         resolved_products = tuple(path.resolve() for path in products)
-        _validate_paths((resolved_report,), clouds)
+        _validate_paths((resolved_report,), inputs)
         safe_report = not any(_paths_overlap(resolved_report, product) for product in resolved_products)
-        _validate_paths((*resolved_products, resolved_report), clouds)
+        _validate_paths((*resolved_products, resolved_report), inputs)
         safe_products = bool(products)
         if unknown:
             raise ValueError(f"Unrecognized arguments: {' '.join(unknown)}")
@@ -107,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from pyproj.exceptions import ProjError
 
-    from .estimate import estimate
+    from .estimate import STATIC_REFUSAL, detect_platform, estimate
     from .output import geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
     from .pulses import CloudInfo, read_pulses
 
@@ -117,9 +118,14 @@ def main(argv: list[str] | None = None) -> int:
     data = None
     if error_message is None:
         try:
-            if args.trajectory is None:
-                pulses, _ = read_pulses(args.clouds, full=args.full, info=info)
-                result = estimate(pulses, check_platform=not args.no_platform_check, interval=interval)
+            pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info)
+            if args.trajectory is not None:
+                platform, evidence = detect_platform(pulses)
+                if platform == "static":
+                    raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
+            if args.output is not None:
+                result = estimate(pulses, check_platform=args.trajectory is None and not args.no_platform_check,
+                                  interval=interval)
                 try:
                     layer = geojson(info, result)
                 except ProjError:
@@ -136,14 +142,18 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, MemoryError) as error:
             error_message = str(error) or "The job ran out of memory."
     if error_message is None and occlusion_paths:
+        pulses = None
         data["occlusion"] = _occlusion(args, result, voxel)
         if "error" in data["occlusion"]:
-            for path in occlusion_paths:
-                write_empty(path)
             if result is None:
                 error_message = data["occlusion"]["error"]
             else:
                 result.warnings.append(f"Occlusion: {data['occlusion']['error']}")
+                for path in occlusion_paths:
+                    try:
+                        write_empty(path)
+                    except OSError as error:
+                        error_message = f"cannot publish empty output {path}: {error}"
     if error_message is not None:
         print(f"error: {error_message}", file=sys.stderr)
         data = {**refusal(info, pulses, error_message), **({"occlusion": data["occlusion"]} if data and "occlusion" in data else {})}
@@ -175,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
 def _occlusion(args, result, voxel: float) -> dict:
     """Run the occlusion part; a failure is reported in its section instead of failing the trajectory."""
     import numpy as np
+    from laspy.errors import LaspyException
+    from lazrs import LazrsError
 
     from . import occlusion
 
@@ -188,7 +200,7 @@ def _occlusion(args, result, voxel: float) -> dict:
             source = "estimated"
         return occlusion.run(args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=voxel,
                              dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source=source)
-    except (OSError, ValueError, MemoryError) as error:
+    except (OSError, ValueError, MemoryError, LaspyException, LazrsError) as error:
         return {"error": str(error) or "The occlusion step ran out of memory."}
 
 
