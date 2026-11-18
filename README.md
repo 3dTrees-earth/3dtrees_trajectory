@@ -37,7 +37,8 @@ existing trajectory CSV.
 | `0` | The path was estimated or the delivered-path occlusion products were written. In a combined job, the estimated path may succeed with an occlusion error in the report. |
 | `2` | Invalid arguments, unreadable or unsuitable cloud, static scan, no reliable fit, or an output write failed. The JSON report records the reason when the report path is available and writable. Safe, writable CSV and GeoJSON destinations receive zero-byte files. |
 
-Supply one to 65,536 LAS/LAZ inputs and an output CSV path. The CSV, GeoJSON, report and input paths must be distinct.
+Supply one to 65,536 per-file LAS/LAZ strips from one acquisition, or one merged COPC (`.copc.laz`).
+Supply an output CSV for an estimated path. The CSV, GeoJSON, report and input paths must be distinct.
 If you set `--interval`, use a positive finite number of seconds (default 0.5). An interval must be long enough for
 the cloud's GPS times to fit into a signed 64-bit window index. `--threads` takes a positive integer.
 
@@ -79,18 +80,35 @@ occlusion error both destinations are zero bytes and the report gives the reason
 still return its estimated trajectory. The report includes traversal counts, in-range class totals,
 and the pooled occluded share per height band.
 
-OccPy holds three native count grids over the acquisition. Output windows limit additional memory
-and share the same traversal grid across boundaries. Grid size is limited to one billion voxels
-and three million XY columns, and input is limited to OccPy's signed 32-bit echo count. A coarser
-voxel can reduce grid memory. OccPy retains the remaining pulses in memory after it detects
-unsorted multi-return data. Separate pulses sharing one GPS time in a multi-return file can be
-merged or dropped by the OccPy core. Use original strips in acquisition order.
+A first pass derives the lowest and highest in-range point voxel in each column. Traversal keeps the vertical
+band from estimated ground minus 1 m to canopy top plus 1 m, on the original voxel lattice. The products cap
+each column at its highest registered hit. If the estimate for the cropped grid exceeds 16 GiB
+(`--grid-memory-gib`), the tool traces buffered XY tiles and writes their nonoverlapping cores to the same products.
+Each tile uses its local ground and canopy envelope to size the vertical grid.
+It estimates the buffer from the 99.9th percentile of horizontal ray distance through the vegetation band on a
+deterministic 1% pulse sample, rounds to a voxel boundary, and caps the applied halo at 100 m. An unworkable grid under the
+64 GiB planning ceiling fails with a report. COPC tiles use octree spatial reads. LAS/LAZ tiles scan the strips in
+their original order. Rays longer than the buffer and non-collinear returns can change results near tile seams.
 
-COPC indexing and COG conversion use temporary files beside the product destinations. The job needs
-space for the uncompressed voxel LAS, intermediate TIFF and final outputs. Tune the job's CPU and RAM
-allocation using the report's process and dedicated cgroup measurements. The image includes Untwine
-1.5.1. For local runs, set `TRAJECTORY_UNTWINE` to an executable installation and install the compiled
-OccPy wheel with `python -m pip install --no-deps occpy_ls==0.3.0`.
+The delivered path is used for every occlusion ray when supplied. The report and COG metadata flag a median
+perpendicular distance above 0.1 m from the delivered path to usable pulse lines. With only single returns there
+are no return lines for this check. OccPy traces single-return shots independently. An occlusion run from a
+scan-angle estimate is marked `rough` in both outputs.
+
+COPC indexing and COG conversion use temporary files beside the product destinations. The job needs space for
+the uncompressed voxel LAS, intermediate TIFF and final outputs. The image includes Untwine 1.5.1. For local
+runs, set `TRAJECTORY_UNTWINE` to an executable installation and install the compiled OccPy wheel with
+`python -m pip install --no-deps occpy_ls==0.3.0`.
+
+## Platform pre-gate
+
+Use the standardization metadata to check that GPS time is present and varying. Treat
+`max(NumberOfReturns) > 1` as evidence of multi-returns. A single-return cloud needs usable scan angles or an
+available delivered path for occlusion. Check for a scan-angle dimension and actual nonzero values, since a LAS
+point format can contain an angle field filled with zero. Multi-return clouds can estimate a path without angles
+when they have enough usable pulse lines. The tool checks usable pulses, the multi-return share, return pairing,
+and static-scan evidence and records its refusal in JSON. The platform gate can route clearly unsuitable
+datasets before scheduling a job.
 
 ## How it works
 
@@ -102,8 +120,8 @@ OccPy wheel with `python -m pip install --no-deps occpy_ls==0.3.0`.
 
 Line fits that miss their pulse lines by more than ten times the median, with a threshold of at least 0.25 m, are
 dropped. The tool also drops positions over 1 m from the path described by nearby fits. The line quality labels are
-`good` through a 0.1 m median miss, `rough` through 0.5 m, and `unreliable` above 0.5 m. Scan-angle fits are
-labelled `rough`. On the archived 3Dtrees comparison, most YellowScan multi-return paths were accurate to a few
+`good` through a 0.1 m median miss and `rough` through 0.5 m. A line estimate above 0.5 m is refused
+as unreliable. Scan-angle fits are labelled `rough`. On the archived 3Dtrees comparison, most YellowScan multi-return paths were accurate to a few
 centimetres. Scan-angle estimates had about 1 m horizontal error on RIEGL and DJI flights and about 8 m on
 YellowScan.
 
@@ -115,27 +133,62 @@ the path tool's scope.
 
 ## Resources and limits
 
-- The reader decodes five million points at a time and selects only the LAZ fields used by the solver when the
-  point format permits it. Non-COPC LAZ decoding uses `GALAXY_SLOTS` (default 8 locally) or the lower
-  `--threads` limit, capped by CPU affinity and available cgroup v2 CPU quota. COPC decoding and numerical
-  library reductions are serial.
-- The default retains roughly up to 40 million multi-return pulses and 10 million single returns, or 40 million
-  single returns when the first block looks single-return. The tool thins by stride across the acquisition.
-  `--full` retains all pulses and requires memory proportional to the cloud size. The path fit keeps the selected
-  pulse columns and processes one fitting window at a time. Endpoint coordinates use float32 relative to the first
-  nonempty file's LAS offset. Widely separated clouds reduce sub-metre precision.
-- The report's `resources` object includes `points_read`, `wall_seconds`, `cpu_seconds`, `peak_rss_bytes`
-  and `decoding_threads`. On cgroup v2 it also records current and peak memory, the local limit, and the change
-  in CPU usage. Cgroup values describe the entire cgroup, including charged file cache and other processes in a
-  shared cgroup. Use a dedicated job/container cgroup for per-run measurements.
-- Original LAS/LAZ strips retain the clearest pulse order. The tool can join separated returns by file, point
-  source and GPS time, up to 40 million retained stray records. Shared timestamps in multibeam or COPC exports
-  can mix pulses, and some pulses spanning read-chunk boundaries can be lost. Thinning or resampling upstream can
-  remove pulse structure.
-- Paths cover the times represented by points. Turns or transit legs omitted from the cloud leave gaps. GPS week
-  rolls and files from different acquisitions should be processed separately.
+- The reader decodes up to five million points per batch and selects the LAZ fields needed by the solver where
+  the point format permits. Non-COPC LAZ decoding uses `GALAXY_SLOTS`, or a lower `--threads` limit, capped by
+  CPU affinity and the cgroup v2 quota. The default is eight. COPC sequential decoding and numerical reductions
+  are serial.
+- The COPC input is externally sorted by GPS time, point source, scanner channel and return number in the job
+  working directory. Temporary runs use about 30 bytes per input point. When tiling, the acquisition sort
+  is released before sorting the active COPC tile. The tool removes the temporary runs on exit. GPS time groups stay together across disk runs
+  and read chunks. A merged COPC must preserve return numbers, GPS time and source/channel identity. Duplicate
+  multi-return numbers with the same time, source and channel are ambiguous.
+- Per-file LAS/LAZ retains the original point order and avoids the time sort. The trajectory reader can recover
+  complete pulses whose returns were stored apart, within a bounded sample. Traversal can rejoin up to 40
+  million separated echoes per input strip in bounded batches and refuses larger fragment sets. It reports recovered and skipped
+  echoes. Heavy thinning, return renumbering, and
+  clock resets can remove the information needed to reconstruct pulses.
+- A timestamp hash samples the acquisition independently of file order. Default budgets are approximately
+  40 million multi-return and 10 million single-return pulses, or 40 million single-return pulses in a cloud
+  that starts with very few multi-returns. `--full` uses memory proportional to the input. The solver uses
+  float32 endpoints relative to a common kilometre-aligned origin.
+- `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements when
+  available. `stages` records per-stage wall, self and child CPU, peak process RSS, and bytes when available.
+  Linux resets the RSS high-water mark between stages. Cgroup memory includes file cache, so use a dedicated
+  cgroup for each job when measuring.
+- Positions cover sampled acquisition times. GPS week rolls, overlapping independent flights with the same
+  clock and identifiers, and widely separated acquisitions should be split before processing.
 
-## Local replay
+## Container replay
+
+The runtime source was mounted read-only into the trajectory image with Untwine 1.5.1. Each replay had
+eight decoder slots and a ten-CPU affinity mask. The wall values are from the instrumented tool. Cgroup peaks
+include cache. For tiled jobs, decoded points, traversed pulses and other counters are summed across buffered
+tiles, so one point can contribute to multiple tiles.
+
+| Dataset | Input | Points | Grid voxels | Tiles | Wall (s) | Peak RSS (GiB) | Cgroup peak (GiB) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1807 YellowScan | LAZ | 52.7 M | 15.8 M | 1 | 96.9 | 2.39 | 2.33 |
+| 1807 YellowScan | COPC | 52.7 M | 15.8 M | 1 | 144.0 | 3.66 | 3.64 |
+| 1807 YellowScan | LAZ | 52.7 M | 15.8 M | 2 | 122.4 | 2.36 | 2.75 |
+| 1807 YellowScan | COPC | 52.7 M | 15.8 M | 2 | 176.9 | 3.16 | 3.19 |
+| 2014 DJI L3 | LAZ | 52.7 M | 773.2 M | 9 | 451.9 | 6.61 | 6.76 |
+| 2014 DJI L3 | COPC | 52.7 M | 773.2 M | 9 | 452.8 | 9.30 | 10.18 |
+
+## Galaxy resource proposal
+
+Use the cropped buffered tile size for memory planning. The tool estimates `2 GiB + 72 × tile voxels
++ 320 × tile XY columns + 32 × acquisition XY columns` bytes, plus a reserve for separated LAZ echoes. Allow separate headroom for the path solver,
+the job runtime and COPC file cache. COPC acquisition sorting also needs about 30 GB of working disk per
+billion points. With tiled LAZ, budget time for a complete scan per tile. With tiled COPC, budget for one
+acquisition sort and spatial reads and sorts for the buffered tiles.
+
+A candidate TPV rule would start at four slots for small jobs and eight for large LAZ decoding or Untwine
+indexing. Estimate wall time from total decoded points and total allocated buffered voxels. Estimate memory
+from the largest tile and the measured solver RSS. Validate both against dedicated job cgroup peaks and add
+site-specific headroom before setting job classes. The exact Galaxy memory classes and the platform's default
+input representation are deployment decisions.
+
+## Archived trajectory-only replay
 
 A replay of 36 archived 3Dtrees ULS/MLS datasets matched the time and XYZ bytes of all 35 prior paths.
 Dataset 2018 reproduced its refusal because it has single returns without a usable scan angle.
