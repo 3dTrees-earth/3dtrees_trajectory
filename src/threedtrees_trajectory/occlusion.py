@@ -743,9 +743,10 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
                 tags["OCCLUSION_DELIVERED_MISS_MEDIAN_M"] = str(delivered_check["median_m"])
         specs = [_tile_spec(grid, index, plan, echoes)
                  for index, (plan, echoes) in enumerate(zip(layout, data["tile_echoes"]))]
+        priority = sorted(specs, key=lambda job: (-data["tile_echoes"][job[0]], -job[1]))
         try:
             with _stage(resources, "traversal", children=True) as stage:
-                tiles = execute(work, specs, slots, _trace_tile, _init_traversal,
+                tiles = execute(work, priority, slots, _trace_tile, _init_traversal,
                                 (work, spool, time, xyz, data["transforms"]), stage)
                 stage["tiles"] = [tiles[i] | {"estimated_grid_bytes": specs[i][1]} for i in range(len(layout))]
         except BrokenProcessPool as error:

@@ -95,7 +95,8 @@ The tool writes each tile's nonoverlapping core to the products. Rays longer tha
 near tile seams.
 
 Separate worker processes trace tiles, with one OccPy grid per worker. The tool schedules tiles within the
-job's CPU and memory budgets and commits each tile's core counts to scratch before merging. To resume
+job's CPU and memory budgets, giving priority to tiles with more routed echoes. It commits each tile's core
+counts to scratch before merging. To resume
 after an interruption, give the command the same inputs, parameters and output paths. Keep the
 `.occlusion-*` directory beside the COPC until the merge finishes. The tool cleans up the checkpoint
 after publishing both products.

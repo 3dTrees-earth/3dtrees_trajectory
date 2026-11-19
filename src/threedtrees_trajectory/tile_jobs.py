@@ -93,7 +93,7 @@ def save_tile(work, index, counts, data):
 
 
 def execute(work, specs, slots, worker, init, initargs, stage):
-    """Budget reservations cover every submitted job; completed tiles release their reservation."""
+    """Admit jobs in the supplied priority order subject to CPU and memory reservations."""
     results, pending = {}, []
     for index, amount, shape, args in specs:
         previous = finished(work, index, shape)
@@ -110,7 +110,6 @@ def execute(work, specs, slots, worker, init, initargs, stage):
     if not pending:
         return results
 
-    pending.sort(key=lambda job: -job[1])
     reserved, running = 0, {}
     try:
         with ProcessPoolExecutor(max_workers=min(len(pending), slots), mp_context=multiprocessing.get_context("spawn"),
