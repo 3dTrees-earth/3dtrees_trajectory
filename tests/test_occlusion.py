@@ -6,6 +6,7 @@ import laspy
 import numpy as np
 import pytest
 
+from legacy_occlusion import trace_reference
 from synthetic import _write, flight, scan
 from threedtrees_trajectory import occlusion
 from threedtrees_trajectory.cli import main
@@ -123,7 +124,7 @@ def test_streamed_and_unsorted_multi_return_counts_agree(tmp_path, monkeypatch):
 
     def trace(paths):
         stats = dict(echoes_read=0, echoes_outside_path=0, traversed_pulses=0, missing_returns=0)
-        return occlusion._trace_grid(paths, grid, time, sensor, stats)
+        return trace_reference(paths, grid, time, sensor, stats)
 
     for expected, actual, combined in zip(trace([sorted_cloud]), trace([unsorted_cloud]),
                                           trace([sorted_cloud, unsorted_cloud])):
@@ -139,7 +140,7 @@ def test_single_returns_are_independent_even_with_a_shared_time(tmp_path, return
     _write(cloud, hits, np.array([11., 11., 12.]), returns, returns, np.zeros(len(hits)))
     grid, _ = occlusion._grid([cloud], 0.5)
     stats = dict(echoes_read=0, echoes_outside_path=0, traversed_pulses=0, missing_returns=0)
-    hit, _, _ = occlusion._trace_grid([cloud], grid, np.array([10., 13.]),
+    hit, _, _ = trace_reference([cloud], grid, np.array([10., 13.]),
                                       np.array([[0.28, 0.31, 2.25], [2.31, 0.30, 2.25]]), stats)
     assert hit[:, 0, 0].tolist() == [1, 0, 1, 0, 1]
     assert stats["traversed_pulses"] == 3

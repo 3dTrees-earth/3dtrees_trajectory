@@ -29,9 +29,7 @@ from tempfile import TemporaryDirectory
 import laspy
 import numpy as np
 
-from laspy.copc import Bounds
-
-from .cloud import CHUNK, is_copc, point_chunks, pulse_chunks
+from .cloud import CHUNK, is_copc, point_chunks
 from .pulses import MAX_STRAY, Pulses, _crs, _sample, _time_system
 from .resources import RunResources, available_memory, decoding_threads
 from .tile_jobs import atomic_json, discard_finished_spools, execute, identify, lock_job, save_tile, tile_files
@@ -48,7 +46,6 @@ GRID_BYTES_PER_COLUMN = 320
 WORKING_BYTES = 2 * GIB
 MAX_FRAGMENT_ECHOES = MAX_STRAY
 FRAGMENT_BYTES_PER_ECHO = 112
-FRAGMENT_BATCH = 1_000_000
 NATIVE_ECHO_LIMIT = int(np.iinfo(np.int32).max)
 ECHO_BIN = 16
 WINDOW = 128  # XY block size for deriving and writing the products
@@ -148,134 +145,6 @@ def delivered_miss(pulses: Pulses, time: np.ndarray, xyz: np.ndarray) -> dict:
 
 def _time_mask(t, time):
     return (t >= time[0] - TIME_MARGIN) & (t <= time[-1] + TIME_MARGIN)
-
-
-def _xy_mask(chunk, bounds, time, keep):
-    """Include all returns of a nearby pulse, including those just outside the buffer."""
-    x, y = np.asarray(chunk.x), np.asarray(chunk.y)
-    lo, hi = bounds.mins, bounds.maxs
-    nearby = ((lo[0] <= x) & (x <= hi[0]) & (lo[1] <= y) & (y <= hi[1]))
-    if not nearby.any():
-        return nearby
-    starts = np.flatnonzero(np.r_[True, time[1:] != time[:-1]])
-    return keep & np.repeat(np.logical_or.reduceat(nearby, starts), np.diff(np.r_[starts, len(time)]))
-
-
-def _trace_multi(tracer, coords, sensor, time, rn, nr, source, channel, ordered=False) -> np.ndarray:
-    """Trace complete shots. OccPy retains incomplete shots after clearPulseDataset()."""
-    same = (time[1:] == time[:-1]) & (source[1:] == source[:-1]) & (channel[1:] == channel[:-1])
-    if not ordered:
-        # On original strips, a second first return can start another shot
-        # at the same GPS time. Spatially ordered data cannot disambiguate it.
-        index = np.arange(len(time))
-        group_start = np.maximum.accumulate(np.where(np.r_[True, ~same], index, 0))
-        previous_first = np.maximum.accumulate(np.where(rn == 1, index, -1))
-        same &= ~((rn[1:] == 1) & (previous_first[:-1] >= group_start[1:]))
-    starts = np.flatnonzero(np.r_[True, ~same])
-    counts = np.diff(np.r_[starts, len(time)])
-    target = nr[starts]
-    numbers = np.bitwise_or.reduceat(np.left_shift(np.uint32(1), rn), starts)
-    complete = (counts == target) & (numbers == np.left_shift(np.uint32(1), target + 1) - 2)
-    keep = np.repeat(complete, counts)
-    if keep.any():
-        shot = np.repeat(np.arange(len(starts), dtype=np.float64), counts)[keep]
-        tracer.addPointData(*(axis[keep] for axis in (*coords, *sensor)), shot, rn[keep], nr[keep])
-        tracer.doRaytracing()
-        tracer.clearPulseDataset()
-    return ~keep
-
-
-def _recover_fragments(tracer, fragments, time, xyz) -> int:
-    x, y, z, t, rn, nr, source, channel = (np.concatenate(parts) for parts in zip(*fragments))
-    fragments.clear()
-    order = np.lexsort((rn, channel, source, t))
-    ordered_time = t[order]
-    start = unpaired = 0
-    while start < len(order):
-        nominal_stop = min(len(order), start + FRAGMENT_BATCH)
-        stop = int(np.searchsorted(ordered_time, ordered_time[nominal_stop - 1], side="right"))
-        if stop - start > 2 * FRAGMENT_BATCH:
-            raise ValueError("Too many separated echoes share a GPS time to reconstruct the LAZ pulses safely.")
-        idx, times = order[start:stop], ordered_time[start:stop]
-        coords = [axis[idx] for axis in (x, y, z)]
-        missing = _trace_multi(tracer, coords, _positions(times, time, xyz), times, rn[idx], nr[idx],
-                                source[idx], channel[idx], ordered=True)
-        unpaired += int(missing.sum())
-        start = stop
-    return unpaired
-
-
-def _trace_file(path: Path, tracer, grid: Grid, time: np.ndarray, xyz: np.ndarray, counters: dict,
-                traced_records: int, prepared=None, bounds=None) -> int:
-    chunks = prepared.chunks() if prepared is not None else pulse_chunks(point_chunks(path, CHUNK), CHUNK)
-    fragments = []
-    num_fragments = unpaired = 0
-    for chunk in chunks:
-        t = chunk.gps_time
-        if not np.isfinite(t).all():
-            raise ValueError(f"{path.name}: GPS times must be finite.")
-        keep = _time_mask(t, time)
-        counters["echoes_read"] += len(t)
-        counters["echoes_outside_path"] += int((~keep).sum())
-        if bounds is not None and prepared is None:
-            keep = _xy_mask(chunk, bounds, t, keep)
-        if not keep.any():
-            continue
-        t = np.ascontiguousarray(t[keep])
-        traced_records += len(t)
-        if traced_records > NATIVE_ECHO_LIMIT:
-            raise ValueError("More than 2.1 billion echoes in one traversal. Reduce --grid-memory-gib "
-                             "to use smaller tiles or split the acquisition.")
-        # OccPy normalises by the box size before flooring. Nudge exact faces
-        # inward by a negligible fraction of a voxel so tiling and z cropping
-        # use a consistent half-open lattice at representable coordinates.
-        coords = tuple(np.asarray(axis)[keep] + grid.voxel * 1e-7 for axis in (chunk.x, chunk.y, chunk.z))
-        sensor = _positions(t, time, xyz)
-        rn, nr = np.asarray(chunk.return_number)[keep], np.asarray(chunk.number_of_returns)[keep]
-        single = (rn <= 1) & (nr <= 1)
-        if single.any():
-            tracer.doRaytracing_singleReturnPulses(*(axis[single] for axis in (*coords, *sensor)), t[single])
-        if single.all():
-            continue
-        multi = ~single
-        source = chunk.point_source_id[keep][multi]
-        channel = np.asarray(chunk.scanner_channel)[keep][multi] if chunk.point_format.id >= 6 else np.zeros(len(source), np.uint8)
-        multi_coords = [axis[multi] for axis in coords]
-        shot = (t[multi], rn[multi], nr[multi], source, channel)
-        pending = _trace_multi(tracer, multi_coords, [axis[multi] for axis in sensor], *shot,
-                               ordered=prepared is not None)
-        count = int(pending.sum())
-        if prepared is not None:
-            unpaired += count
-        elif count:
-            num_fragments += count
-            if num_fragments > MAX_FRAGMENT_ECHOES:
-                raise ValueError(f"{path.name}: too many separated multi-return echoes for the LAZ stream. "
-                                 "Provide acquisition-order strips or a merged COPC.")
-            fragments.append(tuple(axis[pending] for axis in (*multi_coords, *shot)))
-    if fragments:
-        unpaired = _recover_fragments(tracer, fragments, time, xyz)
-        counters["recovered_echoes"] = counters.get("recovered_echoes", 0) + num_fragments - unpaired
-    counters["unpaired_echoes"] = counters.get("unpaired_echoes", 0) + unpaired
-    return traced_records
-
-
-def _trace_grid(paths: list[Path], grid: Grid, time: np.ndarray, xyz: np.ndarray, counters: dict,
-                prepared=None, bounds=None) -> tuple:
-    from raytr import PyRaytracer
-
-    tracer = PyRaytracer()
-    hi = grid.origin + np.array(grid.shape) * grid.voxel
-    tracer.defineGrid(grid.origin, hi, *grid.shape, grid.voxel)
-    traced_records = 0
-    for path in paths:
-        traced_records = _trace_file(path, tracer, grid, time, xyz, counters, traced_records, prepared, bounds)
-    counters["traversed_pulses"] += int(tracer.get_num_traversed_pulses())
-    counters["missing_returns"] += int(tracer.get_num_missing_returns())
-    counts = tuple(np.asarray(values(), np.int32) for values in (tracer.getNhit, tracer.getNmiss, tracer.getNocc))
-    if any(values.min(initial=0) < 0 for values in counts):
-        raise ValueError("Too many pulses traverse the same voxel for the native 32-bit count.")
-    return counts
 
 
 def classify(nhit: np.ndarray, nmiss: np.ndarray, nocc: np.ndarray) -> np.ndarray:
@@ -600,7 +469,7 @@ def _init_traversal(work, spool, time, xyz, transforms):
     _TILE_CONTEXT = work, spool, time, xyz, np.asarray(transforms)
 
 
-def _trace_tile(index, tile, core):
+def _trace_tile(index, tile, core, expected_echoes):
     from time import perf_counter, process_time
 
     from raytr import PyRaytracer
@@ -635,6 +504,8 @@ def _trace_tile(index, tile, core):
                 tracer.doRaytracing()
                 tracer.clearPulseDataset()
             points += len(t)
+    if points != expected_echoes:
+        raise ValueError(f"Occlusion tile {index + 1} spool has {points:,} of {expected_echoes:,} expected echoes.")
     traversed = int(tracer.get_num_traversed_pulses())
     missing = int(tracer.get_num_missing_returns())
     counts = tuple(np.asarray(values(), np.int32)[core] for values in (tracer.getNhit, tracer.getNmiss, tracer.getNocc))
@@ -648,13 +519,13 @@ def _trace_tile(index, tile, core):
     return data
 
 
-def _tile_spec(grid, index, plan):
+def _tile_spec(grid, index, plan, expected_echoes):
     start = np.array([part.start for part in plan.extent])
     tile = Grid(grid.origin + start * grid.voxel, plan.shape, grid.voxel)
     core = tuple(slice(part.start - offset, part.stop - offset)
                  for part, offset in zip(plan.core, start[:2]))
     shape = tuple(part.stop - part.start for part in (*core, plan.extent[2]))
-    return index, _grid_bytes(tile.shape), shape, (tile, core)
+    return index, _grid_bytes(tile.shape), shape, (tile, core, expected_echoes)
 
 
 def _completed_tiles(work, layout):
@@ -831,7 +702,8 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             tags["OCCLUSION_DELIVERED_MISS_FLAG"] = "unavailable" if flag is None else str(flag).lower()
             if flag is not None:
                 tags["OCCLUSION_DELIVERED_MISS_MEDIAN_M"] = str(delivered_check["median_m"])
-        specs = [_tile_spec(grid, index, plan) for index, plan in enumerate(layout)]
+        specs = [_tile_spec(grid, index, plan, echoes)
+                 for index, (plan, echoes) in enumerate(zip(layout, data["tile_echoes"]))]
         try:
             with _stage(resources, "traversal", children=True) as stage:
                 tiles = execute(work, specs, decoding_threads(threads), _trace_tile, _init_traversal,

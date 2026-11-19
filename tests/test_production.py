@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from laspy.copc import Bounds
 
+from legacy_occlusion import trace_reference
 from synthetic import flight
 from test_occlusion import needs_untwine
 from threedtrees_trajectory import occlusion, pulses
@@ -79,7 +80,7 @@ def test_laz_traversal_recovers_bounded_separated_echoes(tmp_path, monkeypatch):
 
     def trace(path):
         stats = dict(echoes_read=0, echoes_outside_path=0, traversed_pulses=0, missing_returns=0)
-        return occlusion._trace_grid([path], grid, time, xyz, stats), stats
+        return trace_reference([path], grid, time, xyz, stats), stats
 
     expected, _ = trace(original)
     actual, recovered = trace(separated)
