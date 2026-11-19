@@ -178,6 +178,11 @@ tiles, so one point can contribute to multiple tiles.
 | 1844 YellowScan | LAZ | 678.1 M | 203.6 M | 2 | 1440.1 | 7.58 | 14.96 |
 | 1844 YellowScan | COPC | 678.1 M | 203.6 M | 2 | 1901.9 | 6.24 | 32.57 |
 
+
+The 7.04-billion-point 2585 replay produced trajectories from per-file LAZ and merged COPC. The LAZ
+occlusion step refused a strip with more than 40 million separated echoes in a tile. The COPC process
+exited during its fifth tile. Full raster throughput for this acquisition remains unverified.
+
 ## Galaxy resource proposal
 
 Use the cropped buffered tile size for memory planning. The tool estimates `2 GiB + 72 × tile voxels
