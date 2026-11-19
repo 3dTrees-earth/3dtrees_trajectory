@@ -197,6 +197,15 @@ process measurement. Cgroup peaks include the resident caches for the compact so
 | 1807 LAZ | 101.3 | 0.96× | 1 / 1 | 1.27 | 2.73 | 2.17 |
 | 1807 COPC | 120.7 | 1.19× | 1 / 1 | 1.27 | 3.23 | 2.31 |
 | 1844 LAZ | 994.3 | 1.45× | 2 / 2 | 5.22 | 34.49 | 32.49 |
+| 1844 COPC | 1294.6 | 1.47× | 2 / 2 | 5.22 | 39.12 | 30.82 |
+| 2014 multi LAZ | 152.1 | 2.97× | 8 / 8 | 3.96 | 21.75 | 6.48 |
+| 2014 single LAZ | 153.3 | 1.91× | 4 / 4 | 7.83 | 24.01 | 7.53 |
+
+Both 1807 replays and the 1844 LAZ replay reproduce the earlier products exactly. The new 1844 COPC
+reproduces the earlier LAZ voxel classes, per-voxel counts and COG values. Its trajectory CSV is
+byte-identical to the earlier COPC CSV. The earlier COPC clipped some siblings at the outer tile
+buffer. Including complete pulses changes 19 values relative to that COG and 16 classes on shared
+emitted voxel centres.
 
 ## Galaxy resource proposal
 
