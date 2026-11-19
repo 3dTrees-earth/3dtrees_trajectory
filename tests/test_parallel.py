@@ -6,6 +6,7 @@ import laspy
 import numpy as np
 import pytest
 
+from legacy_occlusion import trace_reference
 from synthetic import flight
 from test_occlusion import needs_untwine
 from threedtrees_trajectory import cloud as cloud_io, occlusion, pulses, tile_jobs
@@ -13,7 +14,7 @@ from threedtrees_trajectory.cli import main
 from threedtrees_trajectory.cloud import TimeSortedCopc
 from threedtrees_trajectory.pulses import read_pulses
 from threedtrees_trajectory.resources import RunResources
-from threedtrees_trajectory.tile_spool import ECHO, START, TileSpools, tile_batches
+from threedtrees_trajectory.tile_spool import ECHO, START, TileSpools, pack_echoes, tile_batches
 
 
 def _worker_checkpoint_test(index, work, kill):
@@ -136,3 +137,23 @@ def test_spool_routes_whole_separated_pulse_to_both_tiles(tmp_path):
         batch, = tile_batches(tmp_path / f"tile-{index:05d}", tmp_path)
         assert batch["x"].tolist() == expected
         assert batch["flags"][-2:].tolist() == [START, 0]
+
+
+def test_tile_spool_counts_match_acquisition_order_traversal(tmp_path):
+    cloud = tmp_path / "flight.las"
+    time, xyz = flight(cloud, seconds=2, rate=300)
+    grid, _ = occlusion._grid([cloud], 0.5)
+    counters = dict(echoes_read=0, echoes_outside_path=0, traversed_pulses=0, missing_returns=0)
+    expected = trace_reference([cloud], grid, time, xyz, counters)
+    core, z = tuple(slice(0, size) for size in grid.shape[:2]), slice(0, grid.shape[2])
+    tile = occlusion.Tile(core, (*core, z))
+    points = laspy.read(cloud).points
+    raw = tmp_path / "echoes.bin"
+    pack_echoes(points).tofile(raw)
+    routing = TileSpools(tmp_path, grid, [tile], time, len(points))
+    routing.stage_file(0, raw, points.scales, points.offsets, False)
+    occlusion._init_traversal(tmp_path, tmp_path, time, xyz, [(points.scales, points.offsets)])
+    occlusion._trace_tile(0, grid, core, int(routing.echoes[0]))
+    counts, _ = tile_jobs.tile_files(tmp_path, 0)
+    for old, new in zip(expected, np.load(counts, mmap_mode="r", allow_pickle=False)):
+        np.testing.assert_array_equal(old, new)
