@@ -54,6 +54,29 @@ def decoding_threads(requested: int | None) -> int:
     return min(budgets)
 
 
+def available_memory() -> int:
+    """Additional job memory, accounting for current non-reclaimable cgroup usage."""
+    system = _read(Path("/proc/meminfo"))
+    available = next((int(line.split()[1]) * 1024 for line in system.splitlines()
+                      if line.startswith("MemAvailable:")), None)
+    limits = [available] if available is not None else []
+    group = _cgroup()
+    if group is not None:
+        for path in (group, *group.parents):
+            if not path.is_relative_to(CGROUP):
+                break
+            maximum, current = (_limit(_read(path / name)) for name in ("memory.max", "memory.current"))
+            if maximum is None or current is None:
+                continue
+            reclaimable = sum(int(line.split()[1]) for line in _read(path / "memory.stat").splitlines()
+                              if line.startswith(("inactive_file ", "active_file ")))
+            limits.append(maximum - max(0, current - reclaimable))
+    if not limits:
+        return 16 * 2**30
+    limit = min(limits)
+    return max(0, limit - min(4 * 2**30, max(256 * 2**20, limit // 10)))
+
+
 def _cpu_seconds() -> float:
     return sum(usage.ru_utime + usage.ru_stime for usage in
                (resource.getrusage(resource.RUSAGE_SELF), resource.getrusage(resource.RUSAGE_CHILDREN)))
@@ -91,22 +114,27 @@ class RunResources:
             reset = False
         child_peak_start = _rss(resource.RUSAGE_CHILDREN)
         child_peak = 0
+        aggregate_peak = 0
         stop = Event()
 
         def monitor_children():
-            nonlocal child_peak
+            nonlocal child_peak, aggregate_peak
             tasks = Path("/proc/self/task")
             while not stop.is_set():
+                pids = set()
                 if tasks.is_dir():
                     for task in tasks.iterdir():
-                        for pid in _read(task / "children").split():
-                            child_peak = max(child_peak, _proc_rss(pid, "VmHWM"))
+                        pids.update(_read(task / "children").split())
+                for pid in pids:
+                    child_peak = max(child_peak, _proc_rss(pid, "VmHWM"))
+                aggregate_peak = max(aggregate_peak, _proc_rss("self", "VmRSS")
+                                     + sum(_proc_rss(pid, "VmRSS") for pid in pids))
                 stop.wait(0.1)
 
         monitor = Thread(target=monitor_children, daemon=True) if children else None
         if monitor is not None:
             monitor.start()
-        stage = {"name": name}
+        stage = {"name": name, "start_seconds": round(start_wall - self.start_wall, 6)}
         try:
             yield stage
         finally:
@@ -123,6 +151,7 @@ class RunResources:
                          peak_rss_bytes=max(peak, child_peak), rss_scope="stage" if reset else "process-lifetime")
             if children:
                 stage["child_peak_rss_bytes"] = child_peak
+                stage["sampled_aggregate_rss_bytes"] = max(aggregate_peak, peak, child_peak)
             self.stages.append(stage)
 
     def _group_cpu(self) -> int | None:

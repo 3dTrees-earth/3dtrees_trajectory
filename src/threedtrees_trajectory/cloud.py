@@ -2,11 +2,8 @@
 from __future__ import annotations
 
 import mmap
-from contextlib import contextmanager
 from pathlib import Path
 from shutil import disk_usage
-from struct import error as StructError
-from tempfile import TemporaryDirectory
 
 import laspy
 import numpy as np
@@ -33,24 +30,26 @@ def open_cloud(path: Path) -> laspy.LasReader:
     return reader
 
 
-def _spatial_chunks(path: Path, bounds: Bounds, size: int):
+def _spatial_chunks(path: Path, bounds: Bounds | None, size: int):
     with CopcReader.open(path, decompression_selection=LAZ_FIELDS) as reader:
-        bounds = bounds.ensure_3d(reader.header.mins, reader.header.maxs)
+        if bounds is not None:
+            bounds = bounds.ensure_3d(reader.header.mins, reader.header.maxs)
+            lo = np.ceil((bounds.mins - reader.header.offsets) / reader.header.scales - 1e-7)
+            hi = np.floor((bounds.maxs - reader.header.offsets) / reader.header.scales + 1e-7)
         nodes = load_octree_for_query(reader.source, reader.copc_info, reader.root_page, query_bounds=bounds)
-        axes = ("X", "Y")
-        lo = np.ceil((bounds.mins - reader.header.offsets) / reader.header.scales - 1e-7)
-        hi = np.floor((bounds.maxs - reader.header.offsets) / reader.header.scales + 1e-7)
         batch, count = [], 0
         for node in sorted(nodes, key=lambda n: n.offset):
             if batch and count + node.point_count > size:
-                yield _in_bounds(reader._fetch_and_decompress_points_of_nodes(batch), axes, lo, hi)
+                points = reader._fetch_and_decompress_points_of_nodes(batch)
+                yield points if bounds is None else _in_bounds(points, ("X", "Y"), lo, hi)
                 batch, count = [], 0
             if node.point_count > CHUNK:
                 raise ValueError(f"{path.name}: COPC node exceeds the supported {CHUNK:,}-point stream budget.")
             batch.append(node)
             count += node.point_count
         if batch:
-            yield _in_bounds(reader._fetch_and_decompress_points_of_nodes(batch), axes, lo, hi)
+            points = reader._fetch_and_decompress_points_of_nodes(batch)
+            yield points if bounds is None else _in_bounds(points, ("X", "Y"), lo, hi)
 
 
 def _in_bounds(points, axes, lo, hi):
@@ -60,8 +59,8 @@ def _in_bounds(points, axes, lo, hi):
     return points[keep]
 
 
-def point_chunks(path: Path, size: int, bounds: Bounds | None = None):
-    if bounds is not None:
+def point_chunks(path: Path, size: int, bounds: Bounds | None = None, *, spatial: bool = False):
+    if bounds is not None or spatial:
         yield from (p for p in _spatial_chunks(path, bounds, size) if len(p))
     else:
         with open_cloud(path) as reader:
@@ -94,18 +93,6 @@ def pulse_chunks(chunks, size: int):
             yield laspy.ScaleAwarePointRecord(tail.array, tail.point_format, chunk.scales, chunk.offsets)
 
 
-def _sorted_records(points) -> np.ndarray:
-    rn = np.asarray(points.return_number)
-    order = np.lexsort((rn, np.asarray(points.scanner_channel), points.point_source_id, points.gps_time))
-    out = np.empty(len(order), FORMAT.dtype())
-    for name in out.dtype.names:
-        if name in ("classification", "intensity", "user_data"):
-            out[name] = 0
-        else:
-            out[name] = points.array[name][order]
-    return out
-
-
 def _ordered(records) -> np.ndarray:
     if len(records) <= 1:
         return records
@@ -118,13 +105,14 @@ def _ordered(records) -> np.ndarray:
 class TimeSortedCopc:
     """Sorted disk runs with a batch merge of disjoint, complete GPS-time groups."""
 
-    def __init__(self, path: Path, folder: Path, size: int, bounds: Bounds | None = None):
+    def __init__(self, path: Path, folder: Path, size: int, bounds: Bounds | None = None, *, select=None,
+                 observe=None):
         self.size = size
         with open_cloud(path) as reader:
             self.header = reader.header
             if not is_copc(self.header):
                 raise ValueError(f"{path.name} is not a COPC point cloud.")
-        if bounds is None:
+        if bounds is None and select is None:
             expected = self.header.point_count * SORT_BYTES_PER_POINT
             if expected > SORT_LIMIT or expected > disk_usage(folder).free:
                 raise ValueError(f"{path.name}: COPC time sort needs {expected / 1e9:.1f} GB of temporary disk "
@@ -134,26 +122,38 @@ class TimeSortedCopc:
         self.runs = []
         self.bytes_written = 0
         self.points_read = 0
+        self.points_spooled = 0
+        self.time_range = (np.inf, -np.inf)
         samples = []
         # Keep all sorted runs in one file. The number of runs can exceed the
         # process's file descriptor limit for billion-point acquisitions.
         with self.path.open("xb") as spool, self.keys.open("xb") as keys:
-            for chunk in point_chunks(path, size, bounds):
-                if not np.isfinite(chunk.gps_time).all():
+            for chunk in point_chunks(path, size, bounds, spatial=observe is not None):
+                time = chunk.gps_time
+                low, high = float(time.min()), float(time.max())
+                if not np.isfinite([low, high]).all():
                     raise ValueError(f"{path.name}: GPS times must be finite.")
+                self.time_range = (min(self.time_range[0], low), max(self.time_range[1], high))
+                self.points_read += len(chunk)
+                if observe is not None:
+                    observe(0, chunk)
+                if select is not None:
+                    chunk = select(chunk)
+                if not len(chunk):
+                    continue
                 if self.bytes_written + len(chunk) * SORT_BYTES_PER_POINT > SORT_LIMIT:
                     raise ValueError(f"{path.name}: COPC time sort exceeds the temporary disk budget.")
-                data = _sorted_records(chunk)
-                self.runs.append((self.points_read, len(data)))
+                data = _ordered(chunk.array if chunk.array.dtype == FORMAT.dtype() else _base_records(chunk))
+                self.runs.append((self.points_spooled, len(data)))
                 data.tofile(spool)
                 # Searching an unaligned strided structured field makes NumPy
                 # copy the entire field. Contiguous keys keep each search sparse.
                 times = np.ascontiguousarray(data["gps_time"])
                 times.tofile(keys)
-                self.points_read += len(data)
+                self.points_spooled += len(data)
                 self.bytes_written += data.nbytes + times.nbytes
                 samples.append(times[::max(1, size // 256)].copy())
-        n_groups = max(1, -(-self.points_read // size))
+        n_groups = max(1, -(-self.points_spooled // size))
         self.edges = (np.unique(np.quantile(np.concatenate(samples), np.arange(1, n_groups) / n_groups))
                       if self.runs else np.empty(0))
 
@@ -219,28 +219,8 @@ class TimeSortedCopc:
                 arrays.clear()
 
 
-@contextmanager
-def sorted_copc(paths: list[Path], scratch: Path, size: int = CHUNK, resources=None):
-    """Prepare a reusable stream only for a single merged COPC; LAZ does no disk sort."""
-    if not paths:
-        yield None
-        return
-    try:
-        with open_cloud(paths[0]) as reader:
-            first_is_copc = is_copc(reader.header)
-    except (OSError, laspy.errors.LaspyException, StructError, ValueError, OverflowError, EOFError):
-        # The pulse reader validates every header and formats the refusal.
-        first_is_copc = False
-    if not first_is_copc:
-        yield None
-        return
-    if len(paths) != 1:
-        raise ValueError("Use one merged COPC or a list of per-file LAS/LAZ inputs.")
-    with TemporaryDirectory(dir=scratch, prefix=".copc-sort-") as folder:
-        if resources is None:
-            result = TimeSortedCopc(paths[0], Path(folder), size)
-        else:
-            with resources.stage("read/time-sort") as stats:
-                result = TimeSortedCopc(paths[0], Path(folder), size)
-                stats.update(bytes_read=paths[0].stat().st_size, bytes_written=result.bytes_written)
-        yield result
+def _base_records(chunk):
+    records = np.empty(len(chunk), FORMAT.dtype())
+    for name in records.dtype.names:
+        records[name] = chunk.array[name]
+    return records

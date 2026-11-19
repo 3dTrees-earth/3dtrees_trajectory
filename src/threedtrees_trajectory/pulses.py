@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from struct import error as StructError
+from tempfile import TemporaryDirectory
 
 import laspy
 import numpy as np
@@ -23,7 +24,7 @@ from lazrs import LazrsError
 from pyproj import CRS
 from pyproj.exceptions import CRSError
 
-from .cloud import CHUNK, is_copc, open_cloud, point_chunks, pulse_chunks, sorted_copc
+from .cloud import CHUNK, FORMAT, TimeSortedCopc, _base_records, _ordered, is_copc, open_cloud, point_chunks, pulse_chunks
 
 PROBE = 1_000_000  # points read first to tell a single-return cloud
 MAX_MULTI = 40_000_000
@@ -67,6 +68,7 @@ class CloudInfo:
     fragment_echoes: int = 0
     complete_multi_echoes: int = 0
     unpaired_multi_echoes: int = 0
+    population_counts_estimated: bool = False
 
     @classmethod
     def from_paths(cls, paths: list[Path]) -> CloudInfo:
@@ -131,11 +133,53 @@ def _sample(time: np.ndarray, stride: int) -> np.ndarray:
         return np.ones(len(time), bool)
     # A deterministic hash of the timestamp, independent of COPC order, file
     # boundaries, and whether a return had to be joined out of order.
+    return _time_hash(time) % stride == 0
+
+
+def _time_hash(time: np.ndarray) -> np.ndarray:
     key = time.view(np.uint64).copy()
     key ^= key >> 33
     key *= np.uint64(0xff51afd7ed558ccd)
     key ^= key >> 33
-    return key % stride == 0
+    return key
+
+
+class _CopcSample:
+    """Keep all echoes at sampled times and the earliest records for the stride probe."""
+
+    def __init__(self, points, max_multi, max_single, full):
+        self.strides = tuple(sorted({1 if full else max(1, -(-points // limit))
+                                     for limit in (max_multi, max_single, MAX_SINGLE_ONLY)}))
+        self.probe = np.empty(0, FORMAT.dtype())
+
+    def __call__(self, points):
+        time = points.gps_time
+        if len(self.probe) >= PROBE:
+            earliest = time <= self.probe["gps_time"].max()
+        else:
+            earliest = np.ones(len(time), bool)
+        if earliest.any():
+            possible = np.concatenate((self.probe, _base_records(points[earliest])))
+            if len(possible) > PROBE:
+                times = possible["gps_time"]
+                threshold = np.partition(times, PROBE - 1)[PROBE - 1]
+                possible = possible[times <= threshold]
+                if len(possible) > PROBE:
+                    possible = _ordered(possible)[:PROBE].copy()
+            self.probe = possible
+        if 1 in self.strides:
+            return points
+        hashes = _time_hash(time)
+        keep = np.zeros(len(time), bool)
+        for stride in self.strides:
+            keep |= hashes % stride == 0
+        return points[keep]
+
+    def looks_single(self, prepared):
+        ordered = _ordered(self.probe)[:PROBE]
+        self.probe = None
+        return _looks_single_return(laspy.ScaleAwarePointRecord(ordered, FORMAT, prepared.header.scales,
+                                                               prepared.header.offsets))
 
 
 def _looks_single_return(chunk: laspy.ScaleAwarePointRecord) -> bool:
@@ -162,7 +206,7 @@ def _angles(chunk: laspy.ScaleAwarePointRecord, index: np.ndarray) -> np.ndarray
 
 def _collect_chunk(chunk: laspy.ScaleAwarePointRecord, time: np.ndarray, file: int, shift: np.ndarray,
                    strides: tuple[int, int], counts: np.ndarray, pulses: _Store, stray: _Store, info: CloudInfo,
-                   copc: bool) -> int:
+                   copc: bool, sampled_stats: bool = False) -> int:
     multi_every, single_every = strides
     rn, nr = np.asarray(chunk.return_number), np.asarray(chunk.number_of_returns)
     source = chunk.point_source_id
@@ -183,17 +227,29 @@ def _collect_chunk(chunk: laspy.ScaleAwarePointRecord, time: np.ndarray, file: i
             ambiguous[groups[:-1][repeated]] = True
             complete &= ~ambiguous[groups[start]]
     incomplete = ~single & ~complete
-    counts += [int(complete.sum()), int(single.sum())]
-    info.incomplete_multi_pulses += int(incomplete.sum())
-    info.multi_pulses += int(complete.sum())
     sizes = end - start + 1
-    info.fragment_echoes += int(sizes[incomplete].sum())
-    info.complete_multi_echoes += int(sizes[complete].sum())
-    keep = (complete & _sample(time[start], multi_every)) | (single & _sample(time[start], single_every))
+    multi_sample = _sample(time[start], multi_every)
+    single_sample = _sample(time[start], single_every)
+    if sampled_stats:
+        # The COPC sample contains whole timestamp groups. Estimate population
+        # totals using each pulse category's own inclusion fraction.
+        counts += [int((complete & multi_sample).sum()) * multi_every,
+                   int((single & single_sample).sum()) * single_every]
+        info.incomplete_multi_pulses += int((incomplete & multi_sample).sum()) * multi_every
+        info.multi_pulses += int((complete & multi_sample).sum()) * multi_every
+        info.fragment_echoes += int(sizes[incomplete & multi_sample].sum()) * multi_every
+        info.complete_multi_echoes += int(sizes[complete & multi_sample].sum()) * multi_every
+    else:
+        counts += [int(complete.sum()), int(single.sum())]
+        info.incomplete_multi_pulses += int(incomplete.sum())
+        info.multi_pulses += int(complete.sum())
+        info.fragment_echoes += int(sizes[incomplete].sum())
+        info.complete_multi_echoes += int(sizes[complete].sum())
+    keep = (complete & multi_sample) | (single & single_sample)
     lone_idx = None
     # Retain every record of any incomplete LAZ pulse so it can be repaired.
     if not copc and incomplete.any():
-        lone_idx = np.flatnonzero(np.repeat(incomplete & _sample(time[start], multi_every), sizes))
+        lone_idx = np.flatnonzero(np.repeat(incomplete & multi_sample, sizes))
     start, end = start[keep], end[keep]
     first = _coordinates(chunk, start, shift)
     multi = start != end
@@ -212,8 +268,9 @@ def _collect_chunk(chunk: laspy.ScaleAwarePointRecord, time: np.ndarray, file: i
 
 
 def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int = MAX_SINGLE,
-                full: bool = False, *, info: CloudInfo | None = None, prepared=None) -> tuple[Pulses, CloudInfo]:
-    """Build pulse endpoints from LAS/LAZ or a time-sorted COPC within the sampling budgets."""
+                full: bool = False, *, info: CloudInfo | None = None, prepared=None,
+                scratch: Path | None = None, resources=None, observe=None, _selection=None) -> tuple[Pulses, CloudInfo]:
+    """Build pulse endpoints from strips or from a COPC whose sampled echoes are ordered by time."""
     info = CloudInfo.from_paths(paths) if info is None else info
     if len(paths) > np.iinfo(np.uint16).max + 1:
         raise ValueError("At most 65,536 input files can be combined.")
@@ -237,10 +294,23 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
     if copc_paths and (len(paths) != 1 or len(copc_paths) != 1):
         raise ValueError("Use one merged COPC or a list of per-file LAS/LAZ inputs.")
     if copc_paths and prepared is None:
-        # Library callers have the same semantics as the CLI.
+        from contextlib import nullcontext
+
+        path = copc_paths[0]
+        declared_points = info.points
+        selection = _CopcSample(declared_points, max_multi, max_single, full)
         info.points = 0
-        with sorted_copc(paths, Path.cwd(), CHUNK) as sorted_input:
-            return read_pulses(paths, max_multi, max_single, full, info=info, prepared=sorted_input)
+        directory = scratch or Path.cwd()
+        directory.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=directory, prefix=".copc-sort-") as folder:
+            with (resources.stage("COPC sample read/sort") if resources else nullcontext({})) as stage:
+                sorted_input = TimeSortedCopc(path, Path(folder), CHUNK, select=selection, observe=observe)
+                if sorted_input.points_read != declared_points:
+                    raise ValueError("The COPC scan did not decode the point count declared by the header.")
+                stage.update(bytes_read=path.stat().st_size, bytes_written=sorted_input.bytes_written,
+                             points_read=sorted_input.points_read, sampled_echoes=sorted_input.points_spooled)
+            return read_pulses(paths, max_multi, max_single, full, info=info, prepared=sorted_input,
+                               scratch=scratch, resources=resources, _selection=selection)
 
     origin = np.floor(np.min(origins, axis=0) / 1000) * 1000
     crs = None
@@ -279,13 +349,22 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
 
                 shift = header.offsets - origin
                 chunks = prepared.chunks() if prepared is not None else pulse_chunks(point_chunks(path, CHUNK), CHUNK)
+                if _selection is not None:
+                    info.points_read += prepared.points_read
+                    time_min, time_max = prepared.time_range
                 for chunk in chunks:
-                    info.points_read += len(chunk)
+                    if _selection is None:
+                        info.points_read += len(chunk)
+                    if observe is not None:
+                        observe(index, chunk)
                     if first_chunk:
-                        single_limit = MAX_SINGLE_ONLY if _looks_single_return(chunk) else max_single
+                        looks_single = (_looks_single_return(chunk) if _selection is None
+                                        else _selection.looks_single(prepared))
+                        single_limit = MAX_SINGLE_ONLY if looks_single else max_single
                         multi_every = 1 if full else max(1, -(-info.points // max_multi))
                         single_every = 1 if full else max(1, -(-info.points // single_limit))
                         info.kept_every = (multi_every, single_every)
+                        info.population_counts_estimated = _selection is not None and info.kept_every != (1, 1)
                         first_chunk = False
                     time = chunk.gps_time
                     low, high = float(time.min()), float(time.max())
@@ -293,7 +372,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                         raise ValueError("GPS times must be finite.")
                     time_min, time_max = min(time_min, low), max(time_max, high)
                     stray_count += _collect_chunk(chunk, time, index, shift, info.kept_every, counts, pulses, stray,
-                                                  info, prepared is not None)
+                                                  info, prepared is not None, _selection is not None)
                     if stray_count > MAX_STRAY:
                         raise ValueError("Too many separated multi-return records to join. Provide the original "
                                          "LAS/LAZ strips in acquisition order.")

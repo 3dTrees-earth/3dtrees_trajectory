@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import shutil
 import sys
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from struct import error as StructError
 
@@ -39,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--geojson", type=Path, help="map layer of the path (default next to the CSV)")
     parser.add_argument("--no-platform-check", action="store_true", help="skip static (TLS) cloud detection when estimating a path")
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
-    parser.add_argument("--threads", help="maximum LAZ decoding threads (defaults to GALAXY_SLOTS or 8)")
+    parser.add_argument("--threads", help="maximum decoding threads and tile workers (defaults to GALAXY_SLOTS or 8)")
     parser.add_argument("--full", action="store_true", help="keep all pulses (requires more memory)")
     parser.add_argument("--trajectory", type=Path,
                         help="delivered path (3Dtrees trajectory CSV); used for occlusion instead of estimating one")
@@ -116,25 +117,29 @@ def main(argv: list[str] | None = None) -> int:
     from lazrs import LazrsError
     from pyproj.exceptions import ProjError
 
-    from .cloud import sorted_copc
     from .estimate import STATIC_REFUSAL, detect_platform, estimate
     from .output import geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
     from .pulses import CloudInfo, read_pulses
+    from .tile_jobs import JobBusy
 
     info = CloudInfo.from_paths(args.clouds)
     pulses = None
     result = None
     data = None
     with ExitStack() as scratch:
+        source_spool = None
         if error_message is None:
             try:
-                prepared = scratch.enter_context(sorted_copc(args.clouds, Path.cwd(), resources=resources))
-                read_stage = "read/time-sort merge" if prepared is not None else "read/time-sort"
-                with resources.stage(read_stage) as stage:
+                with resources.stage("read/time-sort") as stage:
+                    work = report_path.resolve().parent
+                    if occlusion_paths:
+                        source_spool = scratch.enter_context(_record_echoes(args.occlusion_copc.resolve()))
                     pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
-                                            prepared=prepared)
-                    stage["bytes_read"] = (prepared.bytes_written if prepared is not None
-                                           else sum(path.stat().st_size for path in args.clouds))
+                                            scratch=work, resources=resources,
+                                            observe=source_spool.observe if source_spool else None)
+                    stage["bytes_read"] = sum(path.stat().st_size for path in args.clouds)
+                    if source_spool is not None:
+                        stage["bytes_written"] = source_spool.bytes_written
                 if not len(pulses):
                     raise ValueError("No usable pulses could be reconstructed from the input.")
                 evidence = "given"
@@ -180,13 +185,17 @@ def main(argv: list[str] | None = None) -> int:
                     "incomplete_multi_pulses": info.incomplete_multi_pulses,
                     "out_of_order_records_sampled": info.joined_out_of_order_points,
                     "unpaired_multi_echoes": info.unpaired_multi_echoes,
+                    "population_counts_estimated": info.population_counts_estimated,
                 }
+            except JobBusy as error:
+                safe_products = safe_report = False
+                error_message = str(error)
             except (OSError, ValueError, MemoryError, LaspyException, LazrsError, StructError, EOFError) as error:
                 error_message = str(error) or "The job could not read its input or ran out of memory."
         if error_message is None and occlusion_paths:
             path_inputs = _occlusion_path(args, result, pulses, resources)
             pulses = None
-            data["occlusion"] = _occlusion(args, path_inputs, prepared, resources, info.fragment_echoes)
+            data["occlusion"] = _occlusion(args, path_inputs, resources, info.fragment_echoes, threads, source_spool)
             if "error" in data["occlusion"]:
                 if result is None:
                     error_message = data["occlusion"]["error"]
@@ -227,6 +236,24 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+@contextmanager
+def _record_echoes(output):
+    import numpy as np
+
+    from .tile_jobs import identify, lock_job
+    from .tile_spool import EchoSource
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    work = output.parent / (".trajectory-input-" + identify([], str(output), np.empty(0), np.empty(0)))
+    with lock_job(work):
+        for orphan in work.glob("source-*.bin"):
+            orphan.unlink()
+        try:
+            yield EchoSource(work)
+        finally:
+            shutil.rmtree(work)
+
+
 def _occlusion_path(args, result, pulses, resources):
     import numpy as np
 
@@ -247,7 +274,7 @@ def _occlusion_path(args, result, pulses, resources):
     return time, xyz, result.method, None
 
 
-def _occlusion(args, path_inputs, prepared, resources, fragment_echoes) -> dict:
+def _occlusion(args, path_inputs, resources, fragment_echoes, threads, source_spool) -> dict:
     """Run the occlusion part; a failure is reported in its section instead of failing the trajectory."""
     from laspy.errors import LaspyException
     from lazrs import LazrsError
@@ -261,7 +288,7 @@ def _occlusion(args, path_inputs, prepared, resources, fragment_echoes) -> dict:
         return occlusion.run(
             args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=float(args.voxel),
             dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
-            quality="rough" if method == "scan_angle" else None, delivered_check=check, prepared=prepared,
+            quality="rough" if method == "scan_angle" else None, delivered_check=check, threads=threads, source_spool=source_spool,
             budget=int(args.grid_memory_gib * 2**30), resources=resources, fragment_echoes=fragment_echoes,
         )
     except (OSError, ValueError, MemoryError, ImportError, LaspyException, LazrsError) as error:
