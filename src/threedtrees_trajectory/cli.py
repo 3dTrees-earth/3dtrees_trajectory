@@ -195,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         if error_message is None and occlusion_paths:
             path_inputs = _occlusion_path(args, result, pulses, resources)
             pulses = None
-            data["occlusion"] = _occlusion(args, path_inputs, resources, info.fragment_echoes, threads, source_spool)
+            data["occlusion"] = _occlusion(args, path_inputs, resources, info.fragment_echoes, requested, source_spool)
             if "error" in data["occlusion"]:
                 if result is None:
                     error_message = data["occlusion"]["error"]
