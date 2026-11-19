@@ -639,7 +639,7 @@ def _band_shares(classes: np.ndarray, heights: np.ndarray, inside: np.ndarray, n
     return shares.transpose(0, 2, 1)[:, ::-1, :], seen.sum(axis=(1, 2)), hidden.sum(axis=(1, 2))
 
 
-def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, resources):
+def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, resources, slots):
     import rasterio
     from rasterio.shutil import copy as copy_raster
     from rasterio.transform import from_origin
@@ -656,11 +656,18 @@ def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, re
                    transform=from_origin(grid.origin[0], north, grid.voxel, grid.voxel), crs=crs_wkt,
                    tiled=True, blockxsize=128, blockysize=128, compress="DEFLATE", predictor=3,
                    BIGTIFF="IF_SAFER", SPARSE_OK=True)
+    wide_raster = len(names) > 32
+    if wide_raster:
+        # GDAL builds overviews band by band. Keep each read from decoding
+        # the other bands of the same intermediate tile.
+        profile["interleave"] = "band"
+    cache_mib = 512 if wide_raster else 128
+    cog_threads = min(slots, 4) if wide_raster else 1
     flat = work / "voxels.las"
     raster = work / "voxel_shares.tif"
     classes_total = np.zeros(5, np.int64)
     seen_total, hidden_total = np.zeros(n_bands, np.int64), np.zeros(n_bands, np.int64)
-    with rasterio.Env(GDAL_CACHEMAX=128 * 1024**2, CPL_TMPDIR=str(work)):
+    with rasterio.Env(GDAL_CACHEMAX=cache_mib * 1024**2, CPL_TMPDIR=str(work)):
         with laspy.open(flat, "w", header=_copc_header(grid, crs_wkt)) as writer, rasterio.open(raster, "w", **profile) as out:
             out.descriptions = tuple(names)
             out.update_tags(OCCLUSION_BAND_M=str(BAND_M), **tags, OCCLUSION_VALUE="occluded / (filled + empty + occluded)")
@@ -694,7 +701,9 @@ def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, re
             stage["bytes_written"] = copc.stat().st_size
         with _stage(resources, "COG write") as stage:
             stage["bytes_read"] = raster.stat().st_size
-            copy_raster(raster, cog, driver="COG", compress="DEFLATE", predictor=3, blocksize=512, BIGTIFF="IF_SAFER")
+            stage.update(threads=cog_threads, bands=len(names))
+            copy_raster(raster, cog, driver="COG", compress="DEFLATE", predictor=3, blocksize=512,
+                        BIGTIFF="IF_SAFER", NUM_THREADS=str(cog_threads))
             stage["bytes_written"] = cog.stat().st_size
     stats = {name: int(classes_total[code]) for name, code in
              (("filled", FILLED), ("empty", EMPTY), ("occluded", OCCLUDED), ("unobserved", UNOBSERVED))}
@@ -758,7 +767,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             merge, staged_cog = Path(folder), Path(cog_folder) / "occlusion.tif"
             staged_copc = merge / "voxels.copc.laz"
             products = _write_products(grid, _completed_tiles(work, layout), top, ground, staged_copc, staged_cog,
-                                       data["crs"], tags, merge, resources)
+                                       data["crs"], tags, merge, resources, slots)
             os.replace(staged_copc, copc)
             os.replace(staged_cog, cog)
         shutil.rmtree(work)

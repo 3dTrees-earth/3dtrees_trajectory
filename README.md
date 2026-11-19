@@ -107,7 +107,8 @@ are no return lines for this check. OccPy traces single-return shots independent
 scan-angle estimate is marked `rough` in both outputs.
 
 COPC indexing and COG conversion use temporary files beside the product destinations. The job needs space for
-the uncompressed voxel LAS, intermediate TIFF and final outputs. The image includes Untwine 1.5.1. For local
+the uncompressed voxel LAS, intermediate TIFF and final outputs. Wide rasters use a band-interleaved
+intermediate and up to four job slots for the COG conversion. The image includes Untwine 1.5.1. For local
 runs, set `TRAJECTORY_UNTWINE` to an executable installation and install the compiled OccPy wheel with
 `python -m pip install --no-deps occpy_ls==0.3.0`.
 
