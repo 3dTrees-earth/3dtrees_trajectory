@@ -80,16 +80,25 @@ occlusion error both destinations are zero bytes and the report gives the reason
 still return its estimated trajectory. The report includes traversal counts, in-range class totals,
 and the pooled occluded share per height band.
 
-A first pass derives the lowest and highest in-range point voxel in each column. Traversal keeps the vertical
-band from estimated ground minus 1 m to canopy top plus 1 m, on the original voxel lattice. The products cap
-each column at its highest registered hit. If the estimate for the cropped grid exceeds 16 GiB
-(`--grid-memory-gib`), the tool traces buffered XY tiles and writes their nonoverlapping cores to the same products.
-Each tile uses its local ground and canopy envelope to size the vertical grid.
-It estimates the buffer from the 99.9th percentile of horizontal ray distance through the vegetation band on a
-deterministic 1% pulse sample, rounds to a voxel boundary, and caps the applied halo at 100 m. An unworkable grid under the
-64 GiB planning ceiling fails with a report. COPC jobs above the native echo count limit also use a
-spatial count bound to size tiles. COPC tiles use octree spatial reads. LAS/LAZ tiles scan the strips in
-their original order. Rays longer than the buffer and non-collinear returns can change results near tile seams.
+The CLI decodes each source point once for the trajectory sample and occlusion. It reads COPC spatial
+nodes and records compact echoes in scratch. From those records, it derives ground and canopy extents and routes
+whole pulses to each buffered XY tile they touch. Separated returns are joined by GPS time, source and scanner
+channel within each input file. Each tile uses its own local ground and canopy envelope on the original voxel
+lattice. Traversal keeps the vegetation band from ground minus 1 m to canopy top plus 1 m. The products cap
+each column at its highest registered hit.
+
+The tool tiles when the cropped grid exceeds the per-tile planning budget (`--grid-memory-gib`, default 16 GiB)
+or a job needs to keep a grid within OccPy's 32-bit echo limits. The buffer uses the 99.9th percentile of horizontal
+ray distance through the vegetation band on a deterministic 1% pulse sample. It rounds to the voxel boundary
+and caps the halo at 100 m. Any return inside the tile's buffered bounds brings the whole pulse into that tile.
+The tool writes each tile's nonoverlapping core to the products. Rays longer than the buffer can change results
+near tile seams.
+
+Separate worker processes trace tiles, with one OccPy grid per worker. The tool schedules tiles within the
+job's CPU and memory budgets and commits each tile's core counts to scratch before merging. To resume
+after an interruption, give the command the same inputs, parameters and output paths. Keep the
+`.occlusion-*` directory beside the COPC until the merge finishes. The tool cleans up the checkpoint
+after publishing both products.
 
 The delivered path is used for every occlusion ray when supplied. The report and COG metadata flag a median
 perpendicular distance above 0.1 m from the delivered path to usable pulse lines. With only single returns there
@@ -134,35 +143,29 @@ the path tool's scope.
 
 ## Resources and limits
 
-- The reader decodes up to five million points per batch and selects the LAZ fields needed by the solver where
-  the point format permits. Non-COPC LAZ decoding uses `GALAXY_SLOTS`, or a lower `--threads` limit, capped by
-  CPU affinity and the cgroup v2 quota. The default is eight. COPC sequential decoding and numerical reductions
-  are serial.
-- The COPC input is externally sorted by GPS time, point source, scanner channel and return number in the job
-  working directory. Temporary runs use about 38 bytes per input point, including contiguous time keys. When tiling, the acquisition sort
-  supplies the extent pass and is released before sorting the active COPC tile. The tool removes the
-  temporary runs on exit. GPS time groups stay together across disk runs
-  and read chunks. A merged COPC must preserve return numbers, GPS time and source/channel identity. Duplicate
-  multi-return numbers with the same time, source and channel are ambiguous.
-- Per-file LAS/LAZ retains the original point order and avoids the time sort. The trajectory reader can recover
-  complete pulses whose returns were stored apart, within a bounded sample. Traversal can rejoin up to 40
-  million separated echoes per input strip in bounded batches and refuses larger fragment sets. It reports recovered and skipped
-  echoes. Heavy thinning, return renumbering, and
-  clock resets can remove the information needed to reconstruct pulses.
-- A timestamp hash samples the acquisition independently of file order. Default budgets are approximately
-  40 million multi-return and 10 million single-return pulses, or 40 million single-return pulses in a cloud
-  that starts with very few multi-returns. `--full` uses memory proportional to the input. The solver uses
-  float32 endpoints relative to a common kilometre-aligned origin.
-- `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements when
-  available. `stages` records per-stage wall, self and child CPU, peak process RSS, and bytes when available.
-  Linux resets the RSS high-water mark between stages. Cgroup memory includes file cache, so use a dedicated
-  cgroup for each job when measuring.
+- The reader decodes up to five million points per batch. The job uses up to `GALAXY_SLOTS` or the
+  lower `--threads` limit for decoding and tile workers, also capped by CPU affinity and the cgroup v2
+  quota. The default is eight slots. The path solver uses single-threaded numerical reductions.
+- COPC trajectory estimation orders the sampled GPS-time groups by time, source, scanner channel and
+  return number. Its temporary sort uses 38 bytes per candidate echo, including contiguous time keys.
+  Pulse population counts from thinned COPC inputs are estimates and carry a flag in the report.
+  The defaults retain approximately 40 million multi-return and 10 million single-return pulses,
+  or 40 million single-return pulses for single-return acquisitions. `--full` explicitly samples
+  every pulse and uses memory proportional to input size.
+- Occlusion routes 24-byte echoes from the source recording into buffered tile spools. A bounded hash
+  partition joins separated echoes across input batches. Workers order each tile by time in bounded
+  windows. On strips, ambiguous or incomplete return sequences are reported as skipped echoes.
+  Each durable tile uses 12 bytes per core voxel for the three count arrays until merge.
+- `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements
+  when available. `stages` records wall, self and child CPU, peak process RSS and I/O where available.
+  Traversal also reports concurrent workers, reused tiles, sampled aggregate RSS and per-tile timings.
+  Cgroup memory includes file cache.
 - Positions cover sampled acquisition times. GPS week rolls, overlapping independent flights with the same
   clock and identifiers, and widely separated acquisitions should be split before processing.
 
-## Container replay
+## Sequential container replay baseline
 
-The runtime source was mounted read-only into the trajectory image with Untwine 1.5.1. Each replay had
+The earlier runtime source was mounted read-only into the trajectory image with Untwine 1.5.1. Each replay had
 eight decoder slots and a ten-CPU affinity mask. The wall values are from the instrumented tool. Cgroup peaks
 include cache. For tiled jobs, decoded points, traversed pulses and other counters are summed across buffered
 tiles, so one point can contribute to multiple tiles.
@@ -181,21 +184,37 @@ tiles, so one point can contribute to multiple tiles.
 
 The 7.04-billion-point 2585 replay produced trajectories from per-file LAZ and merged COPC. The LAZ
 occlusion step refused a strip with more than 40 million separated echoes in a tile. The COPC process
-exited during its fifth tile. Full raster throughput for this acquisition remains unverified.
+was stopped in its fifth tile after eleven hours at the operator’s request.
+
+## Parallel container replay
+
+The source scan and tile worker replays used ten slots and one capped 190 GiB container. The table
+compares tool wall times against the sequential runs above. Peak process RSS is the largest individual
+process measurement. Cgroup peaks include the resident caches for the compact source and tile spools.
+
+| Acquisition | Wall (s) | Speedup | Tiles / peak workers | Peak process RSS (GiB) | Cgroup peak (GiB) | Scratch peak (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1807 LAZ | 101.3 | 0.96× | 1 / 1 | 1.27 | 2.73 | 2.17 |
+| 1807 COPC | 120.7 | 1.19× | 1 / 1 | 1.27 | 3.23 | 2.31 |
+| 1844 LAZ | 994.3 | 1.45× | 2 / 2 | 5.22 | 34.49 | 32.49 |
 
 ## Galaxy resource proposal
 
-Use the cropped buffered tile size for memory planning. The tool estimates `2 GiB + 72 × tile voxels
-+ 320 × tile XY columns + 32 × acquisition XY columns` bytes, plus up to 4.2 GiB for separated LAZ
-echoes. Allow separate headroom for the path solver, the job runtime and COPC file cache. COPC acquisition sorting also needs about 38 GB of working disk per
-billion points. With tiled LAZ, budget time for a complete scan per tile. With tiled COPC, budget for one
-acquisition sort and spatial reads and sorts for the buffered tiles.
+Budget each running tile at `2 GiB + 72 × buffered tile voxels + 320 × buffered XY columns`.
+Add the reservations for all concurrently running tiles, the parent's resident memory and headroom
+for the runtime and file cache. Plan the path solver separately since its main allocations precede
+traversal. The scheduler uses the smallest applicable cgroup memory limit and the available host memory.
 
-A candidate TPV rule would start at four slots for small jobs and eight for large LAZ decoding or Untwine
-indexing. Estimate wall time from total decoded points and total allocated buffered voxels. Estimate memory
-from the largest tile and the measured solver RSS. Validate both against dedicated job cgroup peaks and add
-site-specific headroom before setting job classes. The exact Galaxy memory classes and the platform's default
-input representation are deployment decisions.
+For small or single-tile jobs, start with four slots for decoding and indexing. For tiles large enough
+to dominate wall time, start with eight slots and allow ten for very large acquisitions when memory can
+support that many active grids. Estimate traversal wall time from the slowest group of tiles running
+concurrently, using buffered echo counts and measured per-tile CPU. Size decoding, routing and product
+merge separately using source point count, routed echo count and exported voxel count.
+
+Allow scratch for the 24-byte source recording, the 24-byte echoes copied to tile spools, temporary
+partition data, and any sampled COPC sort still active. During merge, allow for the durable count
+arrays, uncompressed voxel LAS, the intermediate TIFF, and the outputs. Measure both peak cgroup
+memory and peak scratch in a dedicated job before choosing Galaxy resource classes.
 
 ## Archived trajectory-only replay
 
