@@ -193,7 +193,7 @@ was stopped in its fifth tile after eleven hours at the operator’s request.
 
 ## Parallel container replay
 
-The source scan and tile worker replays used ten slots and one capped 190 GiB container. The table
+The source scan and tile worker replays used at most ten slots and 190 GiB of Docker memory. The table
 compares tool wall times against the sequential runs above. Peak process RSS is the largest individual
 process measurement. Cgroup peaks include the resident caches for the compact source and tile spools.
 
@@ -205,12 +205,19 @@ process measurement. Cgroup peaks include the resident caches for the compact so
 | 1844 COPC | 1294.6 | 1.47× | 2 / 2 | 5.22 | 39.12 | 30.82 |
 | 2014 multi LAZ | 152.1 | 2.97× | 8 / 8 | 3.96 | 21.75 | 6.48 |
 | 2014 single LAZ | 153.3 | 1.91× | 4 / 4 | 7.83 | 24.01 | 7.53 |
+| 2585 LAZ | 27953.0 | — | 88 / 10 | 7.33 | 190.00 | 567.87 |
 
 Both 1807 replays and the 1844 LAZ replay reproduce the earlier products exactly. The new 1844 COPC
 reproduces the earlier LAZ voxel classes, per-voxel counts and COG values. Its trajectory CSV is
 byte-identical to the earlier COPC CSV. The earlier COPC clipped some siblings at the outer tile
 buffer. Including complete pulses changes 19 values relative to that COG and 16 classes on shared
 emitted voxel centres.
+
+The 2585 LAZ replay decoded 7.04 billion points and rejoined 3.31 billion separated echoes. Its
+compressed tile spools occupied 382 GB for 916 GB of routed records. The earlier replay refused
+occlusion, so it supplies no end-to-end speedup denominator. The measured run spent 6,204 s in the
+earlier 64-band COG conversion. In a separate Docker probe, the new band-interleaved intermediate
+converted to a COG in 51 s and matched every base raster value.
 
 ## Galaxy resource proposal
 
