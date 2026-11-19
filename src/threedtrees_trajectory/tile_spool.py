@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 
 from .pulses import _time_hash
+from .spool_codec import append_block, block_count, read_blocks
 
 ECHO = np.dtype([("time", "<f8"), ("x", "<i4"), ("y", "<i4"), ("z", "<i4"),
                  ("source", "<u2"), ("returns", "u1"), ("flags", "u1")])
@@ -142,7 +143,7 @@ def group_multi(records, *, acquisition_order, hashes=None):
 
 
 class TileSpools:
-    def __init__(self, folder, grid, layout, time, points):
+    def __init__(self, folder, grid, layout, time, points, *, compress=False):
         self.folder = folder
         self.grid = grid
         self.layout = layout
@@ -154,6 +155,14 @@ class TileSpools:
         self.edges = np.linspace(time[0], time[-1], windows + 1)[1:-1]
         self.echoes = np.zeros(len(layout), np.int64)
         self.bytes_written = 0
+        self.compress = compress
+
+    def _write_window(self, directory, window, records):
+        if self.compress:
+            self.bytes_written += append_block(directory / f"{window:04d}.spool", records)
+        else:
+            _append(directory / f"{window:04d}.bin", records)
+            self.bytes_written += records.nbytes
 
     def _write(self, file, tile, records):
         if not len(records):
@@ -162,14 +171,13 @@ class TileSpools:
         directory.mkdir(exist_ok=True)
         records = records.view(TILE_ECHO)
         records["file"] = file
-        windows = np.searchsorted(self.edges, records["time"])
         if not len(self.edges):
-            _append(directory / "0000.bin", records)
+            self._write_window(directory, 0, records)
         else:
+            windows = np.searchsorted(self.edges, records["time"])
             for window, index in _partitions(windows, len(self.edges) + 1):
-                _append(directory / f"{window:04d}.bin", records[index])
+                self._write_window(directory, window, records[index])
         self.echoes[tile] += len(records)
-        self.bytes_written += records.nbytes
 
     def route(self, file, records, scales, offsets, starts=None, sizes=None):
         if not len(records):
@@ -231,9 +239,9 @@ class TileSpools:
         return recovered, unpaired
 
 
-def _shot_batches(path):
+def _shot_batches(batches):
     tail = np.empty(0, TILE_ECHO)
-    for records in raw_batches(path, dtype=TILE_ECHO):
+    for records in batches:
         if len(tail):
             records = np.concatenate((tail, records))
         stop = int(np.flatnonzero(records["flags"] & START)[-1])
@@ -246,22 +254,25 @@ def _shot_batches(path):
 
 def _sorted_window(path, scratch):
     """Sort one bounded time window, splitting dense windows on disk if needed."""
-    if path.stat().st_size <= 2 * BATCH * ECHO.itemsize:
-        records = np.fromfile(path, TILE_ECHO)
+    compressed = path.suffix == ".spool"
+    count = block_count(path, TILE_ECHO) if compressed else path.stat().st_size // TILE_ECHO.itemsize
+    if count <= 2 * BATCH:
+        records = np.concatenate(list(read_blocks(path, TILE_ECHO))) if compressed else np.fromfile(path, TILE_ECHO)
         yield records[np.argsort(records["time"], kind="stable")]
         return
+    read = read_blocks if compressed else raw_batches
     low, high = np.inf, -np.inf
-    for records in raw_batches(path, dtype=TILE_ECHO):
+    for records in read(path, dtype=TILE_ECHO):
         low, high = min(low, records["time"].min()), max(high, records["time"].max())
     if low == high:
-        yield from _shot_batches(path)
+        yield from _shot_batches(read(path, dtype=TILE_ECHO))
         return
     middle = low / 2 + high / 2
     if middle == high:
         middle = low
     with TemporaryDirectory(dir=scratch, prefix="dense-window-") as folder:
         before, after = (Path(folder) / name for name in ("before.bin", "after.bin"))
-        for records in raw_batches(path, dtype=TILE_ECHO):
+        for records in read(path, dtype=TILE_ECHO):
             keep = records["time"] <= middle
             if keep.any():
                 _append(before, records[keep])
@@ -272,5 +283,5 @@ def _sorted_window(path, scratch):
 
 
 def tile_batches(directory, scratch):
-    for path in sorted(directory.glob("*.bin")):
+    for path in sorted((*directory.glob("*.bin"), *directory.glob("*.spool"))):
         yield from _sorted_window(path, scratch)

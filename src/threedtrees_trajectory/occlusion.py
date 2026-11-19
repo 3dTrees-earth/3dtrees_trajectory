@@ -33,7 +33,7 @@ from .cloud import CHUNK, is_copc, point_chunks
 from .pulses import MAX_STRAY, Pulses, _crs, _sample, _time_system
 from .resources import RunResources, available_memory, decoding_threads
 from .tile_jobs import atomic_json, discard_finished_spools, execute, identify, lock_job, save_tile, tile_files
-from .tile_spool import START, TileSpools, pack_echoes, raw_batches, return_fields, tile_batches
+from .tile_spool import ECHO, START, TileSpools, pack_echoes, raw_batches, return_fields, tile_batches
 
 FILLED, EMPTY, OCCLUDED, UNOBSERVED = 1, 2, 3, 4  # OccPy's classes
 # Native grids, list conversion, NumPy counts and output windows all overlap
@@ -434,14 +434,17 @@ def _prepare_job(work, paths, time, xyz, voxel, dtm, budget, resources, fragment
                          planned_tiles=len(layout), buffer_m=halo * voxel)
             counters = {key: stage.get(key, 0) for key in ("echoes_read", "echoes_outside_path")}
         with _stage(resources, "route tile spools") as stage:
-            routing = TileSpools(spool, grid, layout, time, full_grid.points)
+            compressed = full_grid.points > NATIVE_ECHO_LIMIT
+            routing = TileSpools(spool, grid, layout, time, full_grid.points, compress=compressed)
             counters.update(recovered_echoes=0, unpaired_echoes=0)
             time_bounds = (time[0] - TIME_MARGIN, time[-1] + TIME_MARGIN) if source is not None else None
             for index, (path, (scales, offsets)) in enumerate(zip(raw_paths, transforms)):
                 recovered, unpaired = routing.stage_file(index, path, scales, offsets, spatial, time_bounds)
                 counters["recovered_echoes"] += recovered
                 counters["unpaired_echoes"] += unpaired
-            stage.update(bytes_written=routing.bytes_written, echoes_routed=int(routing.echoes.sum()))
+            echoes_routed = int(routing.echoes.sum())
+            stage.update(bytes_written=routing.bytes_written, echoes_routed=echoes_routed,
+                         uncompressed_bytes=echoes_routed * ECHO.itemsize, compressed=compressed)
         if any(routing.echoes > NATIVE_ECHO_LIMIT):
             raise ValueError("A buffered tile including complete pulses exceeds the native 2.1 billion-echo limit. "
                              "Lower --grid-memory-gib or split the acquisition.")

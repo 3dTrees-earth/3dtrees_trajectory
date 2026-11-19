@@ -122,7 +122,8 @@ def test_cli_decodes_source_once_for_path_and_tiles(tmp_path, monkeypatch, spati
     assert (tmp_path / "out.tif").stat().st_size
 
 
-def test_spool_routes_whole_separated_pulse_to_both_tiles(tmp_path):
+@pytest.mark.parametrize("compress", [False, True])
+def test_spool_routes_whole_separated_pulse_to_both_tiles(tmp_path, compress):
     grid = occlusion.Grid(np.zeros(3), (10, 1, 4), 1)
     left, right = (occlusion.Tile((slice(start, stop), slice(0, 1)),
                                  (slice(start, stop), slice(0, 1), slice(0, 4)))
@@ -131,12 +132,32 @@ def test_spool_routes_whole_separated_pulse_to_both_tiles(tmp_path):
     records = np.zeros(3, ECHO)
     records["time"], records["x"], records["returns"] = [11, 10, 11], [2, 8, 7], [33, 17, 34]
     records.tofile(raw)
-    routing = TileSpools(tmp_path, grid, [left, right], np.array([10., 11.]), 3)
+    routing = TileSpools(tmp_path, grid, [left, right], np.array([10., 11.]), 3, compress=compress)
     assert routing.stage_file(0, raw, np.ones(3), np.zeros(3), False) == (2, 0)
     for index, expected in enumerate(([2, 7], [8, 2, 7])):
         batch, = tile_batches(tmp_path / f"tile-{index:05d}", tmp_path)
         assert batch["x"].tolist() == expected
         assert batch["flags"][-2:].tolist() == [START, 0]
+
+
+@pytest.mark.parametrize("compress", [False, True])
+def test_dense_tile_window_is_time_sorted_in_bounded_batches(tmp_path, monkeypatch, compress):
+    from threedtrees_trajectory import tile_spool
+
+    monkeypatch.setattr(tile_spool, "BATCH", 3)
+    grid = occlusion.Grid(np.zeros(3), (2, 1, 1), 1)
+    core = (slice(0, 2), slice(0, 1))
+    tile = occlusion.Tile(core, (*core, slice(0, 1)))
+    raw = tmp_path / "raw.bin"
+    records = np.zeros(16, ECHO)
+    records["time"] = np.r_[np.arange(8, 16), np.arange(8)]
+    records["returns"] = 17
+    records.tofile(raw)
+    routing = TileSpools(tmp_path, grid, [tile], np.array([0., 15.]), 1, compress=compress)
+    routing.stage_file(0, raw, np.ones(3), np.zeros(3), False)
+    batches = list(tile_batches(tmp_path / "tile-00000", tmp_path))
+    assert max(map(len, batches)) <= 6
+    np.testing.assert_array_equal(np.concatenate(batches)["time"], np.arange(16))
 
 
 def test_tile_spool_counts_match_acquisition_order_traversal(tmp_path):

@@ -154,7 +154,9 @@ the path tool's scope.
   every pulse and uses memory proportional to input size.
 - Occlusion routes 24-byte echoes from the source recording into buffered tile spools. A bounded hash
   partition joins separated echoes across input batches. Workers order each tile by time in bounded
-  windows. On strips, ambiguous or incomplete return sequences are reported as skipped echoes.
+  windows. For acquisitions above the native 32-bit echo limit, tile spools use lossless compressed
+  blocks to limit scratch use as buffers duplicate echoes. On strips, ambiguous or incomplete return
+  sequences are reported as skipped echoes.
   Each durable tile uses 12 bytes per core voxel for the three count arrays until merge.
 - `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements
   when available. `stages` records wall, self and child CPU, peak process RSS and I/O where available.
@@ -220,7 +222,7 @@ support that many active grids. Estimate traversal wall time from the slowest gr
 concurrently, using buffered echo counts and measured per-tile CPU. Size decoding, routing and product
 merge separately using source point count, routed echo count and exported voxel count.
 
-Allow scratch for the 24-byte source recording, the 24-byte echoes copied to tile spools, temporary
+Allow scratch for the 24-byte source recording, the echoes copied to tile spools, temporary
 partition data, and any sampled COPC sort still active. During merge, allow for the durable count
 arrays, uncompressed voxel LAS, the intermediate TIFF, and the outputs. Measure both peak cgroup
 memory and peak scratch in a dedicated job before choosing Galaxy resource classes.
