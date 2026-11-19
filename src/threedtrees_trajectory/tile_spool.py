@@ -1,6 +1,7 @@
 """Disk-backed echo routing. A tile receives every echo of a shot touching its buffered bounds."""
 from __future__ import annotations
 
+from itertools import groupby
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -157,9 +158,9 @@ class TileSpools:
         self.bytes_written = 0
         self.compress = compress
 
-    def _write_window(self, directory, window, records):
+    def _write_window(self, directory, file, window, records):
         if self.compress:
-            self.bytes_written += append_block(directory / f"{window:04d}.spool", records)
+            self.bytes_written += append_block(directory / f"{window:04d}-{file:05d}.spool", records)
         else:
             _append(directory / f"{window:04d}.bin", records)
             self.bytes_written += records.nbytes
@@ -172,11 +173,11 @@ class TileSpools:
         records = records.view(TILE_ECHO)
         records["file"] = file
         if not len(self.edges):
-            self._write_window(directory, 0, records)
+            self._write_window(directory, file, 0, records)
         else:
             windows = np.searchsorted(self.edges, records["time"])
             for window, index in _partitions(windows, len(self.edges) + 1):
-                self._write_window(directory, window, records[index])
+                self._write_window(directory, file, window, records[index])
         self.echoes[tile] += len(records)
 
     def route(self, file, records, scales, offsets, starts=None, sizes=None):
@@ -252,36 +253,49 @@ def _shot_batches(batches):
         yield tail
 
 
-def _sorted_window(path, scratch):
+def _window_count(path):
+    if path.suffix == ".spool":
+        return block_count(path, TILE_ECHO)
+    return path.stat().st_size // TILE_ECHO.itemsize
+
+
+def _window_batches(paths):
+    for path in paths:
+        read = read_blocks if path.suffix == ".spool" else raw_batches
+        yield from read(path, dtype=TILE_ECHO)
+
+
+def _sorted_window(paths, scratch):
     """Sort one bounded time window, splitting dense windows on disk if needed."""
-    compressed = path.suffix == ".spool"
-    count = block_count(path, TILE_ECHO) if compressed else path.stat().st_size // TILE_ECHO.itemsize
+    count = sum(map(_window_count, paths))
+    if not count:
+        return
     if count <= 2 * BATCH:
-        records = np.concatenate(list(read_blocks(path, TILE_ECHO))) if compressed else np.fromfile(path, TILE_ECHO)
+        records = np.concatenate(list(_window_batches(paths)))
         yield records[np.argsort(records["time"], kind="stable")]
         return
-    read = read_blocks if compressed else raw_batches
     low, high = np.inf, -np.inf
-    for records in read(path, dtype=TILE_ECHO):
+    for records in _window_batches(paths):
         low, high = min(low, records["time"].min()), max(high, records["time"].max())
     if low == high:
-        yield from _shot_batches(read(path, dtype=TILE_ECHO))
+        yield from _shot_batches(_window_batches(paths))
         return
     middle = low / 2 + high / 2
     if middle == high:
         middle = low
     with TemporaryDirectory(dir=scratch, prefix="dense-window-") as folder:
         before, after = (Path(folder) / name for name in ("before.bin", "after.bin"))
-        for records in read(path, dtype=TILE_ECHO):
+        for records in _window_batches(paths):
             keep = records["time"] <= middle
             if keep.any():
                 _append(before, records[keep])
             if not keep.all():
                 _append(after, records[~keep])
-        yield from _sorted_window(before, scratch)
-        yield from _sorted_window(after, scratch)
+        yield from _sorted_window((before,), scratch)
+        yield from _sorted_window((after,), scratch)
 
 
 def tile_batches(directory, scratch):
-    for path in sorted((*directory.glob("*.bin"), *directory.glob("*.spool"))):
-        yield from _sorted_window(path, scratch)
+    paths = sorted((*directory.glob("*.bin"), *directory.glob("*.spool")))
+    for _, window_paths in groupby(paths, key=lambda path: path.stem.split("-", 1)[0]):
+        yield from _sorted_window(tuple(window_paths), scratch)

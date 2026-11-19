@@ -160,6 +160,27 @@ def test_dense_tile_window_is_time_sorted_in_bounded_batches(tmp_path, monkeypat
     np.testing.assert_array_equal(np.concatenate(batches)["time"], np.arange(16))
 
 
+def test_parallel_strip_spools_merge_each_window_in_time_order(tmp_path):
+    grid = occlusion.Grid(np.zeros(3), (2, 1, 1), 1)
+    core = (slice(0, 2), slice(0, 1))
+    tile = occlusion.Tile(core, (*core, slice(0, 1)))
+    paths = [tmp_path / f"strip-{i}.bin" for i in range(2)]
+    for index, path in enumerate(paths):
+        records = np.zeros(2, ECHO)
+        records["time"] = [5.0 + index, 2.0 + index]
+        records["returns"] = 17
+        records.tofile(path)
+    stage = {}
+    recovered, unpaired, echoes = occlusion._route_file_spools(
+        tmp_path, grid, [tile], np.array([0., 20_480.]), occlusion.NATIVE_ECHO_LIMIT + 1, paths,
+        [(np.ones(3), np.zeros(3))] * 2, None, False, 2, stage)
+    assert (recovered, unpaired, echoes.tolist()) == (0, 0, [4])
+    assert stage["routing_workers"] == 2
+    batch, = tile_batches(tmp_path / "tile-00000", tmp_path)
+    np.testing.assert_array_equal(batch["time"], [2., 3., 5., 6.])
+    np.testing.assert_array_equal(batch["file"], [0, 1, 0, 1])
+
+
 def test_tile_spool_counts_match_acquisition_order_traversal(tmp_path):
     cloud = tmp_path / "flight.las"
     time, xyz = flight(cloud, seconds=2, rate=300)

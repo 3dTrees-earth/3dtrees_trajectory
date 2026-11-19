@@ -17,9 +17,11 @@ from __future__ import annotations
 import csv
 import json
 import math
+import multiprocessing
 import os
 import shutil
 import subprocess
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -395,7 +397,41 @@ def _read_storage_headers(paths):
     return transforms, spatial
 
 
-def _prepare_job(work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source):
+def _route_strip(arguments):
+    spool, grid, layout, time, points, file, path, transform, time_bounds = arguments
+    routing = TileSpools(spool, grid, layout, time, points, compress=True)
+    recovered, unpaired = routing.stage_file(file, path, *transform, False, time_bounds)
+    return recovered, unpaired, routing.bytes_written, routing.echoes
+
+
+def _route_file_spools(spool, grid, layout, time, points, paths, transforms, time_bounds, spatial, slots, stage):
+    compressed = points > NATIVE_ECHO_LIMIT
+    workers = min(slots, len(paths), max(1, available_memory() // (2 * GIB))) if compressed and not spatial else 1
+    recovered = unpaired = written = 0
+    if workers > 1:
+        calls = [(spool, grid, layout, time, points, index, path, transform, time_bounds)
+                 for index, (path, transform) in enumerate(zip(paths, transforms))]
+        tile_echoes = np.zeros(len(layout), np.int64)
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            for joined, missing, size, echoes in pool.map(_route_strip, calls):
+                recovered += joined
+                unpaired += missing
+                written += size
+                tile_echoes += echoes
+    else:
+        routing = TileSpools(spool, grid, layout, time, points, compress=compressed)
+        for index, (path, transform) in enumerate(zip(paths, transforms)):
+            joined, missing = routing.stage_file(index, path, *transform, spatial, time_bounds)
+            recovered += joined
+            unpaired += missing
+        written, tile_echoes = routing.bytes_written, routing.echoes
+    echoes_routed = int(tile_echoes.sum())
+    stage.update(bytes_written=written, echoes_routed=echoes_routed, uncompressed_bytes=echoes_routed * ECHO.itemsize,
+                 compressed=compressed, routing_workers=workers)
+    return recovered, unpaired, tile_echoes
+
+
+def _prepare_job(work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source, slots):
     manifest = work / "prepared.json"
     spool = work / "spools"
     surfaces = work / "surfaces.npz"
@@ -433,24 +469,20 @@ def _prepare_job(work, paths, time, xyz, voxel, dtm, budget, resources, fragment
             stage.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape),
                          planned_tiles=len(layout), buffer_m=halo * voxel)
             counters = {key: stage.get(key, 0) for key in ("echoes_read", "echoes_outside_path")}
-        with _stage(resources, "route tile spools") as stage:
-            compressed = full_grid.points > NATIVE_ECHO_LIMIT
-            routing = TileSpools(spool, grid, layout, time, full_grid.points, compress=compressed)
-            counters.update(recovered_echoes=0, unpaired_echoes=0)
+        with _stage(resources, "route tile spools", children=True) as stage:
             time_bounds = (time[0] - TIME_MARGIN, time[-1] + TIME_MARGIN) if source is not None else None
-            for index, (path, (scales, offsets)) in enumerate(zip(raw_paths, transforms)):
-                recovered, unpaired = routing.stage_file(index, path, scales, offsets, spatial, time_bounds)
-                counters["recovered_echoes"] += recovered
-                counters["unpaired_echoes"] += unpaired
-            echoes_routed = int(routing.echoes.sum())
-            stage.update(bytes_written=routing.bytes_written, echoes_routed=echoes_routed,
-                         uncompressed_bytes=echoes_routed * ECHO.itemsize, compressed=compressed)
-        if any(routing.echoes > NATIVE_ECHO_LIMIT):
+            try:
+                recovered, unpaired, tile_echoes = _route_file_spools(
+                    spool, grid, layout, time, full_grid.points, raw_paths, transforms, time_bounds, spatial, slots, stage)
+            except BrokenProcessPool as error:
+                raise ValueError("An occlusion spool worker stopped during source routing.") from error
+            counters.update(recovered_echoes=recovered, unpaired_echoes=unpaired)
+        if any(tile_echoes > NATIVE_ECHO_LIMIT):
             raise ValueError("A buffered tile including complete pulses exceeds the native 2.1 billion-echo limit. "
                              "Lower --grid-memory-gib or split the acquisition.")
         data = dict(origin=grid.origin.tolist(), shape=grid.shape, full_shape=full_grid.shape, crs=crs_wkt,
                     transforms=transforms, spikes=spikes, percentile=percentile if sample else None, halo=halo,
-                    counters=counters, tile_echoes=routing.echoes.tolist(),
+                    counters=counters, tile_echoes=tile_echoes.tolist(),
                     tiles=[dict(core=[(s.start, s.stop) for s in tile.core],
                                 extent=[(s.start, s.stop) for s in tile.extent],
                                 echo_upper_bound=tile.echo_upper_bound) for tile in layout])
@@ -685,6 +717,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
     copc.parent.mkdir(parents=True, exist_ok=True)
     cog.parent.mkdir(parents=True, exist_ok=True)
     budget = min(budget, HARD_BUDGET)
+    slots = decoding_threads(threads)
     identity = identify([*paths, *([dtm] if dtm is not None else [])],
                         [str(copc.resolve()), str(cog.resolve()), voxel, budget, source, quality, fragment_echoes,
                          dtm is not None], time, xyz)
@@ -695,7 +728,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
                 if orphan.is_dir():
                     shutil.rmtree(orphan)
         data, grid, layout, spool, top, ground = _prepare_job(
-            work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source_spool)
+            work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source_spool, slots)
         ground_source = "dtm" if dtm is not None else "lowest_hit"
         tags = dict(OCCLUSION_GROUND=ground_source, OCCLUSION_TRAJECTORY=source)
         if quality is not None:
@@ -709,7 +742,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
                  for index, (plan, echoes) in enumerate(zip(layout, data["tile_echoes"]))]
         try:
             with _stage(resources, "traversal", children=True) as stage:
-                tiles = execute(work, specs, decoding_threads(threads), _trace_tile, _init_traversal,
+                tiles = execute(work, specs, slots, _trace_tile, _init_traversal,
                                 (work, spool, time, xyz, data["transforms"]), stage)
                 stage["tiles"] = [tiles[i] | {"estimated_grid_bytes": specs[i][1]} for i in range(len(layout))]
         except BrokenProcessPool as error:

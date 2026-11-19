@@ -155,8 +155,8 @@ the path tool's scope.
 - Occlusion routes 24-byte echoes from the source recording into buffered tile spools. A bounded hash
   partition joins separated echoes across input batches. Workers order each tile by time in bounded
   windows. For acquisitions above the native 32-bit echo limit, tile spools use lossless compressed
-  blocks to limit scratch use as buffers duplicate echoes. On strips, ambiguous or incomplete return
-  sequences are reported as skipped echoes.
+  blocks to limit scratch use as buffers duplicate echoes. Large LAS/LAZ inputs route separate strips
+  concurrently within the job caps. Ambiguous or incomplete return sequences are reported as skipped echoes.
   Each durable tile uses 12 bytes per core voxel for the three count arrays until merge.
 - `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements
   when available. `stages` records wall, self and child CPU, peak process RSS and I/O where available.
