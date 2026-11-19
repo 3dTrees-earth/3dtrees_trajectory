@@ -1,6 +1,8 @@
 """Disk-backed echo routing. A tile receives every echo of a shot touching its buffered bounds."""
 from __future__ import annotations
 
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 from itertools import groupby
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -108,20 +110,20 @@ def _hash_partition(records, folder, shift):
         _append(folder / f"{part:02d}.bin", records[index])
 
 
-def _hash_leaves(folder, shift):
+def _hash_leaf(path, shift):
     """Co-locate separated echoes by hash. Only tile spools are ordered by GPS time."""
-    for path in sorted(folder.glob("*.bin")):
-        if path.stat().st_size <= 2 * BATCH * ECHO.itemsize:
-            yield np.fromfile(path, ECHO)
-        else:
-            if shift >= 64:
-                raise ValueError("Too many separated echoes share one GPS timestamp to reconstruct pulses.")
-            with TemporaryDirectory(dir=folder, prefix="partition-") as sub:
-                for records in raw_batches(path):
-                    _hash_partition(records, Path(sub), shift)
-                path.unlink()
-                yield from _hash_leaves(Path(sub), shift + HASH_BITS)
-        path.unlink(missing_ok=True)
+    if path.stat().st_size <= 2 * BATCH * ECHO.itemsize:
+        yield np.fromfile(path, ECHO)
+    else:
+        if shift >= 64:
+            raise ValueError("Too many separated echoes share one GPS timestamp to reconstruct pulses.")
+        with TemporaryDirectory(dir=path.parent, prefix="partition-") as sub:
+            for records in raw_batches(path):
+                _hash_partition(records, Path(sub), shift)
+            path.unlink()
+            for child in sorted(Path(sub).glob("*.bin")):
+                yield from _hash_leaf(child, shift + HASH_BITS)
+    path.unlink(missing_ok=True)
 
 
 def group_multi(records, *, acquisition_order, hashes=None):
@@ -157,10 +159,12 @@ class TileSpools:
         self.echoes = np.zeros(len(layout), np.int64)
         self.bytes_written = 0
         self.compress = compress
+        self.shard = 0
+        self.hash_workers = 1
 
     def _write_window(self, directory, file, window, records):
         if self.compress:
-            self.bytes_written += append_block(directory / f"{window:04d}-{file:05d}.spool", records)
+            self.bytes_written += append_block(directory / f"{window:04d}-{file:05d}-{self.shard:03d}.spool", records)
         else:
             _append(directory / f"{window:04d}.bin", records)
             self.bytes_written += records.nbytes
@@ -200,7 +204,7 @@ class TileSpools:
                 keep = np.repeat(np.logical_or.reduceat(keep, starts), sizes)
             self._write(file, tile, records[keep])
 
-    def stage_file(self, file, path, scales, offsets, copc, time_bounds=None):
+    def stage_file(self, file, path, scales, offsets, copc, time_bounds=None, hash_slots=1):
         recovered = unpaired = 0
         if not path.is_file():
             return recovered, unpaired
@@ -227,17 +231,49 @@ class TileSpools:
                 if len(multi):
                     _hash_partition(multi, folder, 0)
             path.unlink()
-            for records in _hash_leaves(folder, HASH_BITS):
-                hashes = _time_key(records["time"])
-                order = np.lexsort((return_fields(records)[0], records["flags"], records["source"], hashes))
-                records, hashes = records[order], hashes[order]
-                _, sizes, complete = group_multi(records, acquisition_order=False, hashes=hashes)
-                good = sizes[complete]
-                self.route(file, records[np.repeat(complete, sizes)], scales, offsets, np.cumsum(good) - good, good)
-                unpaired += int(sizes[~complete].sum())
-                if not copc:
-                    recovered += int(good.sum())
+            partitions = sorted(folder.glob("*.bin"))
+            self.hash_workers = max(1, min(hash_slots, len(partitions)))
+            if self.hash_workers > 1:
+                if not self.compress:
+                    raise ValueError("Parallel echo joining requires sharded tile spools.")
+                calls = [(self, file, scales, offsets, part, shard)
+                         for shard, part in enumerate(partitions, start=1)]
+                with ProcessPoolExecutor(max_workers=self.hash_workers,
+                                         mp_context=multiprocessing.get_context("spawn")) as pool:
+                    for joined, missing, size, echoes in pool.map(_route_hash_shard, calls):
+                        unpaired += missing
+                        if not copc:
+                            recovered += joined
+                        self.bytes_written += size
+                        self.echoes += echoes
+            else:
+                for part in partitions:
+                    joined, missing = self._join_partition(file, part, scales, offsets)
+                    unpaired += missing
+                    if not copc:
+                        recovered += joined
         return recovered, unpaired
+
+    def _join_partition(self, file, partition, scales, offsets):
+        joined = unpaired = 0
+        for records in _hash_leaf(partition, HASH_BITS):
+            hashes = _time_key(records["time"])
+            order = np.lexsort((return_fields(records)[0], records["flags"], records["source"], hashes))
+            records, hashes = records[order], hashes[order]
+            _, sizes, complete = group_multi(records, acquisition_order=False, hashes=hashes)
+            good = sizes[complete]
+            self.route(file, records[np.repeat(complete, sizes)], scales, offsets, np.cumsum(good) - good, good)
+            unpaired += int(sizes[~complete].sum())
+            joined += int(good.sum())
+        return joined, unpaired
+
+
+def _route_hash_shard(arguments):
+    routing, file, scales, offsets, partition, shard = arguments
+    routing.shard, routing.bytes_written = shard, 0
+    routing.echoes = np.zeros_like(routing.echoes)
+    joined, missing = routing._join_partition(file, partition, scales, offsets)
+    return joined, missing, routing.bytes_written, routing.echoes
 
 
 def _shot_batches(batches):

@@ -156,7 +156,8 @@ the path tool's scope.
   partition joins separated echoes across input batches. Workers order each tile by time in bounded
   windows. For acquisitions above the native 32-bit echo limit, tile spools use lossless compressed
   blocks to limit scratch use as buffers duplicate echoes. Large LAS/LAZ inputs route separate strips
-  concurrently within the job caps. Ambiguous or incomplete return sequences are reported as skipped echoes.
+  concurrently, and large COPC inputs join independent hash partitions concurrently. Both use the job
+  caps. Ambiguous or incomplete return sequences are reported as skipped echoes.
   Each durable tile uses 12 bytes per core voxel for the three count arrays until merge.
 - `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements
   when available. `stages` records wall, self and child CPU, peak process RSS and I/O where available.

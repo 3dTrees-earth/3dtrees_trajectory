@@ -406,7 +406,8 @@ def _route_strip(arguments):
 
 def _route_file_spools(spool, grid, layout, time, points, paths, transforms, time_bounds, spatial, slots, stage):
     compressed = points > NATIVE_ECHO_LIMIT
-    workers = min(slots, len(paths), max(1, available_memory() // (2 * GIB))) if compressed and not spatial else 1
+    route_slots = min(slots, max(1, available_memory() // (2 * GIB))) if compressed else 1
+    workers = min(route_slots, len(paths)) if not spatial else 1
     recovered = unpaired = written = 0
     if workers > 1:
         calls = [(spool, grid, layout, time, points, index, path, transform, time_bounds)
@@ -421,10 +422,12 @@ def _route_file_spools(spool, grid, layout, time, points, paths, transforms, tim
     else:
         routing = TileSpools(spool, grid, layout, time, points, compress=compressed)
         for index, (path, transform) in enumerate(zip(paths, transforms)):
-            joined, missing = routing.stage_file(index, path, *transform, spatial, time_bounds)
+            joined, missing = routing.stage_file(index, path, *transform, spatial, time_bounds,
+                                                 hash_slots=route_slots if spatial else 1)
             recovered += joined
             unpaired += missing
         written, tile_echoes = routing.bytes_written, routing.echoes
+        workers = max(workers, routing.hash_workers)
     echoes_routed = int(tile_echoes.sum())
     stage.update(bytes_written=written, echoes_routed=echoes_routed, uncompressed_bytes=echoes_routed * ECHO.itemsize,
                  compressed=compressed, routing_workers=workers)
