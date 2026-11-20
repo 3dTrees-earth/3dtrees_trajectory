@@ -1,10 +1,8 @@
 import json
-import math
 
 import laspy
 import numpy as np
 import pytest
-from laspy.copc import Bounds
 
 from legacy_occlusion import trace_reference
 from synthetic import flight
@@ -55,19 +53,6 @@ def test_spatial_copc_rebuilds_pulses_across_small_sort_runs(tmp_path, monkeypat
     assert not list(tmp_path.glob(".copc-sort-*"))
 
 
-@needs_untwine
-def test_copc_tile_stream_reads_only_buffered_bounds(tmp_path):
-    original, copc = tmp_path / "flight.las", tmp_path / "flight.copc.laz"
-    flight(original, seconds=2, rate=500)
-    data = laspy.read(original)
-    occlusion._index_copc(original, copc, len(data.points), tmp_path)
-    midpoint = np.median(np.asarray(data.x))
-    bounds = Bounds(np.array([midpoint, data.header.mins[1]]), data.header.maxs[:2])
-    selected = TimeSortedCopc(copc, tmp_path, 101, bounds)
-    gps = np.concatenate([p.gps_time for p in selected.chunks()])
-    np.testing.assert_array_equal(gps, np.sort(data.gps_time[np.asarray(data.x) >= midpoint]))
-
-
 def test_laz_traversal_recovers_bounded_separated_echoes(tmp_path, monkeypatch):
     original, separated = tmp_path / "flight.las", tmp_path / "separated.laz"
     time, xyz = flight(original, seconds=1, rate=100)
@@ -107,9 +92,9 @@ def test_crop_keeps_products_inside_vegetation_band(tmp_path, monkeypatch):
     crop = occlusion._extent_pass
 
     def without_crop(paths, grid, *args, **kwargs):
-        clipped, top, ground, spikes, percentile = crop(paths, grid, *args, **kwargs)
+        clipped, top, ground, spikes = crop(paths, grid, *args, **kwargs)
         offset = round((clipped.origin[2] - grid.origin[2]) / grid.voxel)
-        return grid, np.where(top >= 0, top + offset, top), ground, spikes, percentile
+        return grid, np.where(top >= 0, top + offset, top), ground, spikes
 
     results = []
     for index in range(2):
@@ -131,49 +116,26 @@ def test_crop_keeps_products_inside_vegetation_band(tmp_path, monkeypatch):
         np.testing.assert_array_equal(crop_pts[name], full_pts[name])
 
 
-@needs_untwine
-def test_buffered_tiles_match_single_grid_on_short_rays(tmp_path, monkeypatch):
-    import rasterio
+def test_window_plan_splits_on_memory(monkeypatch):
+    from pathlib import Path
 
-    cloud = tmp_path / "flight.las"
-    time, xyz = flight(cloud, seconds=2, rate=500)
-    reference = occlusion.run([cloud], time, xyz, tmp_path / "full.copc.laz", tmp_path / "full.tif", voxel=1)
-    nx, ny, nz = reference["grid"]["shape"]
-    monkeypatch.setattr(occlusion, "WORKING_BYTES", 0)
-    budget = occlusion._grid_bytes((math.ceil(nx * 0.8), math.ceil(ny * 0.8), nz), nx * ny)
-    tiled = occlusion.run([cloud], time, xyz, tmp_path / "tile.copc.laz", tmp_path / "tile.tif", voxel=1, budget=budget)
-    assert tiled["tiling"]["tiles"] > 1
-    with rasterio.open(tmp_path / "full.tif") as first, rasterio.open(tmp_path / "tile.tif") as second:
-        a, b = first.read(), second.read()
-    valid = np.isfinite(a) | np.isfinite(b)
-    assert np.isclose(a[valid], b[valid], atol=0.01).mean() >= 0.99
-    assert abs(reference["occluded_share"] - tiled["occluded_share"]) <= 0.01
+    from threedtrees_trajectory.time_windows import plan
+    from threedtrees_trajectory.window_input import ScanBlock, ScanIndex
 
-
-def test_tiled_plan_crops_the_local_terrain_envelope(monkeypatch):
-    monkeypatch.setattr(occlusion, "WORKING_BYTES", 0)
-    grid = occlusion.Grid(np.zeros(3), (80, 60, 150), 1)
-    ground = np.broadcast_to(np.where(np.arange(80) < 40, 1, 120)[:, None], grid.shape[:2])
-    top = ground + 10
-    budget = occlusion._grid_bytes((40, 60, 16), 80 * 60)
-    layout, halo = occlusion._tile_layout(grid, top, ground, budget, 0)
-    assert len(layout) == 2 and halo == 0
-    for tile in layout:
-        xy = tile.extent[:2]
-        assert tile.extent[2].start == ground[xy].min() - 1
-        assert tile.extent[2].stop > top[xy].max()
-        assert tile.shape[2] < 16
-
-
-def test_copc_tiles_stay_within_native_echo_count():
-    grid = occlusion.Grid(np.zeros(3), (80, 64, 20), 1)
-    ground = np.zeros(grid.shape[:2])
-    top = np.full(grid.shape[:2], 10)
-    echo_bins = np.full((5, 4), 150_000_000, np.int64)
-    layout, _ = occlusion._tile_layout(grid, top, ground, occlusion.DEFAULT_BUDGET, 0, echo_bins=echo_bins)
-    assert echo_bins.sum() > occlusion.NATIVE_ECHO_LIMIT
-    assert len(layout) == 2
-    assert all(tile.echo_upper_bound <= occlusion.NATIVE_ECHO_LIMIT for tile in layout)
+    grid = occlusion.Grid(np.zeros(3), (400, 10, 60), 1)
+    index = ScanIndex([Path("acquisition.laz")])
+    index.blocks[0] = [
+        ScanBlock(0, 100, 0., 1., np.array([1., 1., 0.]), np.array([199., 2., 2.])),
+        ScanBlock(100, 200, 2., 3., np.array([201., 1., 0.]), np.array([399., 2., 2.])),
+    ]
+    time = np.array([0., 1., 2., 3.])
+    xyz = np.array([[1., 1., 3.], [199., 1., 3.], [201., 1., 3.], [399., 1., 3.]])
+    actual = plan(index, grid, time, xyz, (0., 4.), 1, occlusion.DEFAULT_BUDGET)
+    assert len(actual) == 1
+    monkeypatch.setattr("threedtrees_trajectory.time_windows.TRACE_LIMIT", 150)
+    split = plan(index, grid, time, xyz, (0., 4.), 1, occlusion.DEFAULT_BUDGET)
+    assert len(split) == 2
+    assert sum(window.echoes for window in split) == 200
 
 
 @needs_untwine

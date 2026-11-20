@@ -5,9 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
-import shutil
 import sys
-from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from struct import error as StructError
 
@@ -41,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--geojson", type=Path, help="map layer of the path (default next to the CSV)")
     parser.add_argument("--no-platform-check", action="store_true", help="skip static (TLS) cloud detection when estimating a path")
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
-    parser.add_argument("--threads", help="maximum decoding threads and tile workers (defaults to GALAXY_SLOTS or 8)")
+    parser.add_argument("--threads", help="maximum decoding threads and GPS-time window workers (defaults to GALAXY_SLOTS or 8)")
     parser.add_argument("--full", action="store_true", help="keep all pulses (requires more memory)")
     parser.add_argument("--trajectory", type=Path,
                         help="delivered path (3Dtrees trajectory CSV); used for occlusion instead of estimating one")
@@ -49,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--occlusion-cog", type=Path, help="occluded share per metre above ground as a multiband COG")
     parser.add_argument("--voxel", default="0.5", help="occlusion voxel size in metres (default 0.5)")
     parser.add_argument("--grid-memory-gib", type=float, default=16,
-                        help="soft occlusion grid budget in GiB before tiling (default 16, maximum 64)")
+                        help="soft occlusion worker budget in GiB before further GPS-time splitting (default 16, maximum 64)")
     parser.add_argument("--dtm", type=Path, help="terrain raster for heights above ground (default: lowest hits)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args, unknown = parser.parse_known_intermixed_args(argv)
@@ -122,104 +120,99 @@ def main(argv: list[str] | None = None) -> int:
     from .estimate import STATIC_REFUSAL, detect_platform, estimate
     from .output import geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
     from .pulses import CloudInfo, read_pulses
-    from .tile_jobs import JobBusy
+    from .window_input import ScanIndex
+    from .window_jobs import JobBusy
 
     info = CloudInfo.from_paths(args.clouds)
     pulses = None
     result = None
     data = None
-    with ExitStack() as scratch:
-        source_spool = None
-        if error_message is None:
-            try:
-                with resources.stage("read/time-sort") as stage:
-                    work = report_path.resolve().parent
-                    if occlusion_paths:
-                        source_spool = scratch.enter_context(_record_echoes(args.occlusion_copc.resolve()))
-                    pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
-                                            scratch=work, resources=resources,
-                                            observe=source_spool.observe if source_spool else None,
-                                            reset_observation=source_spool.reset if source_spool else None, copc_threads=threads)
-                    stage["bytes_read"] = sum(path.stat().st_size for path in args.clouds)
-                    if source_spool is not None:
-                        stage["bytes_written"] = source_spool.bytes_written
-                if not len(pulses):
-                    raise NoTrajectory("No usable pulses could be reconstructed from the input.")
-                evidence = "given"
-                with resources.stage("platform check"):
-                    if args.trajectory is not None or not args.no_platform_check:
-                        platform, evidence = detect_platform(pulses)
-                        if platform == "static":
-                            raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
-                data = {"tool": f"3dtrees_trajectory {__version__}", "files": info.files, "trajectory": "delivered"}
-                if args.output is not None:
-                    with resources.stage("path estimation"):
-                        try:
-                            if any(mode["mode"] == "single" and not mode["has_scan_angle"]
-                                   for mode in info.return_modes):
-                                raise NoTrajectory("Single returns without scan angle: no usable pulse lines or scan "
-                                                   "angles in one or more files. Please provide the delivered trajectory file.")
-                            angle_files = [mode["index"] for mode in info.return_modes if mode["mode"] == "single"]
-                            result = estimate(pulses, check_platform=False, interval=interval, angle_files=angle_files)
-                            if report(info, result, pulses.multi_share)["quality"] == "unreliable":
-                                if not pulses.has_scan_angle:
-                                    raise NoTrajectory("Pulse lines miss the fitted path by more than 0.5 m at the "
-                                                       "median and there is no usable scan angle.")
-                                result = estimate(pulses, check_platform=False, interval=interval, use_lines=False)
-                                info.single_return_files = list(range(len(args.clouds)))
-                                result.warnings.append("Pulse lines missed the fitted path by more than 0.5 m at the median.")
-                            result.evidence = evidence
-                        except ValueError as error:
-                            if args.trajectory is None:
-                                raise
-                            result = None
-                            data["estimated_path_error"] = str(error)
-                    if result is None:
-                        write_empty(args.output)
+    index = ScanIndex(args.clouds) if occlusion_paths else None
+    if error_message is None:
+        try:
+            with resources.stage("read/time-sort") as stage:
+                work = report_path.resolve().parent
+                pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
+                                        scratch=work, resources=resources,
+                                        scan_index=index, copc_threads=threads)
+                stage["bytes_read"] = sum(path.stat().st_size for path in args.clouds)
+            if not len(pulses):
+                raise NoTrajectory("No usable pulses could be reconstructed from the input.")
+            evidence = "given"
+            with resources.stage("platform check"):
+                if args.trajectory is not None or not args.no_platform_check:
+                    platform, evidence = detect_platform(pulses)
+                    if platform == "static":
+                        raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
+            data = {"tool": f"3dtrees_trajectory {__version__}", "files": info.files, "trajectory": "delivered"}
+            if args.output is not None:
+                with resources.stage("path estimation"):
+                    try:
+                        if any(mode["mode"] == "single" and not mode["has_scan_angle"]
+                               for mode in info.return_modes):
+                            raise NoTrajectory("Single returns without scan angle: no usable pulse lines or scan "
+                                               "angles in one or more files. Please provide the delivered trajectory file.")
+                        angle_files = [mode["index"] for mode in info.return_modes if mode["mode"] == "single"]
+                        result = estimate(pulses, check_platform=False, interval=interval, angle_files=angle_files)
+                        if report(info, result, pulses.multi_share)["quality"] == "unreliable":
+                            if not pulses.has_scan_angle:
+                                raise NoTrajectory("Pulse lines miss the fitted path by more than 0.5 m at the "
+                                                   "median and there is no usable scan angle.")
+                            result = estimate(pulses, check_platform=False, interval=interval, use_lines=False)
+                            info.single_return_files = list(range(len(args.clouds)))
+                            result.warnings.append("Pulse lines missed the fitted path by more than 0.5 m at the median.")
+                        result.evidence = evidence
+                    except ValueError as error:
+                        if args.trajectory is None:
+                            raise
+                        result = None
+                        data["estimated_path_error"] = str(error)
+                if result is None:
+                    write_empty(args.output)
+                    write_empty(geojson_path)
+                else:
+                    try:
+                        layer = geojson(info, result)
+                    except ProjError:
+                        layer = None
+                        result.warnings.append("The map layer could not be projected to WGS84.")
+                    write_csv(args.output, info, result)
+                    if layer is None or not layer["features"]:
                         write_empty(geojson_path)
                     else:
-                        try:
-                            layer = geojson(info, result)
-                        except ProjError:
-                            layer = None
-                            result.warnings.append("The map layer could not be projected to WGS84.")
-                        write_csv(args.output, info, result)
-                        if layer is None or not layer["features"]:
-                            write_empty(geojson_path)
-                        else:
-                            write_geojson(geojson_path, layer)
-                        data = report(info, result, pulses.multi_share)
-                data["pulse_check"] = {
-                    "kept": len(pulses), "multi_return_share": round(pulses.multi_share, 6),
-                    "has_scan_angle": pulses.has_scan_angle, "complete_multi_pulses": info.multi_pulses,
-                    "incomplete_multi_pulses": info.incomplete_multi_pulses,
-                    "out_of_order_records_sampled": info.joined_out_of_order_points,
-                    "unpaired_multi_echoes": info.unpaired_multi_echoes,
-                    "population_counts_estimated": info.population_counts_estimated,
-                    "return_modes": info.return_modes,
-                }
-            except (NoTrajectory, UnusableTime) as error:
-                error_message = str(error)
-                exit_code = error.exit_code
-            except JobBusy as error:
-                safe_products = safe_report = False
-                error_message = str(error)
-            except (OSError, ValueError, MemoryError, LaspyException, LazrsError, StructError, EOFError) as error:
-                error_message = str(error) or "The job could not read its input or ran out of memory."
-        if error_message is None and occlusion_paths:
-            path_inputs = _occlusion_path(args, result, pulses, resources)
-            pulses = None
-            data["occlusion"] = _occlusion(args, path_inputs, resources, info, requested, source_spool)
-            if "error" in data["occlusion"]:
-                if result is None:
-                    error_message = data["occlusion"]["error"]
-                else:
-                    result.warnings.append(f"Occlusion: {data['occlusion']['error']}")
-                    for path in occlusion_paths:
-                        try:
-                            write_empty(path)
-                        except OSError as error:
-                            error_message = f"cannot publish empty output {path}: {error}"
+                        write_geojson(geojson_path, layer)
+                    data = report(info, result, pulses.multi_share)
+            data["pulse_check"] = {
+                "kept": len(pulses), "multi_return_share": round(pulses.multi_share, 6),
+                "has_scan_angle": pulses.has_scan_angle, "complete_multi_pulses": info.multi_pulses,
+                "incomplete_multi_pulses": info.incomplete_multi_pulses,
+                "out_of_order_records_sampled": info.joined_out_of_order_points,
+                "unpaired_multi_echoes": info.unpaired_multi_echoes,
+                "population_counts_estimated": info.population_counts_estimated,
+                "return_modes": info.return_modes,
+            }
+        except (NoTrajectory, UnusableTime) as error:
+            error_message = str(error)
+            exit_code = error.exit_code
+        except JobBusy as error:
+            safe_products = safe_report = False
+            error_message = str(error)
+        except (OSError, ValueError, MemoryError, LaspyException, LazrsError, StructError, EOFError) as error:
+            error_message = str(error) or "The job could not read its input or ran out of memory."
+    if error_message is None and occlusion_paths:
+        path_inputs = _occlusion_path(args, result, pulses, resources)
+        pulses = None
+        data["occlusion"] = _occlusion(args, path_inputs, resources, info, requested, index)
+        if "error" in data["occlusion"]:
+            if result is None:
+                error_message = data["occlusion"]["error"]
+            else:
+                result.warnings.append(f"Occlusion: {data['occlusion']['error']}")
+                for path in occlusion_paths:
+                    try:
+                        write_empty(path)
+                    except OSError as error:
+                        error_message = f"cannot publish empty output {path}: {error}"
     if error_message is not None:
         print(f"error: {error_message}", file=sys.stderr)
         details = {field: data[field] for field in ("occlusion", "pulse_check") if data is not None and field in data}
@@ -251,24 +244,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-@contextmanager
-def _record_echoes(output):
-    import numpy as np
-
-    from .tile_jobs import identify, lock_job
-    from .tile_spool import EchoSource
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    work = output.parent / (".trajectory-input-" + identify([], str(output), np.empty(0), np.empty(0)))
-    with lock_job(work):
-        for orphan in work.glob("source-*.bin"):
-            orphan.unlink()
-        try:
-            yield EchoSource(work)
-        finally:
-            shutil.rmtree(work)
-
-
 def _occlusion_path(args, result, pulses, resources):
     import numpy as np
 
@@ -289,7 +264,7 @@ def _occlusion_path(args, result, pulses, resources):
     return time, xyz, result.method, None
 
 
-def _occlusion(args, path_inputs, resources, info, threads, source_spool) -> dict:
+def _occlusion(args, path_inputs, resources, info, threads, index) -> dict:
     """Run the occlusion part; a failure is reported in its section instead of failing the trajectory."""
     from laspy.errors import LaspyException
     from lazrs import LazrsError
@@ -304,8 +279,8 @@ def _occlusion(args, path_inputs, resources, info, threads, source_spool) -> dic
             args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=float(args.voxel),
             dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
             quality="rough" if method in ("scan_angle", "lines_scan_angle") or info.single_return_files else None,
-            delivered_check=check, threads=threads, source_spool=source_spool, single_files=info.single_return_files,
-            budget=int(args.grid_memory_gib * 2**30), resources=resources, fragment_echoes=info.fragment_echoes,
+            delivered_check=check, threads=threads, index=index, single_files=info.single_return_files,
+            budget=int(args.grid_memory_gib * 2**30), resources=resources,
         )
     except (OSError, ValueError, MemoryError, ImportError, LaspyException, LazrsError) as error:
         return {**({"delivered_path_check": check} if check else {}),

@@ -15,13 +15,10 @@ ground holding the occluded share of the observed voxels, plus a last band with 
 from __future__ import annotations
 
 import csv
-import json
 import math
-import multiprocessing
 import os
 import shutil
 import subprocess
-from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -31,11 +28,12 @@ from tempfile import TemporaryDirectory
 import laspy
 import numpy as np
 
-from .cloud import CHUNK, is_copc, point_chunks
-from .pulses import MAX_STRAY, Pulses, _crs, _sample, _time_system
+from .cloud import CHUNK, point_chunks
+from .pulses import Pulses, _crs, _time_system
 from .resources import RunResources, available_memory, decoding_threads
-from .tile_jobs import atomic_json, discard_finished_spools, execute, identify, lock_job, save_tile, tile_files
-from .tile_spool import ECHO, START, TileSpools, pack_echoes, raw_batches, return_fields, tile_batches
+from . import time_windows
+from .window_input import ScanIndex
+from .window_jobs import execute, identify, lock_job
 
 FILLED, EMPTY, OCCLUDED, UNOBSERVED = 1, 2, 3, 4  # OccPy's classes
 # Native grids, list conversion, NumPy counts and output windows all overlap
@@ -43,13 +41,6 @@ FILLED, EMPTY, OCCLUDED, UNOBSERVED = 1, 2, 3, 4  # OccPy's classes
 GIB = 2**30
 DEFAULT_BUDGET = 16 * GIB
 HARD_BUDGET = 64 * GIB
-GRID_BYTES_PER_VOXEL = 72
-GRID_BYTES_PER_COLUMN = 320
-WORKING_BYTES = 2 * GIB
-MAX_FRAGMENT_ECHOES = MAX_STRAY
-FRAGMENT_BYTES_PER_ECHO = 112
-NATIVE_ECHO_LIMIT = int(np.iinfo(np.int32).max)
-ECHO_BIN = 16
 WINDOW = 128  # XY block size for deriving and writing the products
 BAND_M = 1.0  # height band of the COG
 SPIKE_M = 2.0  # a lowest-hit ground this far above its neighbourhood is vegetation, not ground
@@ -232,345 +223,67 @@ def _stage(resources, name, **kwargs):
     return resources.stage(name, **kwargs) if resources is not None else nullcontext({})
 
 
-def _extent_points(paths, time, stats, spool, spatial, transforms, source):
-    for file, path in enumerate(paths):
-        if source is not None:
-            raw = source.path(file)
-            if not raw.is_file():
-                continue
-            scales, offsets = transforms[file]
-            for records in raw_batches(raw):
-                t = records["time"]
-                keep = _time_mask(t, time)
-                stats["echoes_read"] = stats.get("echoes_read", 0) + len(t)
-                stats["echoes_outside_path"] = stats.get("echoes_outside_path", 0) + len(t) - int(keep.sum())
-                if keep.any():
-                    coord = np.column_stack([records[axis][keep] * scale + offset
-                                             for axis, scale, offset in zip(("x", "y", "z"), scales, offsets)])
-                    yield coord, t[keep], (records["returns"][keep] & 15)
-            stats["bytes_read"] = stats.get("bytes_read", 0) + raw.stat().st_size
-            continue
-        with (spool(file) if spool is not None else nullcontext()) as stream:
-            for chunk in point_chunks(path, CHUNK, spatial=spatial):
-                t = chunk.gps_time
-                keep = _time_mask(t, time)
-                if stream is not None:
-                    stats["echoes_read"] = stats.get("echoes_read", 0) + len(t)
-                    stats["echoes_outside_path"] = stats.get("echoes_outside_path", 0) + len(t) - int(keep.sum())
-                    if not np.isfinite([t.min(), t.max()]).all():
-                        raise ValueError(f"{path.name}: GPS times must be finite.")
-                    records = pack_echoes(chunk, keep)
-                    records.tofile(stream)
-                    stats["bytes_written"] = stats.get("bytes_written", 0) + records.nbytes
-                if keep.any():
-                    coord = np.column_stack([np.asarray(axis)[keep] for axis in (chunk.x, chunk.y, chunk.z)])
-                    yield coord, t[keep], np.asarray(chunk.return_number)[keep]
-        stats["bytes_read"] = stats.get("bytes_read", 0) + path.stat().st_size
-
-
-def _extent_pass(paths, grid, time, xyz, dtm, crs_wkt, include_sample, stats, echo_bins=None, spool=None, spatial=False,
-                 transforms=None, source=None):
+def _extent_pass(paths, grid, time, dtm, crs_wkt, stats):
+    """Accumulate surface limits from all echoes overlapping the path."""
     nx, ny, nz = grid.shape
-    if nx * ny * 96 > HARD_BUDGET - WORKING_BYTES or nz > np.iinfo(np.int32).max:
+    if nx * ny * 96 > HARD_BUDGET - time_windows.WORKING_BYTES or nz > np.iinfo(np.int32).max:
         raise ValueError(f"The occlusion extent {grid.shape} exceeds the 64 GiB surface budget; "
                          "increase --voxel or restrict the acquisition.")
     low = np.full(nx * ny, nz, np.int32)
     high = np.full(nx * ny, -1, np.int32)
-    sample_parts = []
-    for coord, pulse_t, rn in _extent_points(paths, time, stats, spool, spatial, transforms, source):
-        cells = np.floor((coord - grid.origin) / grid.voxel + 1e-8).astype(np.int64)
-        for axis, maximum in enumerate(grid.shape):
-            np.clip(cells[:, axis], 0, maximum - 1, out=cells[:, axis])
-        flat = cells[:, 0] * ny + cells[:, 1]
-        np.minimum.at(low, flat, cells[:, 2])
-        np.maximum.at(high, flat, cells[:, 2])
-        if echo_bins is not None:
-            bins = (cells[:, 0] // ECHO_BIN) * echo_bins.shape[1] + cells[:, 1] // ECHO_BIN
-            echo_bins += np.bincount(bins, minlength=echo_bins.size).reshape(echo_bins.shape)
-        if include_sample:
-            samples = (rn <= 1) & _sample(pulse_t, 100)
-            if samples.any():
-                d = np.column_stack(_positions(pulse_t[samples], time, xyz)) - coord[samples]
-                sample_parts.append((flat[samples], (np.hypot(d[:, 0], d[:, 1]) /
-                                                    np.maximum(np.abs(d[:, 2]), 1e-9)).astype(np.float32)))
+    read = retained = 0
+    for path in paths:
+        for chunk in point_chunks(path, CHUNK):
+            t = chunk.gps_time
+            keep = _time_mask(t, time)
+            read += len(t)
+            retained += int(keep.sum())
+            if not keep.any():
+                continue
+            coord = np.column_stack([np.asarray(axis)[keep] for axis in (chunk.x, chunk.y, chunk.z)])
+            cells = np.floor((coord - grid.origin) / grid.voxel + 1e-8).astype(np.int64)
+            for axis, maximum in enumerate(grid.shape):
+                np.clip(cells[:, axis], 0, maximum - 1, out=cells[:, axis])
+            flat = cells[:, 0] * ny + cells[:, 1]
+            np.minimum.at(low, flat, cells[:, 2])
+            np.maximum.at(high, flat, cells[:, 2])
+    if read != grid.points:
+        raise ValueError("The occlusion scan did not decode the point count declared by its headers.")
+    stats.update(echoes_read=read, echoes_outside_path=read - retained,
+                 bytes_read=sum(path.stat().st_size for path in paths))
+    return _crop(grid, low.reshape(nx, ny), high.reshape(nx, ny), dtm, crs_wkt, stats)
+
+
+def _crop(grid, low, high, dtm, crs_wkt, stats):
+    nx, ny, nz = grid.shape
     if (high < 0).all():
         raise ValueError("The point cloud and path have no overlapping GPS times. "
                          "Check GPS week seconds versus adjusted GPS time.")
     low[low == nz] = -1
-    low, high = low.reshape(nx, ny), high.reshape(nx, ny)
     if dtm is None:
         ground, spikes = _ground_from_lowest(low, grid)
     else:
         ground, spikes = ground_from_dtm(dtm, grid, crs_wkt), 0
         stats["bytes_read"] += dtm.stat().st_size
-    top_z = grid.origin[2] + (high + 0.5) * grid.voxel
+    top_z = grid.origin[2] + (int(high.max()) + 0.5) * grid.voxel
     offset = max(0, math.floor((float(ground.min()) - 1 - grid.origin[2]) / grid.voxel))
     offset = min(offset, nz - 1)
-    stop = min(nz, max(offset + 1, math.ceil((float(top_z.max()) + 1 - grid.origin[2]) / grid.voxel)))
+    stop = min(nz, max(offset + 1, math.ceil((top_z + 1 - grid.origin[2]) / grid.voxel)))
     origin = grid.origin.copy()
     origin[2] += offset * grid.voxel
-    cropped = Grid(origin, (nx, ny, stop - offset), grid.voxel)
-    if sample_parts:
-        height = np.maximum(top_z - ground, 0).ravel()
-        samples = np.concatenate([height[index] * slope for index, slope in sample_parts])
-        percentile = float(np.percentile(samples, 99.9))
-    else:
-        percentile = 0.0
-    return cropped, high - offset, ground, spikes, percentile
+    return Grid(origin, (nx, ny, stop - offset), grid.voxel), high - offset, ground, spikes
 
 
-def _grid_bytes(shape, whole_columns=0, fragment_bytes=0):
-    nx, ny, _ = shape
-    return WORKING_BYTES + fragment_bytes + GRID_BYTES_PER_VOXEL * math.prod(shape) + GRID_BYTES_PER_COLUMN * nx * ny + 32 * whole_columns
-
-
-@dataclass(frozen=True)
-class Tile:
-    core: tuple[slice, slice]
-    extent: tuple[slice, slice, slice]
-    echo_upper_bound: int | None = None
-
-    @property
-    def shape(self) -> tuple[int, int, int]:
-        return tuple(part.stop - part.start for part in self.extent)
-
-
-def _tile_layout(grid, top, ground, budget, buffer_m, fragment_bytes=0, echo_bins=None):
-    nx, ny, nz = grid.shape
-    core = (slice(0, nx), slice(0, ny))
-    total_echoes = int(echo_bins.sum()) if echo_bins is not None else None
-    if (_grid_bytes(grid.shape, nx * ny, fragment_bytes) <= budget
-            and (total_echoes is None or total_echoes <= NATIVE_ECHO_LIMIT)):
-        return [Tile(core, (*core, slice(0, nz)), total_echoes)], 0
-    prefix = (np.pad(echo_bins.cumsum(axis=0).cumsum(axis=1), ((1, 0), (1, 0)))
-              if echo_bins is not None else None)
-    halo = min(math.ceil(buffer_m / grid.voxel), math.floor(100.0 / grid.voxel + 1e-12))
-    minimum = _grid_bytes((min(nx, 1 + 2 * halo), min(ny, 1 + 2 * halo), nz), nx * ny, fragment_bytes)
-    budget = max(budget, min(minimum, HARD_BUDGET))
-    layout, pending = [], [core]
-    while pending:
-        core = pending.pop()
-        if (top[core] < 0).all():
+def _product_blocks(grid, top, ground):
+    for xy in _xy_windows(grid):
+        high = int(top[xy].max(initial=-1))
+        if high < 0:
             continue
-        buffered = tuple(slice(max(0, part.start - halo), min(size, part.stop + halo))
-                         for part, size in zip(core, (nx, ny)))
-        low = math.floor((float(ground[buffered].min()) - 1 - grid.origin[2]) / grid.voxel)
-        bottom = min(nz - 1, max(0, low))
-        high = math.ceil(float(top[buffered].max()) + 0.5 + 1 / grid.voxel)
-        upper_bound = None
-        if prefix is not None:
-            # The spatial query includes points on the upper faces. Cover
-            # every intersecting bin to bound the number of input echoes.
-            x, y = buffered
-            x0, y0 = x.start // ECHO_BIN, y.start // ECHO_BIN
-            x1 = min(prefix.shape[0] - 1, x.stop // ECHO_BIN + 1)
-            y1 = min(prefix.shape[1] - 1, y.stop // ECHO_BIN + 1)
-            upper_bound = int(prefix[x1, y1] - prefix[x0, y1] - prefix[x1, y0] + prefix[x0, y0])
-        tile = Tile(core, (*buffered, slice(bottom, min(nz, max(bottom + 1, high)))), upper_bound)
-        amount = _grid_bytes(tile.shape, nx * ny, fragment_bytes)
-        if amount <= budget and (upper_bound is None or upper_bound <= NATIVE_ECHO_LIMIT):
-            layout.append(tile)
-        else:
-            axis = int(core[1].stop - core[1].start > core[0].stop - core[0].start)
-            part = core[axis]
-            middle = (part.start + part.stop) // 2
-            if middle == part.start:
-                if upper_bound is not None and upper_bound > NATIVE_ECHO_LIMIT:
-                    raise ValueError("A buffered tile exceeds the native 2.1 billion-echo limit. Split the acquisition.")
-                raise ValueError(f"Even a one-column occlusion tile with the {buffer_m:.1f} m buffer "
-                                 "would exceed 64 GiB; increase --voxel or restrict the acquisition.")
-            for split in (slice(middle, part.stop), slice(part.start, middle)):
-                pending.append((split, core[1]) if axis == 0 else (core[0], split))
-        if len(layout) + len(pending) > 10_000:
-            raise ValueError("The occlusion grid requires more than 10,000 tiles; increase --voxel or the grid budget.")
-    return layout, halo
-
-
-def _read_storage_headers(paths):
-    transforms, spatial = [], False
-    for path in paths:
-        with laspy.open(path, read_evlrs=False) as reader:
-            transforms.append((reader.header.scales.tolist(), reader.header.offsets.tolist()))
-            spatial |= is_copc(reader.header)
-    if spatial and len(paths) != 1:
-        raise ValueError("Use one merged COPC or a list of per-file LAS/LAZ inputs.")
-    return transforms, spatial
-
-
-def _route_strip(arguments):
-    spool, grid, layout, time, points, file, path, transform, time_bounds, as_single = arguments
-    routing = TileSpools(spool, grid, layout, time, points, compress=True)
-    recovered, unpaired = routing.stage_file(file, path, *transform, False, time_bounds, as_single=as_single)
-    return recovered, unpaired, routing.bytes_written, routing.echoes
-
-
-def _route_file_spools(spool, grid, layout, time, points, paths, transforms, time_bounds, spatial, slots, stage,
-                       single_files=()):
-    compressed = points > NATIVE_ECHO_LIMIT
-    route_slots = min(slots, max(1, available_memory() // (2 * GIB))) if compressed else 1
-    workers = min(route_slots, len(paths)) if not spatial else 1
-    recovered = unpaired = written = 0
-    if workers > 1:
-        calls = [(spool, grid, layout, time, points, index, path, transform, time_bounds, index in single_files)
-                 for index, (path, transform) in enumerate(zip(paths, transforms))]
-        tile_echoes = np.zeros(len(layout), np.int64)
-        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
-            for joined, missing, size, echoes in pool.map(_route_strip, calls):
-                recovered += joined
-                unpaired += missing
-                written += size
-                tile_echoes += echoes
-    else:
-        routing = TileSpools(spool, grid, layout, time, points, compress=compressed)
-        for index, (path, transform) in enumerate(zip(paths, transforms)):
-            joined, missing = routing.stage_file(index, path, *transform, spatial, time_bounds,
-                                                 hash_slots=route_slots if spatial else 1, as_single=index in single_files)
-            recovered += joined
-            unpaired += missing
-        written, tile_echoes = routing.bytes_written, routing.echoes
-        workers = max(workers, routing.hash_workers)
-    echoes_routed = int(tile_echoes.sum())
-    stage.update(bytes_written=written, echoes_routed=echoes_routed, uncompressed_bytes=echoes_routed * ECHO.itemsize,
-                 compressed=compressed, routing_workers=workers)
-    return recovered, unpaired, tile_echoes
-
-
-def _prepare_job(work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source, slots, single_files):
-    manifest = work / "prepared.json"
-    spool = work / "spools"
-    surfaces = work / "surfaces.npz"
-    if manifest.is_file():
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-    else:
-        if spool.is_dir():
-            shutil.rmtree(spool)
-        spool.mkdir()
-        transforms, spatial = _read_storage_headers(paths)
-        full_grid, crs_wkt = _grid(paths, voxel)
-        # Preserve the established layout for previously supported strips.
-        # Fragment buffers no longer contribute to worker reservations.
-        legacy_allowance = 0 if spatial else FRAGMENT_BYTES_PER_ECHO * min(fragment_echoes or 0, MAX_FRAGMENT_ECHOES)
-        planning_budget = min(budget, available_memory())
-        with _stage(resources, "grid extent/crop pass") as stage:
-            if planning_budget <= WORKING_BYTES:
-                raise ValueError("The occlusion job lacks memory for one tile's point buffers.")
-            echo_bins = None
-            if full_grid.points > NATIVE_ECHO_LIMIT:
-                dimensions = tuple(-(-length // ECHO_BIN) for length in full_grid.shape[:2])
-                echo_bins = np.zeros(dimensions, np.int64)
-            sample = (_grid_bytes(full_grid.shape, math.prod(full_grid.shape[:2]), legacy_allowance)
-                      > planning_budget or echo_bins is not None)
-            raw_paths = [(source.path(index) if source is not None else spool / f"source-{index:05d}.bin")
-                         for index in range(len(paths))]
-            grid, top, ground, spikes, percentile = _extent_pass(
-                paths, full_grid, time, xyz, dtm, crs_wkt, sample, stage,
-                echo_bins=echo_bins, spool=lambda file: raw_paths[file].open("xb"), spatial=spatial,
-                transforms=transforms, source=source)
-            if stage["echoes_read"] != full_grid.points:
-                raise ValueError("The occlusion scan did not decode the point count declared by the headers.")
-            layout, halo = _tile_layout(grid, top, ground, planning_budget, min(100.0, percentile),
-                                        legacy_allowance, echo_bins)
-            stage.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape),
-                         planned_tiles=len(layout), buffer_m=halo * voxel)
-            counters = {key: stage.get(key, 0) for key in ("echoes_read", "echoes_outside_path")}
-        with _stage(resources, "route tile spools", children=True) as stage:
-            time_bounds = (time[0] - TIME_MARGIN, time[-1] + TIME_MARGIN) if source is not None else None
-            try:
-                recovered, unpaired, tile_echoes = _route_file_spools(
-                    spool, grid, layout, time, full_grid.points, raw_paths, transforms, time_bounds, spatial, slots, stage, single_files)
-            except BrokenProcessPool as error:
-                raise ValueError("An occlusion spool worker stopped during source routing.") from error
-            counters.update(recovered_echoes=recovered, unpaired_echoes=unpaired)
-        if any(tile_echoes > NATIVE_ECHO_LIMIT):
-            raise ValueError("A buffered tile including complete pulses exceeds the native 2.1 billion-echo limit. "
-                             "Lower --grid-memory-gib or split the acquisition.")
-        data = dict(origin=grid.origin.tolist(), shape=grid.shape, full_shape=full_grid.shape, crs=crs_wkt,
-                    transforms=transforms, spikes=spikes, percentile=percentile if sample else None, halo=halo,
-                    counters=counters, tile_echoes=tile_echoes.tolist(),
-                    tiles=[dict(core=[(s.start, s.stop) for s in tile.core],
-                                extent=[(s.start, s.stop) for s in tile.extent],
-                                echo_upper_bound=tile.echo_upper_bound) for tile in layout])
-        with surfaces.open("wb") as stream:
-            np.savez(stream, top=top, ground=ground)
-            stream.flush()
-            os.fsync(stream.fileno())
-        atomic_json(manifest, data)
-    with np.load(surfaces, allow_pickle=False) as arrays:
-        top, ground = arrays["top"], arrays["ground"]
-    grid = Grid(np.array(data["origin"]), tuple(data["shape"]), voxel)
-    layout = [Tile(tuple(slice(*s) for s in tile["core"]), tuple(slice(*s) for s in tile["extent"]),
-                   tile["echo_upper_bound"]) for tile in data["tiles"]]
-    return data, grid, layout, spool, top, ground
-
-
-def _init_traversal(work, spool, time, xyz, transforms):
-    global _TILE_CONTEXT
-    _TILE_CONTEXT = work, spool, time, xyz, np.asarray(transforms)
-
-
-def _trace_tile(index, tile, core, expected_echoes):
-    from time import perf_counter, process_time
-
-    from raytr import PyRaytracer
-
-    from .resources import _rss
-
-    work, spool, time, xyz, transforms = _TILE_CONTEXT
-    start_wall, start_cpu = perf_counter(), process_time()
-    tracer = PyRaytracer()
-    tracer.defineGrid(tile.origin, tile.origin + np.array(tile.shape) * tile.voxel, *tile.shape, tile.voxel)
-    points = 0
-    with TemporaryDirectory(dir=work, prefix=f"worker-{index:05d}-") as folder:
-        for records in tile_batches(spool / f"tile-{index:05d}", Path(folder)):
-            t = np.ascontiguousarray(records["time"])
-            files = records["file"]
-            if np.all(files == files[0]):
-                scales, offsets = transforms[files[0]]
-                coords = tuple(records[axis] * scales[k] + offsets[k] + tile.voxel * 1e-7
-                               for k, axis in enumerate(("x", "y", "z")))
-            else:
-                coords = tuple(records[axis] * transforms[files, 0, k] + transforms[files, 1, k] + tile.voxel * 1e-7
-                               for k, axis in enumerate(("x", "y", "z")))
-            sensor = _positions(t, time, xyz)
-            rn, nr = return_fields(records)
-            single = (rn <= 1) & (nr <= 1)
-            if single.any():
-                tracer.doRaytracing_singleReturnPulses(*(axis[single] for axis in (*coords, *sensor)), t[single])
-            multi = ~single
-            if multi.any():
-                shot = np.cumsum((records["flags"] & START) != 0, dtype=np.float64)
-                tracer.addPointData(*(axis[multi] for axis in (*coords, *sensor)), shot[multi], rn[multi], nr[multi])
-                tracer.doRaytracing()
-                tracer.clearPulseDataset()
-            points += len(t)
-    if points != expected_echoes:
-        raise ValueError(f"Occlusion tile {index + 1} spool has {points:,} of {expected_echoes:,} expected echoes.")
-    traversed = int(tracer.get_num_traversed_pulses())
-    missing = int(tracer.get_num_missing_returns())
-    counts = tuple(np.asarray(values(), np.int32)[core] for values in (tracer.getNhit, tracer.getNmiss, tracer.getNocc))
-    del tracer
-    if any(values.min(initial=0) < 0 for values in counts):
-        raise ValueError("Too many pulses traverse the same voxel for the native 32-bit count.")
-    data = dict(tile=index + 1, traversed_pulses=traversed, missing_returns=missing, points_read=points,
-                grid_shape=tile.shape, grid_voxels=math.prod(tile.shape), wall_seconds=perf_counter() - start_wall,
-                cpu_seconds=process_time() - start_cpu, peak_rss_bytes=_rss(), bytes_written=sum(a.nbytes for a in counts))
-    save_tile(work, index, counts, data)
-    return data
-
-
-def _tile_spec(grid, index, plan, expected_echoes):
-    start = np.array([part.start for part in plan.extent])
-    tile = Grid(grid.origin + start * grid.voxel, plan.shape, grid.voxel)
-    core = tuple(slice(part.start - offset, part.stop - offset)
-                 for part, offset in zip(plan.core, start[:2]))
-    shape = tuple(part.stop - part.start for part in (*core, plan.extent[2]))
-    return index, _grid_bytes(tile.shape), shape, (tile, core, expected_echoes)
-
-
-def _completed_tiles(work, layout):
-    for index, plan in enumerate(layout):
-        counts, _ = tile_files(work, index)
-        yield plan.core, plan.extent[2], tuple(np.load(counts, mmap_mode="r", allow_pickle=False))
+        # Include the voxel at the first ground crossing. The product mask
+        # uses float32 heights, so keep one extra layer for boundary rounding.
+        low = max(0, math.floor((float(ground[xy].min()) - grid.origin[2]) / grid.voxel) - 1)
+        if low <= high:
+            yield (*xy, slice(low, high + 1))
 
 
 def _copc_header(grid: Grid, crs_wkt: str | None) -> laspy.LasHeader:
@@ -640,7 +353,7 @@ def _band_shares(classes: np.ndarray, heights: np.ndarray, inside: np.ndarray, n
     return shares.transpose(0, 2, 1)[:, ::-1, :], seen.sum(axis=(1, 2)), hidden.sum(axis=(1, 2))
 
 
-def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, resources, slots):
+def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, resources, slots):
     import rasterio
     from rasterio.shutil import copy as copy_raster
     from rasterio.transform import from_origin
@@ -672,29 +385,22 @@ def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, re
         with laspy.open(flat, "w", header=_copc_header(grid, crs_wkt)) as writer, rasterio.open(raster, "w", **profile) as out:
             out.descriptions = tuple(names)
             out.update_tags(OCCLUSION_BAND_M=str(BAND_M), **tags, OCCLUSION_VALUE="occluded / (filled + empty + occluded)")
-            for number, (core, z, counts) in enumerate(tiles):
-                with _stage(resources, "classify + ground") as stage:
-                    stage["tile"] = number + 1
-                    offset = np.array([part.start for part in core])
-                    local_grid = Grid(grid.origin, counts[0].shape, grid.voxel)
-                    for xy in _xy_windows(local_grid):
-                        local_counts = tuple(count[xy] for count in counts)
-                        xs, ys = tuple(slice(part.start + start, part.stop + start) for part, start in zip(xy, offset))
-                        hits = local_counts[0] > 0
-                        local_top = np.where(hits.any(axis=2), z.stop - 1 - hits[:, :, ::-1].argmax(axis=2), -1)
-                        heights = (centres[z] - ground[xs, ys, None]).astype(np.float32)
-                        threshold = np.minimum(top[xs, ys], local_top)
-                        inside = (heights >= 0) & (layers[z] <= threshold[:, :, None])
-                        if not inside.any():
-                            continue
-                        classes = classify(*local_counts)
-                        classes_total += np.bincount(classes[inside], minlength=5)
-                        _write_voxels(writer, grid, (xs, ys), centres[z], heights, classes, inside, local_counts)
-                        shares, seen, hidden = _band_shares(classes, heights, inside, n_bands)
-                        out.write(shares, window=Window(xs.start, ny - ys.stop, xs.stop - xs.start, ys.stop - ys.start))
-                        seen_total += seen
-                        hidden_total += hidden
-                    del counts, local_counts
+            with _stage(resources, "classify + ground"):
+                for (xs, ys), z, counts in blocks:
+                    hits = counts[0] > 0
+                    local_top = np.where(hits.any(axis=2), z.stop - 1 - hits[:, :, ::-1].argmax(axis=2), -1)
+                    heights = (centres[z] - ground[xs, ys, None]).astype(np.float32)
+                    threshold = np.minimum(top[xs, ys], local_top)
+                    inside = (heights >= 0) & (layers[z] <= threshold[:, :, None])
+                    if not inside.any():
+                        continue
+                    classes = classify(*counts)
+                    classes_total += np.bincount(classes[inside], minlength=5)
+                    _write_voxels(writer, grid, (xs, ys), centres[z], heights, classes, inside, counts)
+                    shares, seen, hidden = _band_shares(classes, heights, inside, n_bands)
+                    out.write(shares, window=Window(xs.start, ny - ys.stop, xs.stop - xs.start, ys.stop - ys.start))
+                    seen_total += seen
+                    hidden_total += hidden
             size = writer.header.point_count
         with _stage(resources, "COPC write", children=True) as stage:
             stage["bytes_read"] = flat.stat().st_size
@@ -722,26 +428,36 @@ def _write_products(grid, tiles, top, ground, copc, cog, crs_wkt, tags, work, re
 def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: Path, voxel: float = 0.5,
         dtm: Path | None = None, scratch: Path | None = None, source: str = "estimated", *,
         quality: str | None = None, delivered_check: dict | None = None,
-        budget: int = DEFAULT_BUDGET, resources: RunResources | None = None, fragment_echoes: int | None = None,
-        threads: int | None = None, source_spool=None, single_files=()) -> dict:
-    """Prepare whole-pulse spools, trace resumable tiles, then merge both products."""
+        budget: int = DEFAULT_BUDGET, resources: RunResources | None = None,
+        threads: int | None = None, index: ScanIndex | None = None, single_files=()) -> dict:
+    """Trace disjoint GPS-time windows and sum the voxel counts before classification."""
     validate_trajectory(time, xyz)
     scratch = scratch or copc.parent
     copc.parent.mkdir(parents=True, exist_ok=True)
     cog.parent.mkdir(parents=True, exist_ok=True)
-    budget = min(budget, HARD_BUDGET)
     slots = decoding_threads(threads)
+    budget = min(budget, HARD_BUDGET)
+    if index is None:
+        index = ScanIndex(paths)
+        index.populate()
+    if index.copc:
+        raise ValueError("Occlusion requires scanner-order LAS/LAZ. Supply the standardized files instead of COPC.")
+    full_grid, crs_wkt = _grid(paths, voxel)
+    time_bounds = time[0] - TIME_MARGIN, np.nextafter(time[-1] + TIME_MARGIN, np.inf)
+    with _stage(resources, "grid extent/crop pass") as extent:
+        grid, top, ground, spikes = _extent_pass(paths, full_grid, time, dtm, crs_wkt, extent)
+        extent.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape))
+    with _stage(resources, "plan GPS-time windows") as planning:
+        layout = time_windows.plan(index, grid, time, xyz, time_bounds, slots, min(budget, available_memory()))
+        planning.update(windows=len(layout), estimated_checkpoint_bytes=sum(12 * math.prod(w.shape) for w in layout))
     identity = identify([*paths, *([dtm] if dtm is not None else [])],
-                        [str(copc.resolve()), str(cog.resolve()), voxel, budget, source, quality, fragment_echoes,
-                         dtm is not None, list(single_files)], time, xyz)
+                        [str(copc.resolve()), str(cog.resolve()), voxel, source, quality, list(single_files),
+                         [(w.lower, w.upper, [(s.start, s.stop) for s in w.bounds]) for w in layout]], time, xyz)
     work = scratch / f".occlusion-{identity}"
     with lock_job(work):
-        for prefix in ("worker-*", "merge-*"):
-            for orphan in work.glob(prefix):
-                if orphan.is_dir():
-                    shutil.rmtree(orphan)
-        data, grid, layout, spool, top, ground = _prepare_job(
-            work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source_spool, slots, single_files)
+        for orphan in work.glob("merge-*"):
+            if orphan.is_dir():
+                shutil.rmtree(orphan)
         ground_source = "dtm" if dtm is not None else "lowest_hit"
         tags = dict(OCCLUSION_GROUND=ground_source, OCCLUSION_TRAJECTORY=source)
         if quality is not None:
@@ -751,24 +467,23 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             tags["OCCLUSION_DELIVERED_MISS_FLAG"] = "unavailable" if flag is None else str(flag).lower()
             if flag is not None:
                 tags["OCCLUSION_DELIVERED_MISS_MEDIAN_M"] = str(delivered_check["median_m"])
-        specs = [_tile_spec(grid, index, plan, echoes)
-                 for index, (plan, echoes) in enumerate(zip(layout, data["tile_echoes"]))]
-        priority = sorted(specs, key=lambda job: (-data["tile_echoes"][job[0]], -job[1]))
+        specs = [(number, window.memory, window.shape, (window,)) for number, window in enumerate(layout)]
+        specs.sort(key=lambda job: (-layout[job[0]].echoes, -job[1]))
         try:
             with _stage(resources, "traversal", children=True) as stage:
-                tiles = execute(work, priority, slots, _trace_tile, _init_traversal,
-                                (work, spool, time, xyz, data["transforms"]), stage)
-                stage["tiles"] = [tiles[i] | {"estimated_grid_bytes": specs[i][1]} for i in range(len(layout))]
+                windows = execute(work, specs, slots, time_windows.trace_window, time_windows.init_worker,
+                                  (index, grid, time, xyz, work, single_files), stage)
+                stage["windows"] = [windows[i] | {"estimated_worker_bytes": w.memory} for i, w in enumerate(layout)]
+                stage["bytes_written"] = sum(w["bytes_written"] for w in windows.values())
         except BrokenProcessPool as error:
             raise ValueError(f"An occlusion worker stopped. Repeat the command to resume from {work.name}.") from error
-        finally:
-            discard_finished_spools(spool, work, layout)
         with TemporaryDirectory(dir=work, prefix="merge-") as folder, \
              TemporaryDirectory(prefix=".occlusion-", dir=cog.parent) as cog_folder:
             merge, staged_cog = Path(folder), Path(cog_folder) / "occlusion.tif"
             staged_copc = merge / "voxels.copc.laz"
-            products = _write_products(grid, _completed_tiles(work, layout), top, ground, staged_copc, staged_cog,
-                                       data["crs"], tags, merge, resources, slots)
+            blocks = time_windows.summed_counts(work, layout, _product_blocks(grid, top, ground))
+            products = _write_products(grid, blocks, top, ground, staged_copc, staged_cog,
+                                       crs_wkt, tags, merge, resources, slots)
             os.replace(staged_copc, copc)
             os.replace(staged_cog, cog)
         shutil.rmtree(work)
@@ -780,14 +495,15 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         **({"delivered_path_check": delivered_check} if delivered_check is not None else {}),
         "voxel_m": voxel,
         "grid": {"origin": [round(float(v), 3) for v in grid.origin], "shape": list(grid.shape),
-                 "uncropped_shape": list(data["full_shape"]), "voxels": math.prod(grid.shape),
-                 "uncropped_voxels": math.prod(data["full_shape"])},
-        "tiling": {"tiles": len(layout), "buffer_m": data["halo"] * grid.voxel,
-                   "sample_p99_9_m": data["percentile"], "budget_bytes": budget,
-                   "peak_concurrent_workers": stage["peak_concurrent_workers"], "reused_tiles": stage["reused_tiles"]},
+                 "uncropped_shape": list(full_grid.shape), "voxels": math.prod(grid.shape),
+                 "uncropped_voxels": math.prod(full_grid.shape)},
+        "time_windows": {"windows": len(layout), "budget_bytes": budget,
+                         "peak_concurrent_workers": stage["peak_concurrent_workers"],
+                         "reused_windows": stage["reused_windows"]},
         "ground": ground_source,
-        "ground_spikes_replaced": data["spikes"],
-        **data["counters"],
-        **{key: sum(tile[key] for tile in tiles.values()) for key in ("traversed_pulses", "missing_returns")},
+        "ground_spikes_replaced": spikes,
+        **{key: extent[key] for key in ("echoes_read", "echoes_outside_path")},
+        **{key: sum(w[key] for w in windows.values()) for key in
+           ("traversed_pulses", "missing_returns", "recovered_echoes", "unpaired_echoes")},
         **products,
     }

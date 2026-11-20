@@ -1,4 +1,4 @@
-"""Lock a job's checkpoints and admit tile workers within its CPU and memory budgets."""
+"""Lock a job's checkpoints and admit window workers within its CPU and memory budgets."""
 from __future__ import annotations
 
 import fcntl
@@ -6,16 +6,14 @@ import hashlib
 import json
 import multiprocessing
 import os
-import shutil
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from contextlib import contextmanager
-from pathlib import Path
 
 import numpy as np
 
 from .resources import available_memory
 
-SCHEMA = 1
+SCHEMA = 2
 
 
 class JobBusy(ValueError):
@@ -61,12 +59,12 @@ def atomic_json(path, data):
         os.close(fd)
 
 
-def tile_files(work, index):
-    return tuple(work / f"tile-{index:05d}.{suffix}" for suffix in ("npy", "json"))
+def window_files(work, index):
+    return tuple(work / f"window-{index:05d}.{suffix}" for suffix in ("npy", "json"))
 
 
 def finished(work, index, shape):
-    counts, marker = tile_files(work, index)
+    counts, marker = window_files(work, index)
     if marker.is_file() and counts.is_file():
         try:
             array = np.load(counts, mmap_mode="r", allow_pickle=False)
@@ -77,8 +75,8 @@ def finished(work, index, shape):
     return None
 
 
-def save_tile(work, index, counts, data):
-    final, marker = tile_files(work, index)
+def save_window(work, index, counts, data):
+    final, marker = window_files(work, index)
     pending = final.with_suffix(".part")
     out = np.lib.format.open_memmap(pending, mode="w+", dtype=np.int32, shape=(3, *counts[0].shape))
     for dest, values in zip(out, counts):
@@ -102,10 +100,10 @@ def execute(work, specs, slots, worker, init, initargs, stage):
         else:
             results[index] = previous
     memory = available_memory()
-    stage.update(reused_tiles=len(results), scheduled_tiles=len(pending), worker_slots=slots,
+    stage.update(reused_windows=len(results), scheduled_windows=len(pending), worker_slots=slots,
                  worker_memory_bytes=memory, peak_concurrent_workers=0, peak_reserved_bytes=0)
     if pending and max(amount for _, amount, _ in pending) > memory:
-        raise ValueError("A planned occlusion tile exceeds available job memory. Lower --grid-memory-gib "
+        raise ValueError("A planned occlusion window exceeds available job memory. Lower --grid-memory-gib "
                          "or request more job memory.")
     if not pending:
         return results
@@ -134,14 +132,6 @@ def execute(work, specs, slots, worker, init, initargs, stage):
                     reserved -= amount
                     results[index] = future.result()
     finally:
-        stage["completed_tiles"] = len(results)
+        stage["completed_windows"] = len(results)
     return results
 
-
-def discard_finished_spools(spool, work, layout):
-    for index, tile in enumerate(layout):
-        shape = tuple(part.stop - part.start for part in (*tile.core, tile.extent[2]))
-        if finished(work, index, shape) is not None:
-            directory = spool / f"tile-{index:05d}"
-            if directory.is_dir():
-                shutil.rmtree(directory)

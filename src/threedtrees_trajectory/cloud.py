@@ -7,7 +7,7 @@ from shutil import disk_usage
 
 import laspy
 import numpy as np
-from laspy.copc import Bounds, CopcReader, load_octree_for_query
+from laspy.copc import CopcReader, load_octree_for_query
 
 CHUNK = 5_000_000
 COPC_BATCH_NODES = 1024
@@ -51,30 +51,17 @@ def _node_batches(nodes, size, path):
         yield batch
 
 
-def _spatial_chunks(path: Path, bounds: Bounds | None, size: int):
+def _copc_chunks(path: Path, size: int):
     with CopcReader.open(path, decompression_selection=LAZ_FIELDS) as reader:
-        if bounds is not None:
-            bounds = bounds.ensure_3d(reader.header.mins, reader.header.maxs)
-            lo = np.ceil((bounds.mins - reader.header.offsets) / reader.header.scales - 1e-7)
-            hi = np.floor((bounds.maxs - reader.header.offsets) / reader.header.scales + 1e-7)
-        nodes = load_octree_for_query(reader.source, reader.copc_info, reader.root_page, query_bounds=bounds)
+        nodes = load_octree_for_query(reader.source, reader.copc_info, reader.root_page)
         for batch in _node_batches(nodes, size, path):
             # laspy passes the node chunk table to lazrs's native Rayon pool.
-            # A single call fills the output in file order, independent of slots.
-            points = reader._fetch_and_decompress_points_of_nodes(batch)
-            yield points if bounds is None else _in_bounds(points, ("X", "Y"), lo, hi)
+            yield reader._fetch_and_decompress_points_of_nodes(batch)
 
 
-def _in_bounds(points, axes, lo, hi):
-    keep = np.ones(len(points), bool)
-    for k, axis in enumerate(axes):
-        keep &= (getattr(points, axis) >= lo[k]) & (getattr(points, axis) <= hi[k])
-    return points[keep]
-
-
-def point_chunks(path: Path, size: int, bounds: Bounds | None = None, *, spatial: bool = False):
-    if bounds is not None or spatial:
-        yield from (p for p in _spatial_chunks(path, bounds, size) if len(p))
+def point_chunks(path: Path, size: int, *, spatial: bool = False):
+    if spatial:
+        yield from _copc_chunks(path, size)
     else:
         with open_cloud(path) as reader:
             while reader.points_read < reader.header.point_count:
@@ -125,14 +112,13 @@ def _ordered(records) -> np.ndarray:
 class TimeSortedCopc:
     """Sorted disk runs with a batch merge of disjoint, complete GPS-time groups."""
 
-    def __init__(self, path: Path, folder: Path, size: int, bounds: Bounds | None = None, *, select=None,
-                 observe=None, spatial=False):
+    def __init__(self, path: Path, folder: Path, size: int, *, select=None, spatial=False):
         self.size = size
         with open_cloud(path) as reader:
             self.header = reader.header
             if not is_copc(self.header):
                 raise ValueError(f"{path.name} is not a COPC point cloud.")
-        if bounds is None and select is None:
+        if select is None:
             expected = self.header.point_count * SORT_BYTES_PER_POINT
             if expected > SORT_LIMIT or expected > disk_usage(folder).free:
                 raise ValueError(f"{path.name}: COPC time sort needs {expected / 1e9:.1f} GB of temporary disk "
@@ -148,15 +134,13 @@ class TimeSortedCopc:
         # Keep all sorted runs in one file. The number of runs can exceed the
         # process's file descriptor limit for billion-point acquisitions.
         with self.path.open("xb") as spool, self.keys.open("xb") as keys:
-            for chunk in point_chunks(path, size, bounds, spatial=spatial or observe is not None):
+            for chunk in point_chunks(path, size, spatial=spatial):
                 time = chunk.gps_time
                 low, high = float(time.min()), float(time.max())
                 if not np.isfinite([low, high]).all():
                     raise ValueError(f"{path.name}: GPS times must be finite.")
                 self.time_range = (min(self.time_range[0], low), max(self.time_range[1], high))
                 self.points_read += len(chunk)
-                if observe is not None:
-                    observe(0, chunk)
                 if select is not None:
                     chunk = select(chunk)
                 if not len(chunk):

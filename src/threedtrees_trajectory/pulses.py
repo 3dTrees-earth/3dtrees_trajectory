@@ -368,7 +368,7 @@ def _fallback_chunks(path, mode, copc):
 
 def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int = MAX_SINGLE,
                 full: bool = False, *, info: CloudInfo | None = None, prepared=None,
-                scratch: Path | None = None, resources=None, observe=None, reset_observation=None,
+                scratch: Path | None = None, resources=None, scan_index=None,
                 copc_threads: int | None = None, _selection=None) -> tuple[Pulses, CloudInfo]:
     """Build pulse endpoints from strips or from a COPC whose sampled echoes are ordered by time."""
     info = CloudInfo.from_paths(paths) if info is None else info
@@ -393,6 +393,8 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
 
     if copc_paths and (len(paths) != 1 or len(copc_paths) != 1):
         raise ValueError("Use one merged COPC or a list of per-file LAS/LAZ inputs.")
+    if scan_index is not None:
+        scan_index.copc = bool(copc_paths)
     if copc_paths and prepared is None:
         from contextlib import nullcontext
 
@@ -404,7 +406,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
         directory.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(dir=directory, prefix=".copc-sort-") as folder:
             with (resources.stage("COPC sample read/sort") if resources else nullcontext({})) as stage:
-                sorted_input = TimeSortedCopc(path, Path(folder), CHUNK, select=selection, observe=observe,
+                sorted_input = TimeSortedCopc(path, Path(folder), CHUNK, select=selection,
                                                       spatial=copc_threads is not None)
                 if copc_threads is not None:
                     stage.update(decoder="lazrs COPC hierarchy nodes", decoder_threads=copc_threads,
@@ -416,7 +418,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                              points_read=sorted_input.points_read, sampled_echoes=sorted_input.points_spooled)
             return read_pulses(paths, max_multi, max_single, full, info=info, prepared=sorted_input,
                                scratch=scratch, resources=resources, _selection=selection,
-                               observe=None, reset_observation=None)
+                               scan_index=scan_index)
 
     origin = np.floor(np.min(origins, axis=0) / 1000) * 1000
     crs = None
@@ -466,8 +468,8 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                 for chunk in chunks:
                     if _selection is None:
                         info.points_read += len(chunk)
-                    if observe is not None:
-                        observe(index, chunk)
+                    if scan_index is not None:
+                        scan_index.observe(index, chunk)
                     if first_chunk:
                         looks_single = (_looks_single_return(chunk) if _selection is None
                                         else _selection.looks_single(prepared))
@@ -499,10 +501,10 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                         for chunk in _fallback_chunks(path, mode, False):
                             local.collect(chunk, index, shift, strides, False)
                         okay = local.finish(strides[0])
-                        if okay and reset_observation is not None:
-                            reset_observation(index)
+                        if okay and scan_index is not None:
+                            scan_index.reset(index)
                             for chunk in _fallback_chunks(path, mode, False):
-                                observe(index, chunk)
+                                scan_index.observe(index, chunk)
                     if not okay:
                         mode = "single"
                         info.single_return_files.append(index)

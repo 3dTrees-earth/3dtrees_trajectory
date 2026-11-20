@@ -1,0 +1,232 @@
+"""Plan and trace disjoint GPS intervals, then sum their overlapping voxel counts."""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from time import perf_counter, process_time
+import os
+
+import numpy as np
+
+from .resources import _rss
+from .window_input import TRACE_BATCH, TRACE_LIMIT, group_multi, pack_echoes
+from .window_jobs import atomic_json, window_files
+
+GIB = 2**30
+WORKING_BYTES = 2 * GIB
+FRAGMENT_BYTES = 112
+VOXEL_BYTES = 48
+COLUMN_BYTES = 320
+MAX_WINDOWS = 10_000
+
+
+@dataclass(frozen=True)
+class TimeWindow:
+    lower: float
+    upper: float
+    bounds: tuple[slice, slice, slice]
+    blocks: tuple
+    echoes: int
+
+    @property
+    def shape(self):
+        return tuple(part.stop - part.start for part in self.bounds)
+
+    @property
+    def memory(self):
+        return (WORKING_BYTES + VOXEL_BYTES * math.prod(self.shape) + COLUMN_BYTES * math.prod(self.shape[:2])
+                + FRAGMENT_BYTES * self.echoes)
+
+
+def _path_bounds(block, lower, upper, time, xyz):
+    first, last = max(lower, block.time_min), min(upper, block.time_max)
+    left, right = np.searchsorted(time, [first, last])
+    endpoints = np.array([np.interp([first, last], time, axis) for axis in xyz.T]).T
+    points = np.concatenate((endpoints, xyz[left:right]))
+    return points.min(axis=0), points.max(axis=0)
+
+
+def _ray_bounds(block, lower, upper, grid, time, xyz):
+    """Conservatively enclose rays up to the original grid exit."""
+    sensor_lo, sensor_hi = _path_bounds(block, lower, upper, time, xyz)
+    grid_lo, grid_hi = grid.origin, grid.origin + np.array(grid.shape) * grid.voxel
+    echo_lo = block.lower
+    echo_hi = block.upper + grid.voxel * 1e-7
+    direction_lo, direction_hi = echo_lo - sensor_hi, echo_hi - sensor_lo
+    limits = np.full(3, np.inf)
+    forward, backward = direction_lo > 0, direction_hi < 0
+    limits[forward] = np.maximum(0., grid_hi[forward] - echo_lo[forward]) / direction_lo[forward]
+    limits[backward] = np.maximum(0., echo_hi[backward] - grid_lo[backward]) / -direction_hi[backward]
+    extension = limits.min()
+    if not np.isfinite(extension):
+        return grid_lo, grid_hi
+    low = np.minimum(sensor_lo, echo_lo + extension * np.minimum(direction_lo, 0))
+    high = np.maximum(sensor_hi, echo_hi + extension * np.maximum(direction_hi, 0))
+    return np.maximum(grid_lo, low), np.minimum(grid_hi, high)
+
+
+def _plan_window(index, grid, time, xyz, lower, upper):
+    files = tuple(tuple(block for block in blocks if block.overlaps(lower, upper)) for blocks in index.blocks)
+    blocks = [block for file in files for block in file]
+    if not blocks:
+        return None
+    bounds = np.asarray([_ray_bounds(block, lower, upper, grid, time, xyz) for block in blocks])
+    start = np.maximum(0, np.floor((bounds[:, 0].min(axis=0) - grid.origin) / grid.voxel).astype(int) - 1)
+    stop = np.minimum(grid.shape, np.floor((bounds[:, 1].max(axis=0) - grid.origin) / grid.voxel).astype(int) + 2)
+    extent = tuple(slice(int(lo), int(hi)) for lo, hi in zip(start, stop))
+    return TimeWindow(lower, upper, extent, files, sum(block.stop - block.start for block in blocks))
+
+
+def plan(index, grid, time, xyz, time_bounds, slots, budget):
+    lower, upper = time_bounds
+    samples = [block.sample for blocks in index.blocks for block in blocks
+               if block.sample is not None and block.overlaps(lower, upper)]
+    if samples and slots > 1:
+        seconds = np.concatenate(samples)
+        seconds = seconds[(lower <= seconds) & (seconds < upper)]
+        cuts = np.quantile(seconds, np.arange(1, slots) / slots) if len(seconds) else []
+        edges = np.unique(np.r_[lower, cuts, upper])
+    else:
+        edges = np.unique(np.linspace(lower, upper, slots + 1))
+    pending = list(zip(edges[:-1], edges[1:]))[::-1]
+    windows = []
+    while pending:
+        lower, upper = pending.pop()
+        window = _plan_window(index, grid, time, xyz, lower, upper)
+        if window is None:
+            continue
+        if window.memory <= budget and window.echoes <= TRACE_LIMIT:
+            windows.append(window)
+            continue
+        middle = lower / 2 + upper / 2
+        if not lower < middle < upper or len(windows) + len(pending) >= MAX_WINDOWS - 1:
+            raise ValueError("A GPS-time window exceeds the occlusion grid memory or native echo budget. "
+                             "Increase --voxel or --grid-memory-gib, or restrict the acquisition.")
+        pending.extend(((middle, upper), (lower, middle)))
+    return windows
+
+
+def init_worker(index, grid, time, xyz, work, single_files):
+    global _CONTEXT
+    _CONTEXT = index, grid, time, xyz, work, single_files
+
+
+def trace_window(number, window):
+    from raytr import PyRaytracer
+
+    index, grid, time, xyz, work, single_files = _CONTEXT
+    start_wall, start_cpu = perf_counter(), process_time()
+    start = np.array([part.start for part in window.bounds])
+    stop = start + window.shape
+    tracer = PyRaytracer()
+    tracer.defineGrid(grid.origin + start * grid.voxel, grid.origin + stop * grid.voxel, *window.shape, grid.voxel)
+    decoded = recovered = unpaired = traced = 0
+    for file, blocks in enumerate(window.blocks):
+        fragments = []
+        scales, offsets = None, None
+        for chunk in index.read(file, blocks):
+            decoded += len(chunk)
+            scales, offsets = chunk.scales, chunk.offsets
+            t = chunk.gps_time
+            keep = (t >= window.lower) & (t < window.upper)
+            if not keep.any():
+                continue
+            if file in single_files:
+                single = keep
+                keep = np.zeros(len(t), bool)
+            else:
+                single = keep & (np.asarray(chunk.return_number) <= 1) & (np.asarray(chunk.number_of_returns) <= 1)
+                keep &= ~single
+            if single.any():
+                seconds = t[single]
+                coords = [axis[single] * scale + offset + grid.voxel * 1e-7 for axis, scale, offset in
+                          zip((chunk.X, chunk.Y, chunk.Z), scales, offsets)]
+                tracer.doRaytracing_singleReturnPulses(*coords, *_positions(seconds, time, xyz), seconds)
+                traced += len(seconds)
+            if keep.any():
+                records = pack_echoes(chunk, keep)
+                sizes, complete = group_multi(records, acquisition_order=True)
+                paired = np.repeat(complete, sizes)
+                if paired.any():
+                    _trace_multi(tracer, records[paired], sizes[complete], scales, offsets, grid.voxel, time, xyz)
+                    traced += int(paired.sum())
+                if not paired.all():
+                    fragments.append(records[~paired])
+        if fragments:
+            records = np.concatenate(fragments)
+            fragments.clear()
+            order = np.lexsort((records["returns"] & 15, records["channel"], records["source"], records["time"]))
+            records = records[order]
+            del order
+            sizes, complete = group_multi(records, acquisition_order=False)
+            paired = np.repeat(complete, sizes)
+            if paired.any():
+                _trace_recovered(tracer, records[paired], sizes[complete], scales, offsets, grid.voxel, time, xyz)
+            joined = int(paired.sum())
+            recovered += joined
+            unpaired += len(records) - joined
+            traced += joined
+    file, marker = window_files(work, number)
+    pending = file.with_suffix(".part")
+    counts = np.lib.format.open_memmap(pending, mode="w+", dtype=np.int32, shape=(3, *window.shape))
+    for channel, getter in enumerate((tracer.getNhit, tracer.getNmiss, tracer.getNocc)):
+        counts[channel] = getter()
+        if counts[channel].min(initial=0) < 0:
+            raise ValueError("Too many pulses traversed a voxel for the native 32-bit count.")
+    counts.flush()
+    del counts
+    with pending.open("rb") as stream:
+        os.fsync(stream.fileno())
+    pending.replace(file)
+    data = dict(window=number + 1, gps_from=window.lower, gps_until=window.upper, points_read=decoded,
+                echoes_traced=traced, recovered_echoes=recovered, unpaired_echoes=unpaired,
+                traversed_pulses=int(tracer.get_num_traversed_pulses()), missing_returns=int(tracer.get_num_missing_returns()),
+                grid_shape=window.shape, grid_voxels=math.prod(window.shape),
+                wall_seconds=perf_counter() - start_wall, cpu_seconds=process_time() - start_cpu,
+                peak_rss_bytes=_rss(), bytes_written=file.stat().st_size)
+    atomic_json(marker, data)
+    return data
+
+
+def _trace_recovered(tracer, records, sizes, scales, offsets, voxel, time, xyz):
+    offsets_in_file = np.r_[0, np.cumsum(sizes)]
+    start = 0
+    while start < len(sizes):
+        stop = np.searchsorted(offsets_in_file, offsets_in_file[start] + TRACE_BATCH, side="right") - 1
+        _trace_multi(tracer, records[offsets_in_file[start]:offsets_in_file[stop]], sizes[start:stop],
+                     scales, offsets, voxel, time, xyz)
+        start = stop
+
+
+def _positions(seconds, time, xyz):
+    return (np.interp(seconds, time, axis) for axis in xyz.T)
+
+
+def _trace_multi(tracer, records, sizes, scales, offsets, voxel, time, xyz):
+    points = [records[axis] * scale + offset + voxel * 1e-7
+              for axis, scale, offset in zip(("x", "y", "z"), scales, offsets)]
+    shot = np.repeat(np.arange(len(sizes), dtype=np.float64), sizes)
+    rn, nr = records["returns"] & 15, records["returns"] >> 4
+    tracer.addPointData(*points, *_positions(records["time"], time, xyz), shot, rn, nr)
+    tracer.doRaytracing()
+    tracer.clearPulseDataset()
+
+
+def summed_counts(work, windows, blocks):
+    """Sum only one product block in memory, using int64 to detect overflow."""
+    arrays = [(window.bounds, np.load(window_files(work, index)[0], mmap_mode="r", allow_pickle=False))
+              for index, window in enumerate(windows)]
+    for block in blocks:
+        shape = tuple(part.stop - part.start for part in block)
+        counts = np.zeros((3, *shape), np.int64)
+        for bounds, values in arrays:
+            lower = [max(a.start, b.start) for a, b in zip(bounds, block)]
+            upper = [min(a.stop, b.stop) for a, b in zip(bounds, block)]
+            if any(lo >= hi for lo, hi in zip(lower, upper)):
+                continue
+            source = tuple(slice(lo - part.start, hi - part.start) for lo, hi, part in zip(lower, upper, bounds))
+            dest = tuple(slice(lo - part.start, hi - part.start) for lo, hi, part in zip(lower, upper, block))
+            counts[:, *dest] += values[:, *source]
+        if counts.max(initial=0) > TRACE_LIMIT:
+            raise ValueError("Too many pulses traversed a voxel for the 32-bit output count.")
+        yield block[:2], block[2], counts.astype(np.int32)
