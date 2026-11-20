@@ -255,7 +255,10 @@ Sum concurrent reservations and allow memory for the parent and file cache. Plan
 24-byte source recording, buffered echo copies, hash partitions, sampled COPC sort and durable tile
 counts. Merge also needs room for the uncompressed voxel LAS, intermediate raster and final products.
 Adjust the destination when geometry, routed echo duplication or raster band count exceeds the
-replay range. Confirm the effective memory units and storage quota when mapping this table to TPV.
+replay range. The round-3 MLS replay of dataset 1788 had 24.7 million points and a
+2,000 × 2,000 × 1,278 grid at 0.5 m. It finished 123 tiles and reached 76.5 GiB cgroup memory,
+including file cache. Start comparable wide grids in the 96 GiB class. Confirm the effective
+memory units and storage quota when mapping this table to TPV.
 
 ## Archived trajectory-only replay
 
