@@ -1,41 +1,72 @@
-run,input,stage,wall_s,cores,peak_ram_gib,scratch_gib
-1807 ULS 53 M,"LAZ, round 2",read/time-sort,9.0,2.4,1.2,1.1
-1807 ULS 53 M,"LAZ, round 2",platform check,0.2,1.0,0.8,1.1
-1807 ULS 53 M,"LAZ, round 2",path estimation,5.2,1.0,0.8,1.2
-1807 ULS 53 M,"LAZ, round 2",grid extent/crop pass,7.7,1.0,0.5,1.2
-1807 ULS 53 M,"LAZ, round 2",route tile spools,7.5,1.0,0.4,2.2
-1807 ULS 53 M,"LAZ, round 2",traversal,65.6,1.0,1.6,2.2
-1807 ULS 53 M,"LAZ, round 2",COPC write,3.4,1.7,0.6,1.2
-1807 ULS 53 M,"LAZ, round 2",COG write,0.4,1.0,0.3,0.5
-2014 ULS multi,"LAZ, round 2",read/time-sort,10.8,2.6,1.5,0.8
-2014 ULS multi,"LAZ, round 2",platform check,0.2,1.0,0.8,1.0
-2014 ULS multi,"LAZ, round 2",path estimation,5.7,1.0,0.8,1.2
-2014 ULS multi,"LAZ, round 2",grid extent/crop pass,10.0,1.0,0.5,1.2
-2014 ULS multi,"LAZ, round 2",route tile spools,26.7,1.0,0.5,2.5
-2014 ULS multi,"LAZ, round 2",traversal,70.2,4.3,16.6,5.6
-2014 ULS multi,"LAZ, round 2",COPC write,7.6,3.4,0.9,6.2
-2014 ULS multi,"LAZ, round 2",COG write,8.6,1.0,0.5,6.3
-1788 MLS 25 M wide,"standardized LAZ, round 3",read/time-sort,4.4,2.3,1.1,
-1788 MLS 25 M wide,"standardized LAZ, round 3",platform check,0.2,1.0,0.8,
-1788 MLS 25 M wide,"standardized LAZ, round 3",path estimation,87.5,1.0,1.0,
-1788 MLS 25 M wide,"standardized LAZ, round 3",grid extent/crop pass,8.5,1.0,0.5,
-1788 MLS 25 M wide,"standardized LAZ, round 3",route tile spools,11.9,1.0,0.4,
-1788 MLS 25 M wide,"standardized LAZ, round 3",traversal,381.6,9.3,48.4,
-1788 MLS 25 M wide,"standardized LAZ, round 3",COPC write,11.5,6.6,1.6,
-1788 MLS 25 M wide,"standardized LAZ, round 3",COG write,14.5,2.1,1.6,
-1844 ULS 678 M,"LAZ, round 2",read/time-sort,101.4,2.5,1.4,15.0
-1844 ULS 678 M,"LAZ, round 2",platform check,0.2,1.0,1.7,15.0
-1844 ULS 678 M,"LAZ, round 2",path estimation,9.8,1.0,1.8,15.2
-1844 ULS 678 M,"LAZ, round 2",grid extent/crop pass,104.9,1.0,0.9,15.2
-1844 ULS 678 M,"LAZ, round 2",route tile spools,134.1,1.0,0.9,32.5
-1844 ULS 678 M,"LAZ, round 2",traversal,614.3,1.9,8.5,18.9
-1844 ULS 678 M,"LAZ, round 2",COPC write,9.1,4.1,1.6,4.4
-1844 ULS 678 M,"LAZ, round 2",COG write,8.5,1.0,0.9,4.4
-2585 ULS 7.0 B,"LAZ, round 2",read/time-sort,1238.8,2.9,2.1,157.5
-2585 ULS 7.0 B,"LAZ, round 2",platform check,0.4,1.0,1.7,157.5
-2585 ULS 7.0 B,"LAZ, round 2",path estimation,10.9,1.0,1.7,157.5
-2585 ULS 7.0 B,"LAZ, round 2",grid extent/crop pass,1676.9,1.0,2.0,157.5
-2585 ULS 7.0 B,"LAZ, round 2",route tile spools,1124.9,8.4,4.8,355.8
-2585 ULS 7.0 B,"LAZ, round 2",traversal,17568.3,9.4,34.5,567.9
-2585 ULS 7.0 B,"LAZ, round 2",COPC write,38.3,6.9,2.3,39.4
-2585 ULS 7.0 B,"LAZ, round 2",COG write,6203.6,1.0,1.1,39.5
+run,mode,stage,wall_s,cores,peak_ram_gib,sampled_scratch_gib
+1807 ULS,Spatial spool,read/time-sort,9.63,2.28,1.11,
+1807 ULS,Spatial spool,platform check,0.15,1.0,0.99,
+1807 ULS,Spatial spool,path estimation,5.14,1.0,0.99,
+1807 ULS,Spatial spool,grid extent/crop pass,7.82,1.0,0.47,
+1807 ULS,Spatial spool,route tile spools,7.7,1.01,0.42,
+1807 ULS,Spatial spool,traversal,66.77,1.01,1.57,
+1807 ULS,Spatial spool,classify + ground,0.85,1.0,0.49,
+1807 ULS,Spatial spool,COPC write,3.57,1.67,0.64,
+1807 ULS,Spatial spool,COG write,0.39,1.0,0.35,
+1807 ULS,GPS windows,read/time-sort,15.0,1.81,1.11,
+1807 ULS,GPS windows,platform check,0.15,1.0,1.0,
+1807 ULS,GPS windows,path estimation,1.96,3.4,1.12,
+1807 ULS,GPS windows,finalize extent/crop,0.21,1.0,0.59,
+1807 ULS,GPS windows,plan GPS-time windows,0.01,1.0,0.59,
+1807 ULS,GPS windows,traversal,12.68,6.22,1.67,
+1807 ULS,GPS windows,classify + ground,1.0,1.0,0.9,
+1807 ULS,GPS windows,COPC write,3.58,1.64,0.91,
+1807 ULS,GPS windows,COG write,0.41,1.0,0.65,
+2014 ULS,Spatial spool,read/time-sort,11.08,2.51,1.43,
+2014 ULS,Spatial spool,platform check,0.22,1.0,0.89,
+2014 ULS,Spatial spool,path estimation,5.68,1.0,0.83,
+2014 ULS,Spatial spool,grid extent/crop pass,9.38,1.0,0.49,
+2014 ULS,Spatial spool,route tile spools,26.52,1.01,0.45,
+2014 ULS,Spatial spool,traversal,69.68,4.2,16.81,
+2014 ULS,Spatial spool,classify + ground,6.65,1.0,1.26,
+2014 ULS,Spatial spool,COPC write,7.86,3.38,1.13,
+2014 ULS,Spatial spool,COG write,3.7,2.3,1.14,
+2014 ULS,GPS windows,read/time-sort,16.56,1.94,1.58,
+2014 ULS,GPS windows,platform check,0.29,0.98,1.32,
+2014 ULS,GPS windows,path estimation,2.09,3.18,1.3,
+2014 ULS,GPS windows,finalize extent/crop,1.62,0.99,0.91,
+2014 ULS,GPS windows,plan GPS-time windows,0.05,1.0,0.91,
+2014 ULS,GPS windows,traversal,43.7,4.92,4.89,
+2014 ULS,GPS windows,classify + ground,11.77,0.68,3.32,
+2014 ULS,GPS windows,COPC write,14.53,1.73,1.89,
+2014 ULS,GPS windows,COG write,4.72,1.44,1.26,
+1844 ULS,Spatial spool,read/time-sort,101.38,2.55,1.43,
+1844 ULS,Spatial spool,platform check,0.21,1.0,1.66,
+1844 ULS,Spatial spool,path estimation,9.76,1.0,1.76,
+1844 ULS,Spatial spool,grid extent/crop pass,104.94,1.0,0.9,
+1844 ULS,Spatial spool,route tile spools,134.11,1.0,0.93,
+1844 ULS,Spatial spool,traversal,614.34,1.86,8.48,
+1844 ULS,Spatial spool,classify + ground,6.03,1.0,1.87,
+1844 ULS,Spatial spool,COPC write,9.12,4.06,1.6,
+1844 ULS,Spatial spool,COG write,8.46,1.0,0.88,
+1788 MLS,Spatial spool,read/time-sort,4.4,2.3,1.12,
+1788 MLS,Spatial spool,platform check,0.18,1.0,0.79,
+1788 MLS,Spatial spool,path estimation,87.54,1.0,0.97,
+1788 MLS,Spatial spool,grid extent/crop pass,8.46,1.0,0.48,
+1788 MLS,Spatial spool,route tile spools,11.9,1.01,0.36,
+1788 MLS,Spatial spool,traversal,381.64,9.26,48.42,
+1788 MLS,Spatial spool,classify + ground,38.04,1.0,1.76,
+1788 MLS,Spatial spool,COPC write,11.53,6.64,1.57,
+1788 MLS,Spatial spool,COG write,14.45,2.09,1.57,
+1788 MLS,GPS windows,read/time-sort,6.33,1.86,1.25,
+1788 MLS,GPS windows,platform check,0.22,1.0,0.97,
+1788 MLS,GPS windows,path estimation,91.59,1.93,1.31,
+1788 MLS,GPS windows,finalize extent/crop,6.81,0.7,0.81,
+1788 MLS,GPS windows,plan GPS-time windows,0.18,0.5,0.72,
+1788 MLS,GPS windows,traversal,67.93,5.16,3.96,
+1788 MLS,GPS windows,classify + ground,38.66,0.99,8.69,
+1788 MLS,GPS windows,COPC write,13.37,5.69,1.52,
+1788 MLS,GPS windows,COG write,14.41,2.24,1.77,
+2585 ULS,Historical spool,read/time-sort,1238.8,2.9,2.1,157.5
+2585 ULS,Historical spool,platform check,0.4,1.0,1.7,157.5
+2585 ULS,Historical spool,path estimation,10.9,1.0,1.7,157.5
+2585 ULS,Historical spool,grid extent/crop pass,1676.9,1.0,2.0,157.5
+2585 ULS,Historical spool,route tile spools,1124.9,8.4,4.8,355.8
+2585 ULS,Historical spool,traversal,17568.3,9.4,34.5,567.9
+2585 ULS,Historical spool,COPC write,38.3,6.9,2.3,39.4
+2585 ULS,Historical spool,COG write,6203.6,1.0,1.1,39.5
