@@ -206,6 +206,7 @@ process measurement. Cgroup peaks include the resident caches for the compact so
 | 2014 multi LAZ | 152.1 | 2.97× | 8 / 8 | 3.96 | 21.75 | 6.48 |
 | 2014 single LAZ | 153.3 | 1.91× | 4 / 4 | 7.83 | 24.01 | 7.53 |
 | 2585 LAZ | 27953.0 | — | 88 / 10 | 7.33 | 190.00 | 567.87 |
+| 2585 COPC | 20169.5 | — | 54 / 9 | 9.89 | 190.00 | 460.79 |
 
 Both 1807 replays and the 1844 LAZ replay reproduce the earlier products exactly. The new 1844 COPC
 reproduces the earlier LAZ voxel classes, per-voxel counts and COG values. Its trajectory CSV is
@@ -214,10 +215,14 @@ buffer. Including complete pulses changes 19 values relative to that COG and 16 
 emitted voxel centres.
 
 The 2585 LAZ replay decoded 7.04 billion points and rejoined 3.31 billion separated echoes. Its
-compressed tile spools occupied 382 GB for 916 GB of routed records. The earlier replay refused
-occlusion, so it supplies no end-to-end speedup denominator. The measured run spent 6,204 s in the
+compressed tile spools occupied 382 GB for 916 GB of routed records. The measured run spent 6,204 s in the
 earlier 64-band COG conversion. In a separate Docker probe, the new band-interleaved intermediate
 converted to a COG in 51 s and matched every base raster value.
+
+The 2585 COPC replay also completed, with 307.7 GB of compressed tile spools and a 51 s COG
+conversion. It started during the LAZ COG conversion and kept the nine traversal slots set at
+occlusion startup. Both 2585 trajectory CSVs match their archived outputs byte for byte.
+The speedup column uses completed historical replays.
 
 ## Galaxy resource proposal
 
