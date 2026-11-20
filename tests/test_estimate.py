@@ -59,7 +59,7 @@ def test_single_return_without_scan_angle_is_refused(tmp_path, capsys):
     las = laspy.read(tmp_path / "f.laz")
     las.scan_angle = np.zeros(len(las.points), np.int16)
     las.write(tmp_path / "g.laz")
-    assert main([str(tmp_path / "g.laz"), "-o", str(tmp_path / "p.csv"), "--no-platform-check"]) == 2
+    assert main([str(tmp_path / "g.laz"), "-o", str(tmp_path / "p.csv"), "--no-platform-check"]) == 4
     assert "trajectory file" in capsys.readouterr().err
 
 

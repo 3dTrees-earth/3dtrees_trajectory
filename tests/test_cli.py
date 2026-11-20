@@ -45,7 +45,7 @@ def test_las_point_formats(tmp_path, point_format, version):
     output = tmp_path / "output.csv"
     assert path.stat().st_size < 1_000_000
     if point_format in (0, 2):
-        assert main([str(path), "-o", str(output)]) == 2
+        assert main([str(path), "-o", str(output)]) == 3
         _assert_refusal(output, "needs GPS time")
         return
     assert main([str(path), "-o", str(output)]) == 0
@@ -137,7 +137,8 @@ def test_bad_input_has_refusal_and_clears_stale_outputs(tmp_path, scenario, reas
     output = tmp_path / "output.csv"
     output.write_text("stale")
     output.with_suffix(".geojson").write_text("stale")
-    assert main([*paths, "-o", str(output)]) == 2
+    expected = {"constant_time": 3, "nonfinite_time": 3, "no_fit": 4}.get(scenario, 2)
+    assert main([*paths, "-o", str(output)]) == expected
     _assert_refusal(output, reason)
 
 

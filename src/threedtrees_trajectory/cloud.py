@@ -72,8 +72,8 @@ def point_chunks(path: Path, size: int, bounds: Bounds | None = None, *, spatial
                 yield chunk
 
 
-def pulse_chunks(chunks, size: int):
-    """Keep every contiguous timestamp group in one batch, including on a chunk boundary."""
+def pulse_chunks(chunks, size: int, *, time_tolerance: float = 0):
+    """Keep adjacent returns together across reader batches, within the stream budget."""
     tail = None
     for chunk in chunks:
         if tail is not None:
@@ -81,16 +81,23 @@ def pulse_chunks(chunks, size: int):
             chunk = laspy.ScaleAwarePointRecord(points, chunk.point_format, chunk.scales, chunk.offsets)
         times = chunk.gps_time
         end = len(times) - 1
-        while end > 0 and times[end - 1] == times[-1]:
+        lower = max(0, end - 64)
+        while end > lower and abs(times[end] - times[end - 1]) <= time_tolerance:
             end -= 1
+        if end == lower and lower:
+            breaks = np.flatnonzero(np.abs(np.diff(times[:lower + 1])) > time_tolerance)
+            end = int(breaks[-1]) + 1 if len(breaks) else 0
         if end:
             yield chunk[:end]
         elif len(chunk) >= size * 2:
-            raise ValueError("Too many records share one GPS timestamp to reconstruct pulses within the stream budget.")
-        tail = chunk[end:].copy()
-    if tail is not None:
-        if len(tail):
-            yield laspy.ScaleAwarePointRecord(tail.array, tail.point_format, chunk.scales, chunk.offsets)
+            # An enormous same-time group cannot be joined as a pulse. Keep
+            # the reader bounded so it can still diagnose an unusable clock.
+            yield chunk
+            tail = None
+            continue
+        tail = laspy.ScaleAwarePointRecord(chunk.array[end:].copy(), chunk.point_format, chunk.scales, chunk.offsets)
+    if tail is not None and len(tail):
+        yield tail
 
 
 def _ordered(records) -> np.ndarray:

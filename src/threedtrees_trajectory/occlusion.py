@@ -398,19 +398,20 @@ def _read_storage_headers(paths):
 
 
 def _route_strip(arguments):
-    spool, grid, layout, time, points, file, path, transform, time_bounds = arguments
+    spool, grid, layout, time, points, file, path, transform, time_bounds, as_single = arguments
     routing = TileSpools(spool, grid, layout, time, points, compress=True)
-    recovered, unpaired = routing.stage_file(file, path, *transform, False, time_bounds)
+    recovered, unpaired = routing.stage_file(file, path, *transform, False, time_bounds, as_single=as_single)
     return recovered, unpaired, routing.bytes_written, routing.echoes
 
 
-def _route_file_spools(spool, grid, layout, time, points, paths, transforms, time_bounds, spatial, slots, stage):
+def _route_file_spools(spool, grid, layout, time, points, paths, transforms, time_bounds, spatial, slots, stage,
+                       single_files=()):
     compressed = points > NATIVE_ECHO_LIMIT
     route_slots = min(slots, max(1, available_memory() // (2 * GIB))) if compressed else 1
     workers = min(route_slots, len(paths)) if not spatial else 1
     recovered = unpaired = written = 0
     if workers > 1:
-        calls = [(spool, grid, layout, time, points, index, path, transform, time_bounds)
+        calls = [(spool, grid, layout, time, points, index, path, transform, time_bounds, index in single_files)
                  for index, (path, transform) in enumerate(zip(paths, transforms))]
         tile_echoes = np.zeros(len(layout), np.int64)
         with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
@@ -423,7 +424,7 @@ def _route_file_spools(spool, grid, layout, time, points, paths, transforms, tim
         routing = TileSpools(spool, grid, layout, time, points, compress=compressed)
         for index, (path, transform) in enumerate(zip(paths, transforms)):
             joined, missing = routing.stage_file(index, path, *transform, spatial, time_bounds,
-                                                 hash_slots=route_slots if spatial else 1)
+                                                 hash_slots=route_slots if spatial else 1, as_single=index in single_files)
             recovered += joined
             unpaired += missing
         written, tile_echoes = routing.bytes_written, routing.echoes
@@ -434,7 +435,7 @@ def _route_file_spools(spool, grid, layout, time, points, paths, transforms, tim
     return recovered, unpaired, tile_echoes
 
 
-def _prepare_job(work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source, slots):
+def _prepare_job(work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source, slots, single_files):
     manifest = work / "prepared.json"
     spool = work / "spools"
     surfaces = work / "surfaces.npz"
@@ -476,7 +477,7 @@ def _prepare_job(work, paths, time, xyz, voxel, dtm, budget, resources, fragment
             time_bounds = (time[0] - TIME_MARGIN, time[-1] + TIME_MARGIN) if source is not None else None
             try:
                 recovered, unpaired, tile_echoes = _route_file_spools(
-                    spool, grid, layout, time, full_grid.points, raw_paths, transforms, time_bounds, spatial, slots, stage)
+                    spool, grid, layout, time, full_grid.points, raw_paths, transforms, time_bounds, spatial, slots, stage, single_files)
             except BrokenProcessPool as error:
                 raise ValueError("An occlusion spool worker stopped during source routing.") from error
             counters.update(recovered_echoes=recovered, unpaired_echoes=unpaired)
@@ -722,7 +723,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         dtm: Path | None = None, scratch: Path | None = None, source: str = "estimated", *,
         quality: str | None = None, delivered_check: dict | None = None,
         budget: int = DEFAULT_BUDGET, resources: RunResources | None = None, fragment_echoes: int | None = None,
-        threads: int | None = None, source_spool=None) -> dict:
+        threads: int | None = None, source_spool=None, single_files=()) -> dict:
     """Prepare whole-pulse spools, trace resumable tiles, then merge both products."""
     validate_trajectory(time, xyz)
     scratch = scratch or copc.parent
@@ -732,7 +733,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
     slots = decoding_threads(threads)
     identity = identify([*paths, *([dtm] if dtm is not None else [])],
                         [str(copc.resolve()), str(cog.resolve()), voxel, budget, source, quality, fragment_echoes,
-                         dtm is not None], time, xyz)
+                         dtm is not None, list(single_files)], time, xyz)
     work = scratch / f".occlusion-{identity}"
     with lock_job(work):
         for prefix in ("worker-*", "merge-*"):
@@ -740,7 +741,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
                 if orphan.is_dir():
                     shutil.rmtree(orphan)
         data, grid, layout, spool, top, ground = _prepare_job(
-            work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source_spool, slots)
+            work, paths, time, xyz, voxel, dtm, budget, resources, fragment_echoes, source_spool, slots, single_files)
         ground_source = "dtm" if dtm is not None else "lowest_hit"
         tags = dict(OCCLUSION_GROUND=ground_source, OCCLUSION_TRAJECTORY=source)
         if quality is not None:
@@ -774,6 +775,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
     return {
         "method": "OccPy voxel traversal (occpy_ls 0.3.0 raytr core)",
         "trajectory": source,
+        "single_return_fallback_files": [str(paths[index]) for index in single_files],
         **({"quality": quality} if quality else {}),
         **({"delivered_path_check": delivered_check} if delivered_check is not None else {}),
         "voxel_m": voxel,

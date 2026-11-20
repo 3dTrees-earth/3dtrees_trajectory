@@ -46,6 +46,11 @@ class EchoSource:
     def path(self, index):
         return self.directory / f"source-{index:05d}.bin"
 
+    def reset(self, index):
+        path = self.path(index)
+        self.bytes_written -= path.stat().st_size
+        path.unlink()
+
     def observe(self, index, points):
         records = pack_echoes(points)
         _append(self.path(index), records)
@@ -204,18 +209,22 @@ class TileSpools:
                 keep = np.repeat(np.logical_or.reduceat(keep, starts), sizes)
             self._write(file, tile, records[keep])
 
-    def stage_file(self, file, path, scales, offsets, copc, time_bounds=None, hash_slots=1):
+    def stage_file(self, file, path, scales, offsets, copc, time_bounds=None, hash_slots=1, as_single=False):
         recovered = unpaired = 0
         if not path.is_file():
             return recovered, unpaired
         with TemporaryDirectory(dir=self.folder, prefix="echo-hash-") as folder:
             folder = Path(folder)
-            for records in raw_batches(path, contiguous=not copc):
+            for records in raw_batches(path, contiguous=not (copc or as_single)):
                 if time_bounds is not None:
                     low, high = time_bounds
                     keep = (records["time"] >= low) & (records["time"] <= high)
                     if not keep.all():
                         records = records[keep]
+                if as_single:
+                    records["returns"] = 17  # return number 1 of 1
+                    self.route(file, records, scales, offsets)
+                    continue
                 one = singles(records)
                 self.route(file, records[one], scales, offsets)
                 multi = records[~one]

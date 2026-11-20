@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import solve
+from .coverage import NoTrajectory, UnusableTime
 from .pulses import Pulses
 
 MULTI_SHARE_MIN = 0.005  # below this share of multi-return pulses the line method has too little to work with
@@ -68,22 +69,22 @@ def detect_platform(p: Pulses) -> tuple[str, str]:
     return platform, f"ground density around its peak is {concentration:.1f} times an even spread"
 
 
-def estimate(p: Pulses, check_platform: bool = True, interval: float = 0.5) -> Result:
+def estimate(p: Pulses, check_platform: bool = True, interval: float = 0.5, *, use_lines: bool = True) -> Result:
     """Path positions in the cloud's coordinates (the solvers work relative to ``p.origin``)."""
-    result = _estimate(p, check_platform, interval)
+    result = _estimate(p, check_platform, interval, use_lines)
     if not result.fits:
-        raise ValueError("No reliable position could be fitted. Please provide the trajectory file.")
+        raise NoTrajectory("No reliable position could be fitted. Please provide the trajectory file.")
     result.fits = [solve.Fit(f.time, f.xyz + p.origin, f.pulses, f.miss) for f in result.fits]
     if not all(np.isfinite(f.time) and np.isfinite(f.xyz).all() for f in result.fits):
         raise ValueError("The estimated path contains non-finite coordinates or times.")
     return result
 
 
-def _estimate(p: Pulses, check_platform: bool, interval: float) -> Result:
+def _estimate(p: Pulses, check_platform: bool, interval: float, use_lines: bool) -> Result:
     if len(p) == 0:
         raise ValueError("The cloud has no points.")
     if not p.has_time:
-        raise ValueError("A moving sensor's path needs GPS time per point; this cloud has none.")
+        raise UnusableTime("A moving sensor's path needs GPS time per point; this cloud has none.")
     if not np.isfinite(interval) or interval <= 0:
         raise ValueError("The position interval must be a positive finite number of seconds.")
     if max(abs(p.time.min()), abs(p.time.max())) / np.iinfo(np.int64).max >= interval:
@@ -95,7 +96,7 @@ def _estimate(p: Pulses, check_platform: bool, interval: float) -> Result:
         platform, evidence = detect_platform(p)
         if platform == "static":
             raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
-    lines = solve.path_from_lines(p, interval=interval) if multi_share >= MULTI_SHARE_MIN else []
+    lines = solve.path_from_lines(p, interval=interval) if use_lines and multi_share >= MULTI_SHARE_MIN else []
     if len(lines) >= MIN_LINE_POSITIONS:  # a gappy path from lines beats a full one from scan angles (metres off)
         kept = solve.drop_outliers(lines)
         if len(kept) < len(lines):
@@ -107,7 +108,7 @@ def _estimate(p: Pulses, check_platform: bool, interval: float) -> Result:
                         "RIEGL and DJI flights, much worse where the scan angle isn't measured off nadir (YellowScan 8 m).")
         return Result("scan_angle", solve.path_from_scan_angle(p, interval=interval), warnings, evidence)
     if multi_share >= MULTI_SHARE_MIN:
-        raise ValueError("Too few reliable positions from multi-return pulses and no usable scan angle. "
+        raise NoTrajectory("Too few reliable positions from multi-return pulses and no usable scan angle. "
                          "Please provide the trajectory file.")
-    raise ValueError("Single returns without scan angle: the path can't be estimated from this cloud. "
+    raise NoTrajectory("Single returns without scan angle: the path can't be estimated from this cloud. "
                      "Please provide the trajectory file.")

@@ -225,7 +225,7 @@ def test_single_returns_without_an_angle_need_a_delivered_path(tmp_path):
     report = tmp_path / "report.json"
     products = ["--occlusion-copc", str(tmp_path / "o.copc.laz"), "--occlusion-cog", str(tmp_path / "o.tif")]
     args = [str(cloud), "--report", str(report), *products]
-    assert main([*args, "-o", str(path)]) == 2
+    assert main([*args, "-o", str(path)]) == 4
     assert "Single returns without scan angle" in json.loads(report.read_text())["error"]
 
     delivered = tmp_path / "delivered.csv"

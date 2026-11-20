@@ -135,7 +135,10 @@ def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200
     """Moving sensor, single returns: per window, the position from which each point is seen at its scan angle."""
     # Preserve the mean reduction order, but expand coordinates and angles only for the current window.
     centre = p.first.astype(np.float64).mean(axis=0)
-    order = np.argsort(p.time, kind="stable")
+    usable = np.flatnonzero(np.isfinite(p.scan_angle) & (np.abs(p.scan_angle) < 90))
+    if len(usable) < min_pulses:
+        return []
+    order = usable[np.argsort(p.time[usable], kind="stable")]
     time = p.time[order]
     window = np.floor(time / interval).astype(np.int64)
     starts = np.flatnonzero(np.r_[True, window[1:] != window[:-1]])

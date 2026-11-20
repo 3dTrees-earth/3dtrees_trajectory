@@ -96,7 +96,7 @@ def refusal(info: CloudInfo, pulses: Pulses | None, reason: str) -> dict:
         "crs": info.crs,
         "time_system": info.time_system,
         "multi_return_share": round(pulses.multi_share, 4) if pulses is not None else None,
-        "has_gps_time": pulses.has_time if pulses is not None else None,
+        "has_gps_time": pulses.has_time if pulses is not None else info.has_gps_time,
         "has_scan_angle": pulses.has_scan_angle if pulses is not None else None,
         "positions": 0,
         "pairing": {
@@ -104,6 +104,7 @@ def refusal(info: CloudInfo, pulses: Pulses | None, reason: str) -> dict:
             "incomplete_multi_pulses": info.incomplete_multi_pulses,
             "out_of_order_records_sampled": info.joined_out_of_order_points,
             "unpaired_multi_echoes": info.unpaired_multi_echoes,
+            "return_modes": info.return_modes,
         },
         "quality": "none",
         "error": reason,
