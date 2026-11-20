@@ -10,14 +10,15 @@ from tempfile import NamedTemporaryFile
 import numpy as np
 
 from . import __version__
-from .estimate import Result
+from .estimate import UNRELIABLE_LINE_MISS, Result
 from .pulses import CloudInfo, Pulses
 
 FORMAT = "3dtrees-trajectory/2"
 COLUMNS = "time,x,y,z,roll,pitch,yaw,name"
 
 
-TYPICAL_ERROR_M = {"lines": "0.01", "scan_angle": "1 horizontal, 0.1 vertical"}
+TYPICAL_ERROR_M = {"lines": "0.01", "scan_angle": "1 horizontal, 0.1 vertical",
+                   "lines_scan_angle": "0.01 for lines and 1 horizontal, 0.1 vertical for scan angles"}
 
 
 def _header(info: CloudInfo, result: Result, quality_label: str) -> list[str]:
@@ -56,7 +57,7 @@ def quality(result: Result, miss: np.ndarray) -> str:
     if result.method != "lines":
         return "rough"
     median = float(np.nanmedian(miss))
-    return "good" if median <= 0.1 else "unreliable" if median > 0.5 else "rough"
+    return "good" if median <= 0.1 else "unreliable" if median > UNRELIABLE_LINE_MISS else "rough"
 
 
 def report(info: CloudInfo, result: Result, multi_share: float) -> dict:

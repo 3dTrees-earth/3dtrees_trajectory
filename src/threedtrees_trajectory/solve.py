@@ -131,11 +131,18 @@ def station_from_lines(p: Pulses, min_pulses: int = 2000, min_length: float = 0.
     return fit_lines(origin, line / length[:, None], p.time[index], False, min_pulses)
 
 
-def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200) -> list[Fit]:
+def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200, *,
+                         group: np.ndarray | None = None) -> list[Fit]:
     """Moving sensor, single returns: per window, the position from which each point is seen at its scan angle."""
     # Preserve the mean reduction order, but expand coordinates and angles only for the current window.
-    centre = p.first.astype(np.float64).mean(axis=0)
-    usable = np.flatnonzero(np.isfinite(p.scan_angle) & (np.abs(p.scan_angle) < 90))
+    points = p.first if group is None else p.first[group]
+    angles = p.scan_angle if group is None else p.scan_angle[group]
+    if not len(points):
+        return []
+    centre = points.astype(np.float64).mean(axis=0)
+    usable = np.flatnonzero(np.isfinite(angles) & (np.abs(angles) < 90))
+    if group is not None:
+        usable = group[usable]
     if len(usable) < min_pulses:
         return []
     order = usable[np.argsort(p.time[usable], kind="stable")]

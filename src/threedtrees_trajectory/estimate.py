@@ -1,5 +1,4 @@
-"""Check that a cloud comes from a moving sensor and run the path solvers. Static (TLS) clouds are refused in 1.0.0:
-the output format can hold scan positions, but this version estimates paths only."""
+"""Check that a cloud comes from a moving sensor and run the path solvers."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -13,15 +12,16 @@ from .pulses import Pulses
 MULTI_SHARE_MIN = 0.005  # below this share of multi-return pulses the line method has too little to work with
 STATIC_MISS_MAX = 0.05  # one position explaining all lines within 5 cm = a static scan
 SCAN_GAP = 30.0  # seconds; a jump in file-order time this large separates scans of a merged TLS cloud
+UNRELIABLE_LINE_MISS = 0.5
 MIN_LINE_POSITIONS = 10  # fewer positions from pulse lines than this: fall back to scan angles
 CONCENTRATION_MIN = 15.0  # ground density piling up this much around one spot = a static scanner
 STATIC_REFUSAL = ("This looks like a static (TLS) scan ({evidence}). This tool estimates paths of moving "
-                  "sensors (ULS, MLS, ALS) only.")
+                  "sensors (ULS and MLS).")
 
 
 @dataclass
 class Result:
-    method: str  # lines | scan_angle
+    method: str  # lines | scan_angle | lines_scan_angle
     fits: list[solve.Fit]
     warnings: list[str] = field(default_factory=list)
     evidence: str = "given"  # why the cloud counts as a moving sensor
@@ -69,14 +69,42 @@ def detect_platform(p: Pulses) -> tuple[str, str]:
     return platform, f"ground density around its peak is {concentration:.1f} times an even spread"
 
 
-def estimate(p: Pulses, check_platform: bool = True, interval: float = 0.5, *, use_lines: bool = True) -> Result:
+def estimate(p: Pulses, check_platform: bool = True, interval: float = 0.5, *, use_lines: bool = True,
+             angle_files=()) -> Result:
     """Path positions in the cloud's coordinates (the solvers work relative to ``p.origin``)."""
     result = _estimate(p, check_platform, interval, use_lines)
+    if (result.method == "lines" and angle_files
+            and np.median([fit.miss for fit in result.fits]) <= UNRELIABLE_LINE_MISS):
+        result = _fill_angle_windows(p, result, interval, angle_files)
     if not result.fits:
         raise NoTrajectory("No reliable position could be fitted. Please provide the trajectory file.")
     result.fits = [solve.Fit(f.time, f.xyz + p.origin, f.pulses, f.miss) for f in result.fits]
     if not all(np.isfinite(f.time) and np.isfinite(f.xyz).all() for f in result.fits):
         raise ValueError("The estimated path contains non-finite coordinates or times.")
+    return result
+
+
+def _fill_angle_windows(p, result, interval, angle_files):
+    """Use paired pulse lines where available and fit missing windows from the affected file."""
+    by_window = {int(np.floor(fit.time / interval)): fit for fit in result.fits}
+    line_windows = set(by_window)
+    for file in angle_files:
+        group = np.flatnonzero(p.file == file)
+        if not len(group):
+            continue
+        windows = np.unique(np.floor(p.time[group] / interval).astype(np.int64))
+        if all(window in by_window for window in windows):
+            continue
+        for fit in solve.path_from_scan_angle(p, interval=interval, group=group):
+            by_window.setdefault(int(np.floor(fit.time / interval)), fit)
+        if not any(window in by_window for window in windows):
+            raise NoTrajectory("No reliable scan-angle position could be fitted for a file with unpaired returns. "
+                               "Please provide the delivered trajectory file.")
+    extra = len(by_window) - len(line_windows)
+    if extra:
+        result.method = "lines_scan_angle"
+        result.fits = [by_window[window] for window in sorted(by_window)]
+        result.warnings.append(f"Scan angles supplied {extra} positions in windows without a pulse-line fit.")
     return result
 
 

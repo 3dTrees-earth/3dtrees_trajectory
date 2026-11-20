@@ -84,3 +84,29 @@ def test_constant_clock_refuses_a_moving_delivered_path(tmp_path, monkeypatch):
     assert main([str(cloud), "--report", str(report), "--trajectory", str(delivered),
                  "--occlusion-cog", str(tmp_path / "o.tif"), "--occlusion-copc", str(tmp_path / "o.copc.laz")]) == 3
     assert "cannot be matched to a constant point clock" in json.loads(report.read_text())["error"]
+
+
+def test_single_return_file_fills_missing_time_windows(tmp_path):
+    good, bad = tmp_path / "good.laz", tmp_path / "bad.laz"
+    flight(good, seconds=6, rate=500)
+    flight(bad, seconds=6, rate=500)
+    cloud = laspy.read(bad)
+    cloud.gps_time[:] += 6
+    cloud.number_of_returns[:] = 15
+    cloud.write(bad)
+    out = tmp_path / "trajectory.csv"
+    assert main([str(good), str(bad), "-o", str(out)]) == 0
+    report = json.loads(out.with_suffix(".report.json").read_text())
+    assert report["method"] == "lines_scan_angle" and report["quality"] == "rough"
+    assert report["time_span"][0] < 300001 < 300011 < report["time_span"][1]
+
+
+def test_small_all_unpaired_file_still_takes_single_return_fallback(tmp_path):
+    cloud = tmp_path / "few.las"
+    flight(cloud, seconds=1, rate=30)
+    data = laspy.read(cloud)
+    data.number_of_returns[:] = 10
+    data.write(cloud)
+    sample, info = pulses.read_pulses([cloud])
+    assert info.single_return_files == [0]
+    assert len(sample) == len(data.points)

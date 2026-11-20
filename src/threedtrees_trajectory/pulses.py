@@ -344,7 +344,11 @@ class _FilePulses:
             self.counts[0] += count * stride
             recovered = min(info.fragment_echoes, echoes * stride)
         info.unpaired_multi_echoes = info.fragment_echoes - recovered
-        return not self.stray_limit_exceeded and info.unpaired_multi_echoes <= max(200, info.complete_multi_echoes + recovered)
+        if self.stray_limit_exceeded:
+            return False
+        if not info.unpaired_multi_echoes:
+            return True
+        return self.counts[0] > 0 and info.unpaired_multi_echoes <= max(200, info.complete_multi_echoes + recovered)
 
     def has_angles(self):
         return any(np.any(np.isfinite(part) & (np.abs(part) > 0) & (np.abs(part) < 90))
@@ -510,7 +514,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                 if local.counts[0] == 0 and mode == "paired":
                     mode = "single"
                 angles = local.has_angles()
-                info.return_modes.append({"file": str(path), "mode": mode, "has_scan_angle": angles,
+                info.return_modes.append({"file": str(path), "index": index, "mode": mode, "has_scan_angle": angles,
                                           "unpaired_multi_echoes": local.info.unpaired_multi_echoes})
                 for key in ("incomplete_multi_pulses", "multi_pulses", "joined_out_of_order_points",
                             "fragment_echoes", "complete_multi_echoes", "unpaired_multi_echoes"):
