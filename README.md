@@ -226,21 +226,29 @@ The speedup column uses completed historical replays.
 
 ## Galaxy resource proposal
 
-Budget each running tile at `2 GiB + 72 × buffered tile voxels + 320 × buffered XY columns`.
-Add the reservations for all concurrently running tiles, the parent's resident memory and headroom
-for the runtime and file cache. Plan the path solver separately since its main allocations precede
-traversal. The scheduler uses the smallest applicable cgroup memory limit and the available host memory.
+Use ten CPU slots and choose an initial class from the total point count across all inputs.
+The proposed classes are for trajectory and occlusion together. Use standardization point counts
+when present, and check the buffered grid dimensions before assigning a destination.
 
-For small or single-tile jobs, start with four slots for decoding and indexing. For tiles large enough
-to dominate wall time, start with eight slots and allow ten for very large acquisitions when memory can
-support that many active grids. Estimate traversal wall time from the slowest group of tiles running
-concurrently, using buffered echo counts and measured per-tile CPU. Size decoding, routing and product
-merge separately using source point count, routed echo count and exported voxel count.
+| Input points | RAM (GiB) | Scratch (GiB) | Wall limit |
+| ---: | ---: | ---: | ---: |
+| Up to 75 million | 24 | 16 | 1 h |
+| 75–750 million | 64 | 96 | 2 h |
+| 750 million–2.1 billion | 96 | 256 | 5 h |
+| 2.1–7.1 billion | 140 | 750 | 10 h |
 
-Allow scratch for the 24-byte source recording, the echoes copied to tile spools, temporary
-partition data, and any sampled COPC sort still active. During merge, allow for the durable count
-arrays, uncompressed voxel LAS, the intermediate TIFF, and the outputs. Measure both peak cgroup
-memory and peak scratch in a dedicated job before choosing Galaxy resource classes.
+The 52.7 M and 678.1 M replays used up to 3.23 and 39.12 GiB of cgroup memory respectively. The
+7.04 B replays peaked at 568 GiB scratch and 39 GiB sampled aggregate traversal RSS. Their cgroup
+peaks reached the 190 GiB cap, including reclaimable file cache. Verify the 140 GiB class with a
+full run before enabling it in Galaxy. The 750 M–2.1 B class is an interpolation. Route larger
+or unusually wide acquisitions to a separate measurement job.
+
+Budget each active tile at `2 GiB + 72 × buffered tile voxels + 320 × buffered XY columns`.
+Sum concurrent reservations and allow memory for the parent and file cache. Plan scratch for the
+24-byte source recording, buffered echo copies, hash partitions, sampled COPC sort and durable tile
+counts. Merge also needs room for the uncompressed voxel LAS, intermediate raster and final products.
+Adjust the destination when geometry, routed echo duplication or raster band count exceeds the
+replay range. Confirm the effective memory units and storage quota when mapping this table to TPV.
 
 ## Archived trajectory-only replay
 
