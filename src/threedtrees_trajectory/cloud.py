@@ -36,6 +36,8 @@ def _node_batches(nodes, size, path):
     """Bound the native decoder's point, byte and node window."""
     batch, points, size_bytes = [], 0, 0
     for node in sorted(nodes, key=lambda node: node.offset):
+        if node.point_count == node.byte_size == 0:
+            continue
         if not 0 < node.point_count <= CHUNK or not 0 < node.byte_size <= COPC_BATCH_BYTES:
             raise ValueError(f"{path.name}: COPC node exceeds the supported decode budget.")
         if batch and (points + node.point_count > size or size_bytes + node.byte_size > COPC_BATCH_BYTES

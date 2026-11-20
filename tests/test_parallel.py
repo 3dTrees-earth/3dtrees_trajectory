@@ -229,7 +229,7 @@ def test_copc_node_window_keeps_file_order_and_respects_all_budgets(monkeypatch,
     monkeypatch.setattr(cloud_io, "COPC_BATCH_NODES", 2)
     nodes = [
         SimpleNamespace(offset=offset, point_count=points, byte_size=length)
-        for offset, points, length in [(40, 7, 10), (10, 2, 8), (70, 1, 6), (30, 7, 11), (20, 2, 8), (60, 1, 15)]
+        for offset, points, length in [(40, 7, 10), (10, 2, 8), (70, 1, 6), (0, 0, 0), (30, 7, 11), (20, 2, 8), (60, 1, 15)]
     ]
     batches = cloud_io._node_batches(nodes, 10, tmp_path / "flight.copc.laz")
     assert [[node.offset for node in batch] for batch in batches] == [[10, 20], [30], [40], [60], [70]]
