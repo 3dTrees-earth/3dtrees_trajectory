@@ -220,3 +220,16 @@ def test_tile_spool_counts_match_acquisition_order_traversal(tmp_path):
     counts, _ = tile_jobs.tile_files(tmp_path, 0)
     for old, new in zip(expected, np.load(counts, mmap_mode="r", allow_pickle=False)):
         np.testing.assert_array_equal(old, new)
+
+
+def test_copc_node_window_keeps_file_order_and_respects_all_budgets(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(cloud_io, "COPC_BATCH_BYTES", 20)
+    monkeypatch.setattr(cloud_io, "COPC_BATCH_NODES", 2)
+    nodes = [
+        SimpleNamespace(offset=offset, point_count=points, byte_size=length)
+        for offset, points, length in [(40, 7, 10), (10, 2, 8), (70, 1, 6), (30, 7, 11), (20, 2, 8), (60, 1, 15)]
+    ]
+    batches = cloud_io._node_batches(nodes, 10, tmp_path / "flight.copc.laz")
+    assert [[node.offset for node in batch] for batch in batches] == [[10, 20], [30], [40], [60], [70]]

@@ -24,7 +24,10 @@ from lazrs import LazrsError
 from pyproj import CRS
 from pyproj.exceptions import CRSError
 
-from .cloud import CHUNK, FORMAT, TimeSortedCopc, _base_records, _ordered, is_copc, open_cloud, point_chunks, pulse_chunks
+from .cloud import (
+    CHUNK, COPC_BATCH_BYTES, COPC_BATCH_NODES, FORMAT, TimeSortedCopc,
+    _base_records, _ordered, is_copc, open_cloud, point_chunks, pulse_chunks,
+)
 
 from .coverage import UnusableTime
 
@@ -362,7 +365,7 @@ def _fallback_chunks(path, mode, copc):
 def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int = MAX_SINGLE,
                 full: bool = False, *, info: CloudInfo | None = None, prepared=None,
                 scratch: Path | None = None, resources=None, observe=None, reset_observation=None,
-                _selection=None) -> tuple[Pulses, CloudInfo]:
+                copc_threads: int | None = None, _selection=None) -> tuple[Pulses, CloudInfo]:
     """Build pulse endpoints from strips or from a COPC whose sampled echoes are ordered by time."""
     info = CloudInfo.from_paths(paths) if info is None else info
     if len(paths) > np.iinfo(np.uint16).max + 1:
@@ -397,7 +400,12 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
         directory.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(dir=directory, prefix=".copc-sort-") as folder:
             with (resources.stage("COPC sample read/sort") if resources else nullcontext({})) as stage:
-                sorted_input = TimeSortedCopc(path, Path(folder), CHUNK, select=selection, observe=observe)
+                sorted_input = TimeSortedCopc(path, Path(folder), CHUNK, select=selection, observe=observe,
+                                                      spatial=copc_threads is not None)
+                if copc_threads is not None:
+                    stage.update(decoder="lazrs COPC hierarchy nodes", decoder_threads=copc_threads,
+                                 decode_batch_max_points=CHUNK, decode_batch_max_compressed_bytes=COPC_BATCH_BYTES,
+                                 decode_batch_max_nodes=COPC_BATCH_NODES)
                 if sorted_input.points_read != declared_points:
                     raise ValueError("The COPC scan did not decode the point count declared by the header.")
                 stage.update(bytes_read=path.stat().st_size, bytes_written=sorted_input.bytes_written,

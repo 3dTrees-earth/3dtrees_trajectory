@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
                     pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
                                             scratch=work, resources=resources,
                                             observe=source_spool.observe if source_spool else None,
-                                            reset_observation=source_spool.reset if source_spool else None)
+                                            reset_observation=source_spool.reset if source_spool else None, copc_threads=threads)
                     stage["bytes_read"] = sum(path.stat().st_size for path in args.clouds)
                     if source_spool is not None:
                         stage["bytes_written"] = source_spool.bytes_written

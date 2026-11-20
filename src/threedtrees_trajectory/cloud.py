@@ -10,6 +10,8 @@ import numpy as np
 from laspy.copc import Bounds, CopcReader, load_octree_for_query
 
 CHUNK = 5_000_000
+COPC_BATCH_NODES = 1024
+COPC_BATCH_BYTES = 128 * 2**20
 LAZ_FIELDS = (laspy.DecompressionSelection.base().decompress_z().decompress_gps_time()
               .decompress_scan_angle().decompress_point_source_id())
 FORMAT = laspy.PointFormat(6)
@@ -30,6 +32,23 @@ def open_cloud(path: Path) -> laspy.LasReader:
     return reader
 
 
+def _node_batches(nodes, size, path):
+    """Bound the native decoder's point, byte and node window."""
+    batch, points, size_bytes = [], 0, 0
+    for node in sorted(nodes, key=lambda node: node.offset):
+        if not 0 < node.point_count <= CHUNK or not 0 < node.byte_size <= COPC_BATCH_BYTES:
+            raise ValueError(f"{path.name}: COPC node exceeds the supported decode budget.")
+        if batch and (points + node.point_count > size or size_bytes + node.byte_size > COPC_BATCH_BYTES
+                      or len(batch) == COPC_BATCH_NODES):
+            yield batch
+            batch, points, size_bytes = [], 0, 0
+        batch.append(node)
+        points += node.point_count
+        size_bytes += node.byte_size
+    if batch:
+        yield batch
+
+
 def _spatial_chunks(path: Path, bounds: Bounds | None, size: int):
     with CopcReader.open(path, decompression_selection=LAZ_FIELDS) as reader:
         if bounds is not None:
@@ -37,17 +56,9 @@ def _spatial_chunks(path: Path, bounds: Bounds | None, size: int):
             lo = np.ceil((bounds.mins - reader.header.offsets) / reader.header.scales - 1e-7)
             hi = np.floor((bounds.maxs - reader.header.offsets) / reader.header.scales + 1e-7)
         nodes = load_octree_for_query(reader.source, reader.copc_info, reader.root_page, query_bounds=bounds)
-        batch, count = [], 0
-        for node in sorted(nodes, key=lambda n: n.offset):
-            if batch and count + node.point_count > size:
-                points = reader._fetch_and_decompress_points_of_nodes(batch)
-                yield points if bounds is None else _in_bounds(points, ("X", "Y"), lo, hi)
-                batch, count = [], 0
-            if node.point_count > CHUNK:
-                raise ValueError(f"{path.name}: COPC node exceeds the supported {CHUNK:,}-point stream budget.")
-            batch.append(node)
-            count += node.point_count
-        if batch:
+        for batch in _node_batches(nodes, size, path):
+            # laspy passes the node chunk table to lazrs's native Rayon pool.
+            # A single call fills the output in file order, independent of slots.
             points = reader._fetch_and_decompress_points_of_nodes(batch)
             yield points if bounds is None else _in_bounds(points, ("X", "Y"), lo, hi)
 
@@ -113,7 +124,7 @@ class TimeSortedCopc:
     """Sorted disk runs with a batch merge of disjoint, complete GPS-time groups."""
 
     def __init__(self, path: Path, folder: Path, size: int, bounds: Bounds | None = None, *, select=None,
-                 observe=None):
+                 observe=None, spatial=False):
         self.size = size
         with open_cloud(path) as reader:
             self.header = reader.header
@@ -135,7 +146,7 @@ class TimeSortedCopc:
         # Keep all sorted runs in one file. The number of runs can exceed the
         # process's file descriptor limit for billion-point acquisitions.
         with self.path.open("xb") as spool, self.keys.open("xb") as keys:
-            for chunk in point_chunks(path, size, bounds, spatial=observe is not None):
+            for chunk in point_chunks(path, size, bounds, spatial=spatial or observe is not None):
                 time = chunk.gps_time
                 low, high = float(time.min()), float(time.max())
                 if not np.isfinite([low, high]).all():
