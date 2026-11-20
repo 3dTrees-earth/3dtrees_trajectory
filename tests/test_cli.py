@@ -139,7 +139,7 @@ def test_bad_input_has_refusal_and_clears_stale_outputs(tmp_path, scenario, reas
     output.with_suffix(".geojson").write_text("stale")
     expected = {"constant_time": 3, "nonfinite_time": 3, "no_fit": 4}.get(scenario, 2)
     assert main([*paths, "-o", str(output)]) == expected
-    _assert_refusal(output, reason)
+    assert _assert_refusal(output, reason)["exit_code"] == expected
 
 
 @pytest.mark.parametrize(("option", "reason"), [

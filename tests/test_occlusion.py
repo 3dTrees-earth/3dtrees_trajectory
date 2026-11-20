@@ -50,25 +50,49 @@ def test_occlusion_needs_both_products(tmp_path, capsys):
 
 
 @needs_untwine
-def test_estimated_path_gives_copc_and_cog(tmp_path):
+def test_estimated_path_gives_trajectory_2_report_copc_and_cog(tmp_path):
+    import csv
     import rasterio
 
-    flight(tmp_path / "f.laz")
+    flight(tmp_path / "f.laz", seconds=6, rate=500)
     out, copc, cog = tmp_path / "p.csv", tmp_path / "o.copc.laz", tmp_path / "o.tif"
-    assert main([str(tmp_path / "f.laz"), "-o", str(out), "--occlusion-copc", str(copc), "--occlusion-cog", str(cog),
-                 "--voxel", "1"]) == 0
-    section = json.loads(out.with_suffix(".report.json").read_text())["occlusion"]
+    assert main([str(tmp_path / "f.laz"), "-o", str(out), "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 0
+    lines = out.read_text().splitlines()
+    assert lines[0] == "# format: 3dtrees-trajectory/2"
+    header, *rows = csv.reader(line for line in lines if not line.startswith("#"))
+    assert header == ["time", "x", "y", "z", "roll", "pitch", "yaw", "name"]
+    assert rows and all(len(row) == 8 and row[4:] == ["", "", "", ""] for row in rows)
+
+    report = json.loads(out.with_suffix(".report.json").read_text())
+    assert report["exit_code"] == 0 and report["positions"] == len(rows)
+    assert report["method"] == "lines" and report["quality"] == "good"
+    assert report["resources"]["points_read"] == report["points"]
+    stages = {stage["name"] for stage in report["stages"]}
+    assert stages >= {"read/time-sort", "platform check", "path estimation", "grid extent/crop pass",
+                      "route tile spools", "traversal", "classify + ground", "COPC write", "COG write"}
+    for stage in report["stages"]:
+        assert stage["start_seconds"] >= 0
+        assert stage["wall_seconds"] >= 0 and stage["cpu_seconds"] >= 0
+        assert stage["peak_rss_bytes"] > 0
+
+    section = report["occlusion"]
     assert section["trajectory"] == "estimated" and section["ground"] == "lowest_hit"
     with laspy.open(copc) as reader:
         assert reader.header.point_count == section["copc_points"] > 0
         assert any(type(vlr).__name__ == "CopcInfoVlr" for vlr in reader.header.vlrs)
         points = reader.read()
+    hit, miss, hidden = (np.asarray(points[name]) for name in ("nhit", "nmiss", "nocc"))
+    expected_class = np.select([hit > 0, miss > 0, hidden > 0], [1, 2, 3], default=4)
+    np.testing.assert_array_equal(points["occlusion"], expected_class)
     assert set(np.unique(points["occlusion"])) <= {1, 3, 4}
+    assert set(section["voxels_ground_to_canopy"]) == {"filled", "empty", "occluded", "unobserved"}
     assert np.all(points["height_above_ground"] >= 0)
     with rasterio.open(cog) as raster:
-        assert raster.count == len(section["cog_bands"])
-        assert raster.descriptions[0] == "occluded_0-1m" and raster.descriptions[-1] == "unobserved_column"
-        assert raster.res == (1.0, 1.0)
+        assert raster.tags(ns="IMAGE_STRUCTURE")["LAYOUT"] == "COG"
+        assert float(raster.tags()["OCCLUSION_BAND_M"]) == 1
+        assert raster.res == (0.5, 0.5)
+        names = [f"occluded_{band}-{band + 1}m" for band in range(raster.count - 1)] + ["unobserved_column"]
+        assert list(raster.descriptions) == section["cog_bands"] == names
         values = raster.read()
     finite = values[np.isfinite(values)]
     assert finite.size and finite.min() >= 0 and finite.max() <= 1

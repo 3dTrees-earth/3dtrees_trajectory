@@ -222,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     if error_message is not None:
         print(f"error: {error_message}", file=sys.stderr)
         details = {field: data[field] for field in ("occlusion", "pulse_check") if data is not None and field in data}
-        data = refusal(info, pulses, error_message) | details | {"exit_code": exit_code}
+        data = refusal(info, pulses, error_message) | details
         if safe_products:
             for path in products:
                 try:
@@ -230,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
                 except OSError as error:
                     print(f"error: cannot publish empty output {path}: {error}", file=sys.stderr)
     if safe_report:
+        data["exit_code"] = exit_code if error_message is not None else 0
         data["resources"] = resources.report(threads, info.points_read)
         data["stages"] = resources.stages
         try:
