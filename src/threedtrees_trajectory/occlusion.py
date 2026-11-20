@@ -57,6 +57,10 @@ class Grid:
     points: int = 0
 
 
+class PathCoverageError(ValueError):
+    """The path and cloud clocks do not overlap."""
+
+
 def read_trajectory(path: Path) -> tuple[np.ndarray, np.ndarray]:
     """Time and xyz of a path in the 3Dtrees trajectory CSV (``#`` header lines, then time,x,y,z first)."""
     with path.open(encoding="utf-8-sig", newline="") as stream:
@@ -241,7 +245,7 @@ def prepare_index(paths, voxel):
 def _crop(grid, low, high, dtm, crs_wkt, stats):
     nx, ny, nz = grid.shape
     if (high < 0).all():
-        raise ValueError("The point cloud and path have no overlapping GPS times. "
+        raise PathCoverageError("The point cloud and path have no overlapping GPS times. "
                          "Check GPS week seconds versus adjusted GPS time.")
     low[low == nz] = -1
     if dtm is None:

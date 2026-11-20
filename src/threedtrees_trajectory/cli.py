@@ -14,6 +14,13 @@ from .coverage import NoTrajectory, UnusableTime
 from .resources import RunResources, decoding_threads
 
 
+SUPPLEMENTARY_PATH_NOTE = "Keep the delivered path as supplementary data on the dataset; it will be added once supported."
+
+
+def _supplementary(reason: str) -> str:
+    return f"{reason} {SUPPLEMENTARY_PATH_NOTE}"
+
+
 def _validate_paths(outputs: tuple[Path, ...], inputs: list[Path]) -> None:
     """Keep output replacement away from inputs and other destinations."""
     for index, path in enumerate(outputs):
@@ -200,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
                 "return_modes": info.return_modes,
             }
         except (NoTrajectory, UnusableTime) as error:
-            error_message = str(error)
+            error_message = _supplementary(str(error))
             exit_code = error.exit_code
         except JobBusy as error:
             safe_products = safe_report = False
@@ -266,7 +273,7 @@ def _occlusion_path(args, result, pulses, resources):
                 stats["bytes_read"] = args.trajectory.stat().st_size
                 return time, xyz, "delivered", check
             except (OSError, ValueError, MemoryError) as error:
-                return {"error": str(error) or "The delivered-path check ran out of memory."}
+                return {"error": _supplementary(str(error) or "The delivered-path check ran out of memory.")}
     time = np.array([f.time for f in result.fits], float)
     xyz = np.array([f.xyz for f in result.fits], float).reshape(-1, 3)
     return time, xyz, result.method, None
@@ -293,8 +300,10 @@ def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds) -> d
             budget=int(args.grid_memory_gib * 2**30), resources=resources,
         )
     except (OSError, ValueError, MemoryError, ImportError, LaspyException, LazrsError) as error:
-        return {**({"delivered_path_check": check} if check else {}),
-                "error": str(error) or "The occlusion step ran out of memory."}
+        reason = str(error) or "The occlusion step ran out of memory."
+        if check is not None and isinstance(error, occlusion.PathCoverageError):
+            reason = _supplementary(reason)
+        return {**({"delivered_path_check": check} if check else {}), "error": reason}
 
 
 if __name__ == "__main__":

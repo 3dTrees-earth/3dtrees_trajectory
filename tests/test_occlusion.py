@@ -121,7 +121,9 @@ def test_rejects_path_without_clock_overlap(tmp_path, offset):
                header="time,x,y,z", comments="")
     assert main([str(cloud), "--trajectory", str(path), "--report", str(report),
                  "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 2
-    assert "no overlapping GPS times" in json.loads(report.read_text())["occlusion"]["error"]
+    reason = json.loads(report.read_text())["occlusion"]["error"]
+    assert "no overlapping GPS times" in reason
+    assert reason.endswith("Keep the delivered path as supplementary data on the dataset; it will be added once supported.")
     assert copc.stat().st_size == cog.stat().st_size == 0
 
 
