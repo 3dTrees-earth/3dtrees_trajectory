@@ -1,4 +1,4 @@
-"""Estimate the sensor path of moving lidar (ULS, MLS, ALS) from its point cloud, and map what the sensor could not
+"""Estimate the sensor path of moving lidar (ULS, MLS) from its point cloud, and map what the sensor could not
 see (occlusion) along that path or along a delivered one."""
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _paths_overlap(first: Path, second: Path) -> bool:
 def main(argv: list[str] | None = None) -> int:
     resources = RunResources()
     parser = argparse.ArgumentParser(prog="3dtrees-trajectory", description=__doc__, allow_abbrev=False)
-    parser.add_argument("clouds", nargs="*", type=Path, help="per-file LAS/LAZ or one merged COPC from the same acquisition")
+    parser.add_argument("clouds", nargs="*", type=Path, help="standardized LAS/LAZ files from one dataset, in collection order")
     parser.add_argument("-o", "--output", type=Path, help="3Dtrees trajectory CSV")
     parser.add_argument("--report", type=Path, help="JSON quality report (default next to the CSV)")
     parser.add_argument("--geojson", type=Path, help="map layer of the path (default next to the CSV)")
@@ -303,7 +303,7 @@ def _occlusion(args, path_inputs, resources, info, threads, source_spool) -> dic
         return occlusion.run(
             args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=float(args.voxel),
             dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
-            quality="rough" if method == "scan_angle" or info.single_return_files else None,
+            quality="rough" if method in ("scan_angle", "lines_scan_angle") or info.single_return_files else None,
             delivered_check=check, threads=threads, source_spool=source_spool, single_files=info.single_return_files,
             budget=int(args.grid_memory_gib * 2**30), resources=resources, fragment_echoes=info.fragment_echoes,
         )

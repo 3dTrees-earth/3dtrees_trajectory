@@ -1,7 +1,7 @@
 [project]
 name = "threedtrees-trajectory"
 version = "0.1.0"
-description = "Moving lidar sensor trajectory (ULS/MLS/ALS) estimated from the point cloud alone, and the occlusion along it"
+description = "Estimate ULS and MLS trajectories and occlusion from standardized LAS/LAZ collections"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

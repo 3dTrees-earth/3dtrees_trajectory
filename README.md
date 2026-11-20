@@ -1,21 +1,24 @@
 # 3dtrees_trajectory
 
-Estimate the flight or walking path of a moving lidar sensor (ULS, MLS, ALS) from LAS or LAZ point clouds. The tool
-writes a 3Dtrees trajectory CSV, a quality and resource report, and a map layer. It can also map occlusion along
-the estimated or delivered path. The current package version is
-0.1.0.
+The 1.0.0 scope covers ULS and MLS. The tool estimates the flight or walking path from a standardized point cloud
+collection and writes a 3Dtrees trajectory CSV, a quality and resource report, and a map layer. It can also map
+occlusion along the estimated or delivered path. The current package version is 0.1.0.
 
 ## Run
 
 ```bash
-3dtrees-trajectory flight.laz -o trajectory/trajectory.csv
-3dtrees-trajectory strip1.las strip2.laz -o trajectory/trajectory.csv
+3dtrees-trajectory standardized/strip1.las standardized/strip2.laz -o trajectory/trajectory.csv
 ```
 
-Combine strips from the same acquisition and use a consistent file order. The reader supports LAS/LAZ 1.2–1.4,
-point formats 0–10, and COPC. Inputs need finite, varying GPS times in the same GPS time system and a shared metric
-coordinate system. When the CRS is missing, the tool assumes metre units and keeps the input coordinates. Inputs in
-formats 0 and 2 have no GPS time and receive a refusal report.
+Pass all standardized LAS/LAZ files from one dataset to a single invocation, in consistent collection order.
+The collection can contain one to 65,536 files. The parallel chunked LAZ reader preserves the scanner's
+record order within each file, including time blocks. Keep pulse siblings and their metadata together during
+standardization.
+
+The reader supports LAS/LAZ 1.2–1.4 and point formats 0–10. Each file needs finite, varying GPS time.
+All files must share a GPS time system and metric coordinates. If the CRS is missing, the tool assumes
+metres and preserves the input coordinates. Point formats 0 and 2 receive a refusal report because
+they lack GPS time.
 
 ### Outputs
 
@@ -35,14 +38,13 @@ existing trajectory CSV.
 | Code | Meaning |
 | --- | --- |
 | `0` | The path was estimated or the delivered-path occlusion products were written. In a combined job, the estimated path may succeed with an occlusion error in the report. |
-| `2` | Invalid arguments or data, a static acquisition without provided stations, or a failed output operation. |
+| `2` | Invalid arguments or data, a detected static (TLS) acquisition, or a failed output operation. |
 | `3` | GPS time is missing, nonfinite or constant in a moving acquisition. A constant point clock cannot be aligned with a moving delivered path. |
 | `4` | The cloud has no usable estimate and no delivered path to support occlusion. |
 
 For a refusal, the JSON records the reason when the report destination is writable. Safe, writable product
 destinations receive zero-byte files.
 
-Supply one to 65,536 per-file LAS/LAZ strips from one acquisition, or one merged COPC (`.copc.laz`).
 Supply an output CSV for an estimated path. The CSV, GeoJSON, report and input paths must be distinct.
 If you set `--interval`, use a positive finite number of seconds (default 0.5). An interval must be long enough for
 the cloud's GPS times to fit into a signed 64-bit window index. `--threads` takes a positive integer.
@@ -50,10 +52,10 @@ the cloud's GPS times to fit into a signed 64-bit window index. `--threads` take
 ## Occlusion
 
 ```bash
-3dtrees-trajectory flight.laz -o trajectory.csv \
+3dtrees-trajectory standardized/strip1.las standardized/strip2.laz -o trajectory.csv \
   --occlusion-copc occlusion.copc.laz --occlusion-cog occlusion.tif
 
-3dtrees-trajectory flight.laz --trajectory delivered.csv --report occlusion.report.json \
+3dtrees-trajectory standardized/strip1.las standardized/strip2.laz --trajectory delivered.csv --report occlusion.report.json \
   --occlusion-copc occlusion.copc.laz --occlusion-cog occlusion.tif
 ```
 
@@ -85,8 +87,9 @@ occlusion error both destinations are zero bytes and the report gives the reason
 still return its estimated trajectory. The report includes traversal counts, in-range class totals,
 and the pooled occluded share per height band.
 
-The CLI normally decodes the source once for the trajectory sample and occlusion. It reads COPC
-spatial nodes and records compact echoes in scratch. Testing a fallback can read an affected file again. From those records, it derives ground and canopy extents and routes
+The CLI normally reads the standardized collection once for both the trajectory sample and occlusion. It records
+compact echoes in scratch. Testing a fallback can read an affected file again. From those records, it derives
+ground and canopy extents and routes
 whole pulses to each buffered XY tile they touch. Separated returns are joined by GPS time, source and scanner
 channel within each input file. Each tile uses its own local ground and canopy envelope on the original voxel
 lattice. Traversal keeps the vegetation band from ground minus 1 m to canopy top plus 1 m. The products cap
@@ -123,7 +126,9 @@ Use the standardization metadata to check that GPS time is present and varying. 
 `max(NumberOfReturns) > 1` as evidence of multi-returns. A single-return cloud needs usable scan angles or an
 available delivered path for occlusion. Check for a scan-angle dimension and actual nonzero values, since a LAS
 point format can contain an angle field filled with zero. Multi-return clouds can estimate a path without angles
-when they have enough usable pulse lines. The tool checks usable pulses, the multi-return share, return pairing,
+when they have enough usable pulse lines. Preserve GPS time, ReturnNumber, NumberOfReturns, ScanAngle
+(or ScanAngleRank for legacy formats), PointSourceID and scanner channel wherever the input format provides
+them. The tool checks usable pulses, the multi-return share, return pairing,
 and static-scan evidence and records its refusal in JSON. The platform gate can route clearly unsuitable
 datasets before scheduling a job.
 
@@ -134,6 +139,7 @@ datasets before scheduling a job.
 | Enough multi-return pulses with GPS time | `lines` fits position and velocity in each window using pulse endpoints. Pairing uses time, point source and scanner channel within each file. |
 | Too many unpaired LAS/LAZ returns | The reader tries a 1 µs time tolerance for complete, unique return sequences on the same source and channel. |
 | Usable scan angles and GPS time | `scan_angle` fits the angle off nadir, assuming a level line scanner. If pairing failed, the affected file goes to the single-return traversal. |
+| Missing path windows in a file with usable single returns | `lines_scan_angle` keeps reliable line fits and uses scan angles to fill missing time windows. The combined estimate is marked `rough`. |
 | A delivered path in the cloud's clock and CRS | Occlusion uses the delivered positions. An estimated trajectory is optional. |
 | Too little geometric information for either estimator | The report asks for the delivered trajectory. |
 
@@ -154,10 +160,7 @@ the path tool's scope.
 - The reader decodes up to five million points per batch. The job uses up to `GALAXY_SLOTS` or the
   lower `--threads` limit for decoding and tile workers, also capped by CPU affinity and the cgroup v2
   quota. The default is eight slots. The path solver uses single-threaded numerical reductions.
-- COPC uses lazrs to decode hierarchy nodes in parallel within the job slots, with at most 1,024 nodes,
-  128 MiB of compressed data, and five million points per batch. It then orders the sampled GPS-time
-  groups by time, source, scanner channel and return number. Its temporary sort uses 38 bytes per candidate echo, including contiguous time keys.
-  Pulse population counts from thinned COPC inputs are estimates and carry a flag in the report.
+- LAZ uses parallel lazrs decoding with bounded chunk reads in original record order.
   The defaults retain approximately 40 million multi-return and 10 million single-return pulses,
   or 40 million single-return pulses for single-return acquisitions. `--full` explicitly samples
   every pulse and uses memory proportional to input size.
@@ -165,8 +168,7 @@ the path tool's scope.
   partition joins separated echoes across input batches. Workers order each tile by time in bounded
   windows. For acquisitions above the native 32-bit echo limit, tile spools use lossless compressed
   blocks to limit scratch use as buffers duplicate echoes. Large LAS/LAZ inputs route separate strips
-  concurrently, and large COPC inputs join independent hash partitions concurrently. Both use the job
-  caps. The report records unpaired echoes and the files traced in single-return mode.
+  concurrently within the job caps. The report records unpaired echoes and the files traced in single-return mode.
   Each durable tile uses 12 bytes per core voxel for the three count arrays until merge.
 - `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements
   when available. `stages` records wall, self and child CPU, peak process RSS and I/O where available.
@@ -175,90 +177,39 @@ the path tool's scope.
 - Positions cover sampled acquisition times. GPS week rolls, overlapping independent flights with the same
   clock and identifiers, and widely separated acquisitions should be split before processing.
 
-## Sequential container replay baseline
-
-The earlier runtime source was mounted read-only into the trajectory image with Untwine 1.5.1. Each replay had
-eight decoder slots and a ten-CPU affinity mask. The wall values are from the instrumented tool. Cgroup peaks
-include cache. For tiled jobs, decoded points, traversed pulses and other counters are summed across buffered
-tiles, so one point can contribute to multiple tiles.
-
-| Dataset | Input | Points | Grid voxels | Tiles | Wall (s) | Peak RSS (GiB) | Cgroup peak (GiB) |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1807 YellowScan | LAZ | 52.7 M | 15.8 M | 1 | 96.9 | 2.39 | 2.33 |
-| 1807 YellowScan | COPC | 52.7 M | 15.8 M | 1 | 144.0 | 3.66 | 3.64 |
-| 1807 YellowScan | LAZ | 52.7 M | 15.8 M | 2 | 122.4 | 2.36 | 2.75 |
-| 1807 YellowScan | COPC | 52.7 M | 15.8 M | 2 | 176.9 | 3.16 | 3.19 |
-| 2014 DJI L3 | LAZ | 52.7 M | 773.2 M | 9 | 451.9 | 6.61 | 6.76 |
-| 2014 DJI L3 | COPC | 52.7 M | 773.2 M | 9 | 452.8 | 9.30 | 10.18 |
-| 1844 YellowScan | LAZ | 678.1 M | 203.6 M | 2 | 1440.1 | 7.58 | 14.96 |
-| 1844 YellowScan | COPC | 678.1 M | 203.6 M | 2 | 1901.9 | 6.24 | 32.57 |
-
-
-The 7.04-billion-point 2585 replay produced trajectories from per-file LAZ and merged COPC. The LAZ
-occlusion step refused a strip with more than 40 million separated echoes in a tile. The COPC process
-was stopped in its fifth tile after eleven hours at the operator’s request.
-
-## Parallel container replay
-
-The source scan and tile worker replays used at most ten slots and 190 GiB of Docker memory. The table
-compares tool wall times against the sequential runs above. Peak process RSS is the largest individual
-process measurement. Cgroup peaks include the resident caches for the compact source and tile spools.
-
-| Acquisition | Wall (s) | Speedup | Tiles / peak workers | Peak process RSS (GiB) | Cgroup peak (GiB) | Scratch peak (GiB) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1807 LAZ | 101.3 | 0.96× | 1 / 1 | 1.27 | 2.73 | 2.17 |
-| 1807 COPC | 120.7 | 1.19× | 1 / 1 | 1.27 | 3.23 | 2.31 |
-| 1844 LAZ | 994.3 | 1.45× | 2 / 2 | 5.22 | 34.49 | 32.49 |
-| 1844 COPC | 1294.6 | 1.47× | 2 / 2 | 5.22 | 39.12 | 30.82 |
-| 2014 multi LAZ | 152.1 | 2.97× | 8 / 8 | 3.96 | 21.75 | 6.48 |
-| 2014 single LAZ | 153.3 | 1.91× | 4 / 4 | 7.83 | 24.01 | 7.53 |
-| 2585 LAZ | 27953.0 | — | 88 / 10 | 7.33 | 190.00 | 567.87 |
-| 2585 COPC | 20169.5 | — | 54 / 9 | 9.89 | 190.00 | 460.79 |
-
-Both 1807 replays and the 1844 LAZ replay reproduce the earlier products exactly. The new 1844 COPC
-reproduces the earlier LAZ voxel classes, per-voxel counts and COG values. Its trajectory CSV is
-byte-identical to the earlier COPC CSV. The earlier COPC clipped some siblings at the outer tile
-buffer. Including complete pulses changes 19 values relative to that COG and 16 classes on shared
-emitted voxel centres.
-
-The 2585 LAZ replay decoded 7.04 billion points and rejoined 3.31 billion separated echoes. Its
-compressed tile spools occupied 382 GB for 916 GB of routed records. The measured run spent 6,204 s in the
-earlier 64-band COG conversion. In a separate Docker probe, the new band-interleaved intermediate
-converted to a COG in 51 s and matched every base raster value.
-
-The 2585 COPC replay also completed, with 307.7 GB of compressed tile spools and a 51 s COG
-conversion. It started during the LAZ COG conversion and kept the nine traversal slots set at
-occlusion startup. Both 2585 trajectory CSVs match their archived outputs byte for byte.
-The speedup column uses completed historical replays.
-
 ## Galaxy resource proposal
 
-Use ten CPU slots and choose an initial class from the total point count across all inputs.
-The proposed classes are for trajectory and occlusion together. Use standardization point counts
-when present, and check the buffered grid dimensions before assigning a destination.
+Allocate ten CPU slots for trajectory and occlusion together. Start with the total standardized point count, then
+check the buffered grid, the number of times each echo is routed, and the number of raster bands.
 
 | Input points | RAM (GiB) | Scratch (GiB) | Wall limit |
 | ---: | ---: | ---: | ---: |
-| Up to 75 million | 24 | 16 | 1 h |
-| 75–750 million | 64 | 96 | 2 h |
-| 750 million–2.1 billion | 96 | 256 | 5 h |
-| 2.1–7.1 billion | 140 | 750 | 10 h |
+| Up to 75 million | 32 | 16 | 1 h |
+| >75 million to 750 million | 64 | 96 | 2 h |
+| >750 million to 2.1 billion | 96 | 256 | 5 h |
+| >2.1 billion to 7.1 billion | 140 | 750 | 10 h |
 
-The 52.7 M and 678.1 M replays used up to 3.23 and 39.12 GiB of cgroup memory respectively. The
-7.04 B replays peaked at 568 GiB scratch and 39 GiB sampled aggregate traversal RSS. Their cgroup
-peaks reached the 190 GiB cap, including reclaimable file cache. Verify the 140 GiB class with a
-full run before enabling it in Galaxy. The 750 M–2.1 B class is an interpolation. Route larger
-or unusually wide acquisitions to a separate measurement job.
+The standardized LAZ replay for 2027 (29.7 M points) took 78 s and peaked at 3.0 GiB of cgroup memory.
+Historical scanner-order LAZ benchmarks provide headroom estimates for the larger classes:
 
-Budget each active tile at `2 GiB + 72 × buffered tile voxels + 320 × buffered XY columns`.
-Sum concurrent reservations and allow memory for the parent and file cache. Plan scratch for the
-24-byte source recording, buffered echo copies, hash partitions, sampled COPC sort and durable tile
-counts. Merge also needs room for the uncompressed voxel LAS, intermediate raster and final products.
-Adjust the destination when geometry, routed echo duplication or raster band count exceeds the
-replay range. The round-3 MLS replay of dataset 1788 had 24.7 million points and a
-2,000 × 2,000 × 1,278 grid at 0.5 m. It finished 123 tiles and reached 76.5 GiB cgroup memory,
-including file cache. Start comparable wide grids in the 96 GiB class. Confirm the effective
-memory units and storage quota when mapping this table to TPV.
+| Dataset | Points | Read stage (s) | Full job (s) | Peak cgroup RAM (GiB) | Peak scratch (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1807 | 52.7 M | 9.0 | 101 | 2.7 | 2.2 |
+| 2014, multi-return replay | 52.7 M | 10.8 | 152 | 21.8 | 6.5 |
+| 2014, single-return replay | 33.8 M | 6.4 | 153 | 24.0 | 7.5 |
+| 1844 | 678.1 M | 101.4 | 994 | 34.5 | 32.5 |
+| 2585 | 7.04 B | 1,238.8 | 27,953 | 190.0 | 567.9 |
+
+The 2014 single-return replay reached 24.01 GiB, so the smallest class allows 32 GiB. The 1844 replay
+fits the 64 GiB class with room for the parent process and file cache. The 750 M–2.1 B class is interpolated.
+The raw 2585 replay reached its 190 GiB cap including file cache and used 34.5 GiB of sampled aggregate RSS
+in traversal. The proposed 140 GiB class needs a full standardized 2585 run at that cap before deployment.
+
+The standardized 1788 collection had 24.7 M points and a 2,000 × 2,000 × 1,278 grid at 0.5 m. It finished
+123 tiles and reached 76.5 GiB of cgroup memory including cache. Start comparable wide grids in the 96 GiB
+class. Budget each active tile at `2 GiB + 72 × buffered tile voxels + 320 × buffered XY columns`. Sum
+concurrent reservations and leave room for the parent and file cache. Scratch covers the 24-byte source
+records, buffered echo copies, hash partitions, durable tile counts and product intermediates.
 
 ## Archived trajectory-only replay
 
@@ -297,11 +248,12 @@ local bind-mounted job directory, run under the job owner's UID and GID.
 docker run --rm --name trajectory-local --user "$(id -u):$(id -g)" \
   --label "owner=$(id -un)" --label created-by=trajectory-local \
   --mount "type=bind,source=$PWD,target=/data" \
-  3dtrees_trajectory:dev python /src/run.py flight.laz -o trajectory/trajectory.csv
+  3dtrees_trajectory:dev python /src/run.py standardized/strip1.las standardized/strip2.laz \
+    -o trajectory/trajectory.csv
 ```
 
-A future Galaxy wrapper can pass the selected cloud files and output paths, with a positive finite interval if
-exposed. Pass `--threads "${GALAXY_SLOTS:-4}"` from the job allocation and collect the three fixed outputs.
+The Galaxy wrapper should accept one collection of standardized LAS/LAZ files per dataset and pass all its
+members to one tool job. Pass `--threads "${GALAXY_SLOTS:-4}"` from the job allocation and collect the three fixed outputs.
 Keep sampling and platform diagnostics in the CLI. File metadata and geometry refusals are checked at runtime.
 A published release tag that matches the CLI and package versions publishes
 `ghcr.io/3dtrees-earth/3dtrees_trajectory:<version>` and a SIF built from the same Docker digest at
