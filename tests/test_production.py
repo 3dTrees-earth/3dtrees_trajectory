@@ -116,7 +116,7 @@ def test_crop_keeps_products_inside_vegetation_band(tmp_path, monkeypatch):
         np.testing.assert_array_equal(crop_pts[name], full_pts[name])
 
 
-def test_window_plan_splits_on_memory(monkeypatch):
+def test_window_plan_splits_on_memory():
     from pathlib import Path
 
     from threedtrees_trajectory.time_windows import plan
@@ -130,10 +130,10 @@ def test_window_plan_splits_on_memory(monkeypatch):
     ]
     time = np.array([0., 1., 2., 3.])
     xyz = np.array([[1., 1., 3.], [199., 1., 3.], [201., 1., 3.], [399., 1., 3.]])
-    actual = plan(index, grid, time, xyz, (0., 4.), 1, occlusion.DEFAULT_BUDGET)
+    layers = np.zeros(grid.shape[:2], np.int32), np.full(grid.shape[:2], grid.shape[2], np.int32)
+    actual = plan(index, grid, time, xyz, (0., 4.), 1, occlusion.DEFAULT_BUDGET, layers)
     assert len(actual) == 1
-    monkeypatch.setattr("threedtrees_trajectory.time_windows.TRACE_LIMIT", 150)
-    split = plan(index, grid, time, xyz, (0., 4.), 1, occlusion.DEFAULT_BUDGET)
+    split = plan(index, grid, time, xyz, (0., 4.), 1, actual[0].memory - 1, layers)
     assert len(split) == 2
     assert sum(window.echoes for window in split) == 200
 

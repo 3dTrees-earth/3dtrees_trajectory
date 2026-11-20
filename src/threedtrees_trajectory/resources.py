@@ -94,6 +94,18 @@ def _proc_rss(pid: int | str, key: str) -> int:
     return 0
 
 
+def _allocated_bytes(root: Path) -> int:
+    """Sample only the active job's private scratch directory."""
+    total = 0
+    for directory, _, names in os.walk(root):
+        for name in names:
+            try:
+                total += (Path(directory) / name).stat().st_blocks * 512
+            except FileNotFoundError:
+                pass
+    return total
+
+
 class RunResources:
     def __init__(self) -> None:
         self.start_wall = perf_counter()
@@ -104,7 +116,7 @@ class RunResources:
         self.stages = []
 
     @contextmanager
-    def stage(self, name: str, *, children: bool = False):
+    def stage(self, name: str, *, children: bool = False, scratch: Path | None = None):
         start_wall, start_cpu = perf_counter(), _cpu_seconds()
         self.peak = max(self.peak, _rss())
         try:
@@ -115,23 +127,27 @@ class RunResources:
         child_peak_start = _rss(resource.RUSAGE_CHILDREN)
         child_peak = 0
         aggregate_peak = 0
+        scratch_peak = _allocated_bytes(scratch) if scratch is not None else 0
         stop = Event()
 
-        def monitor_children():
-            nonlocal child_peak, aggregate_peak
+        def monitor_resources():
+            nonlocal child_peak, aggregate_peak, scratch_peak
             tasks = Path("/proc/self/task")
             while not stop.is_set():
                 pids = set()
-                if tasks.is_dir():
+                if children and tasks.is_dir():
                     for task in tasks.iterdir():
                         pids.update(_read(task / "children").split())
                 for pid in pids:
                     child_peak = max(child_peak, _proc_rss(pid, "VmHWM"))
-                aggregate_peak = max(aggregate_peak, _proc_rss("self", "VmRSS")
-                                     + sum(_proc_rss(pid, "VmRSS") for pid in pids))
-                stop.wait(0.1)
+                if children:
+                    aggregate_peak = max(aggregate_peak, _proc_rss("self", "VmRSS")
+                                         + sum(_proc_rss(pid, "VmRSS") for pid in pids))
+                if scratch is not None:
+                    scratch_peak = max(scratch_peak, _allocated_bytes(scratch))
+                stop.wait(0.25 if scratch is not None else 0.1)
 
-        monitor = Thread(target=monitor_children, daemon=True) if children else None
+        monitor = Thread(target=monitor_resources, daemon=True) if children or scratch is not None else None
         if monitor is not None:
             monitor.start()
         stage = {"name": name, "start_seconds": round(start_wall - self.start_wall, 6)}
@@ -152,6 +168,8 @@ class RunResources:
             if children:
                 stage["child_peak_rss_bytes"] = child_peak
                 stage["sampled_aggregate_rss_bytes"] = max(aggregate_peak, peak, child_peak)
+            if scratch is not None:
+                stage["sampled_peak_scratch_bytes"] = max(scratch_peak, _allocated_bytes(scratch))
             self.stages.append(stage)
 
     def _group_cpu(self) -> int | None:

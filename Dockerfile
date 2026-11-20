@@ -9,6 +9,12 @@ RUN micromamba create --yes --prefix /tmp/untwine-env --override-channels --chan
     && cp -r /tmp/untwine-env/share/proj /tmp/untwine/share/ \
     && /tmp/untwine/bin/untwine --version
 
+FROM python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7 AS ray-walker
+RUN apt-get update && apt-get install -y --no-install-recommends g++
+COPY src/threedtrees_trajectory/ray_walk.cpp /tmp/ray_walk.cpp
+RUN g++ -std=c++17 -O3 -fno-fast-math -ffp-contract=off -fPIC -shared -static-libstdc++ -static-libgcc \
+    /tmp/ray_walk.cpp -o /tmp/_ray_walk.so
+
 FROM python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
@@ -22,6 +28,7 @@ RUN python -m pip install --no-cache-dir --only-binary=:all: --no-deps -r /src/r
     && python -m pip install --no-cache-dir --only-binary=:all: --no-deps occpy_ls==0.3.0
 COPY --from=untwine /tmp/untwine /opt/untwine
 COPY src/ /src/
+COPY --from=ray-walker /tmp/_ray_walk.so /src/threedtrees_trajectory/_ray_walk.so
 
 # Galaxy runs its job script with /bin/sh and calls /src/run.py from the job directory.
 WORKDIR /data

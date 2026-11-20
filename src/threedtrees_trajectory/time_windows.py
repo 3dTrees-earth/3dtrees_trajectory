@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from time import perf_counter, process_time
 import os
+from dataclasses import dataclass
+from functools import lru_cache
+from time import perf_counter, process_time
 
 import numpy as np
 
+from .ray_walk import Columns, Walker, sum_block
 from .resources import _rss
 from .window_input import TRACE_BATCH, TRACE_LIMIT, group_multi, pack_echoes
 from .window_jobs import atomic_json, window_files
@@ -15,8 +17,8 @@ from .window_jobs import atomic_json, window_files
 GIB = 2**30
 WORKING_BYTES = 2 * GIB
 FRAGMENT_BYTES = 112
-VOXEL_BYTES = 48
-COLUMN_BYTES = 320
+COUNT_BYTES = 12
+COLUMN_BYTES = 24
 MAX_WINDOWS = 10_000
 
 
@@ -27,6 +29,7 @@ class TimeWindow:
     bounds: tuple[slice, slice, slice]
     blocks: tuple
     echoes: int
+    count_cells: int
 
     @property
     def shape(self):
@@ -34,7 +37,7 @@ class TimeWindow:
 
     @property
     def memory(self):
-        return (WORKING_BYTES + VOXEL_BYTES * math.prod(self.shape) + COLUMN_BYTES * math.prod(self.shape[:2])
+        return (WORKING_BYTES + COUNT_BYTES * self.count_cells + COLUMN_BYTES * math.prod(self.shape[:2])
                 + FRAGMENT_BYTES * self.echoes)
 
 
@@ -65,7 +68,7 @@ def _ray_bounds(block, lower, upper, grid, time, xyz):
     return np.maximum(grid_lo, low), np.minimum(grid_hi, high)
 
 
-def _plan_window(index, grid, time, xyz, lower, upper):
+def _plan_window(index, grid, time, xyz, lower, upper, layer_ranges):
     files = tuple(tuple(block for block in blocks if block.overlaps(lower, upper)) for blocks in index.blocks)
     blocks = [block for file in files for block in file]
     if not blocks:
@@ -74,10 +77,11 @@ def _plan_window(index, grid, time, xyz, lower, upper):
     start = np.maximum(0, np.floor((bounds[:, 0].min(axis=0) - grid.origin) / grid.voxel).astype(int) - 1)
     stop = np.minimum(grid.shape, np.floor((bounds[:, 1].max(axis=0) - grid.origin) / grid.voxel).astype(int) + 2)
     extent = tuple(slice(int(lo), int(hi)) for lo, hi in zip(start, stop))
-    return TimeWindow(lower, upper, extent, files, sum(block.stop - block.start for block in blocks))
+    cells = Columns.from_bounds(extent, *layer_ranges).cells
+    return TimeWindow(lower, upper, extent, files, sum(block.stop - block.start for block in blocks), cells)
 
 
-def plan(index, grid, time, xyz, time_bounds, slots, budget):
+def plan(index, grid, time, xyz, time_bounds, slots, budget, layer_ranges):
     lower, upper = time_bounds
     samples = [block.sample for blocks in index.blocks for block in blocks
                if block.sample is not None and block.overlaps(lower, upper)]
@@ -92,7 +96,7 @@ def plan(index, grid, time, xyz, time_bounds, slots, budget):
     windows = []
     while pending:
         lower, upper = pending.pop()
-        window = _plan_window(index, grid, time, xyz, lower, upper)
+        window = _plan_window(index, grid, time, xyz, lower, upper, layer_ranges)
         if window is None:
             continue
         if window.memory <= budget and window.echoes <= TRACE_LIMIT:
@@ -106,20 +110,19 @@ def plan(index, grid, time, xyz, time_bounds, slots, budget):
     return windows
 
 
-def init_worker(index, grid, time, xyz, work, single_files):
+def init_worker(index, grid, time, xyz, work, single_files, layer_ranges):
     global _CONTEXT
-    _CONTEXT = index, grid, time, xyz, work, single_files
+    _CONTEXT = index, grid, time, xyz, work, single_files, layer_ranges
 
 
 def trace_window(number, window):
-    from raytr import PyRaytracer
-
-    index, grid, time, xyz, work, single_files = _CONTEXT
+    index, grid, time, xyz, work, single_files, layer_ranges = _CONTEXT
     start_wall, start_cpu = perf_counter(), process_time()
-    start = np.array([part.start for part in window.bounds])
-    stop = start + window.shape
-    tracer = PyRaytracer()
-    tracer.defineGrid(grid.origin + start * grid.voxel, grid.origin + stop * grid.voxel, *window.shape, grid.voxel)
+    columns = Columns.from_bounds(window.bounds, *layer_ranges)
+    destination, marker = window_files(work, number)
+    pending = destination.with_suffix(".part")
+    counts = np.lib.format.open_memmap(pending, mode="w+", dtype=np.uint32, shape=(columns.cells, 3))
+    tracer = Walker(grid, columns, counts)
     decoded = recovered = unpaired = traced = 0
     for file, blocks in enumerate(window.blocks):
         fragments = []
@@ -141,7 +144,7 @@ def trace_window(number, window):
                 seconds = t[single]
                 coords = [axis[single] * scale + offset + grid.voxel * 1e-7 for axis, scale, offset in
                           zip((chunk.X, chunk.Y, chunk.Z), scales, offsets)]
-                tracer.doRaytracing_singleReturnPulses(*coords, *_positions(seconds, time, xyz), seconds)
+                tracer.add(coords, _positions(seconds, time, xyz))
                 traced += len(seconds)
             if keep.any():
                 records = pack_echoes(chunk, keep)
@@ -166,24 +169,19 @@ def trace_window(number, window):
             recovered += joined
             unpaired += len(records) - joined
             traced += joined
-    file, marker = window_files(work, number)
-    pending = file.with_suffix(".part")
-    counts = np.lib.format.open_memmap(pending, mode="w+", dtype=np.int32, shape=(3, *window.shape))
-    for channel, getter in enumerate((tracer.getNhit, tracer.getNmiss, tracer.getNocc)):
-        counts[channel] = getter()
-        if counts[channel].min(initial=0) < 0:
-            raise ValueError("Too many pulses traversed a voxel for the native 32-bit count.")
+    traversed, missing = map(int, tracer.stats)
+    del tracer
     counts.flush()
     del counts
     with pending.open("rb") as stream:
         os.fsync(stream.fileno())
-    pending.replace(file)
+    pending.replace(destination)
     data = dict(window=number + 1, gps_from=window.lower, gps_until=window.upper, points_read=decoded,
                 echoes_traced=traced, recovered_echoes=recovered, unpaired_echoes=unpaired,
-                traversed_pulses=int(tracer.get_num_traversed_pulses()), missing_returns=int(tracer.get_num_missing_returns()),
-                grid_shape=window.shape, grid_voxels=math.prod(window.shape),
+                traversed_pulses=traversed, missing_returns=missing,
+                grid_shape=window.shape, grid_voxels=math.prod(window.shape), count_voxels=columns.cells,
                 wall_seconds=perf_counter() - start_wall, cpu_seconds=process_time() - start_cpu,
-                peak_rss_bytes=_rss(), bytes_written=file.stat().st_size)
+                peak_rss_bytes=_rss(), bytes_written=destination.stat().st_blocks * 512)
     atomic_json(marker, data)
     return data
 
@@ -205,28 +203,27 @@ def _positions(seconds, time, xyz):
 def _trace_multi(tracer, records, sizes, scales, offsets, voxel, time, xyz):
     points = [records[axis] * scale + offset + voxel * 1e-7
               for axis, scale, offset in zip(("x", "y", "z"), scales, offsets)]
-    shot = np.repeat(np.arange(len(sizes), dtype=np.float64), sizes)
-    rn, nr = records["returns"] & 15, records["returns"] >> 4
-    tracer.addPointData(*points, *_positions(records["time"], time, xyz), shot, rn, nr)
-    tracer.doRaytracing()
-    tracer.clearPulseDataset()
+    pulses = np.r_[0, np.cumsum(sizes, dtype=np.int32)].astype(np.int32, copy=False)
+    rn = records["returns"] & 15
+    tracer.add(points, _positions(records["time"][pulses[:-1]], time, xyz), rn, pulses)
 
 
-def summed_counts(work, windows, blocks):
-    """Sum only one product block in memory, using int64 to detect overflow."""
-    arrays = [(window.bounds, np.load(window_files(work, index)[0], mmap_mode="r", allow_pickle=False))
-              for index, window in enumerate(windows)]
+def summed_counts(work, windows, blocks, layer_ranges):
+    """Sum only one product block in memory, using uint64 to detect overflow."""
+    @lru_cache(maxsize=32)
+    def stored(number):
+        values = np.load(window_files(work, number)[0], mmap_mode="r", allow_pickle=False)
+        return Columns.from_bounds(windows[number].bounds, *layer_ranges), values
+
     for block in blocks:
-        shape = tuple(part.stop - part.start for part in block)
-        counts = np.zeros((3, *shape), np.int64)
-        for bounds, values in arrays:
-            lower = [max(a.start, b.start) for a, b in zip(bounds, block)]
-            upper = [min(a.stop, b.stop) for a, b in zip(bounds, block)]
-            if any(lo >= hi for lo, hi in zip(lower, upper)):
+        start = np.array([part.start for part in block], dtype=np.int32)
+        stop = np.array([part.stop for part in block], dtype=np.int32)
+        counts = np.zeros((*tuple(stop - start), 3), np.uint64)
+        for number, window in enumerate(windows):
+            if any(a.start >= b.stop or b.start >= a.stop for a, b in zip(window.bounds, block)):
                 continue
-            source = tuple(slice(lo - part.start, hi - part.start) for lo, hi, part in zip(lower, upper, bounds))
-            dest = tuple(slice(lo - part.start, hi - part.start) for lo, hi, part in zip(lower, upper, block))
-            counts[:, *dest] += values[:, *source]
-        if counts.max(initial=0) > TRACE_LIMIT:
+            columns, values = stored(number)
+            sum_block(columns, values, start, stop, counts)
+        if counts.max(initial=0) > np.iinfo(np.uint32).max:
             raise ValueError("Too many pulses traversed a voxel for the 32-bit output count.")
-        yield block[:2], block[2], counts.astype(np.int32)
+        yield block[:2], block[2], np.moveaxis(counts.astype(np.uint32), -1, 0)

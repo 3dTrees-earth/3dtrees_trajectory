@@ -20,14 +20,15 @@ from threedtrees_trajectory.window_input import ScanIndex
 def _worker_checkpoint_test(index, work, kill):
     if kill:
         os.kill(os.getpid(), signal.SIGKILL)
-    values = np.full((2, 2, 2), index, np.int32)
+    counts, marker = window_jobs.window_files(work, index)
+    np.save(counts, np.full((8, 3), index, np.uint32))
     data = {"window": index + 1}
-    window_jobs.save_window(work, index, (values,) * 3, data)
+    window_jobs.atomic_json(marker, data)
     return data
 
 
 def _specs(work, kill):
-    return [(index, 1, (2, 2, 2), (work, kill and index == 1)) for index in range(2)]
+    return [(index, 1, (8, 3), (work, kill and index == 1)) for index in range(2)]
 
 
 def test_reuse_finished_window_after_a_worker_is_killed(tmp_path):
@@ -106,24 +107,26 @@ def test_copc_occlusion_refuses_and_preserves_estimated_path(tmp_path):
     assert not (tmp_path / "out.tif").stat().st_size
 
 
-def test_time_window_counts_match_whole_grid(tmp_path, monkeypatch):
+@pytest.mark.parametrize("voxel", [0.3, 0.5, 1.0])
+def test_time_window_counts_match_whole_grid(tmp_path, monkeypatch, voxel):
     from threedtrees_trajectory import window_input
 
     monkeypatch.setattr(window_input, "INDEX_POINTS", 51)
     cloud = tmp_path / "flight.laz"
     time, xyz = flight(cloud, seconds=2, rate=300)
-    grid, _ = occlusion._grid([cloud], 0.5)
+    grid, _ = occlusion._grid([cloud], voxel)
     counters = dict(echoes_read=0, echoes_outside_path=0, traversed_pulses=0, missing_returns=0)
     expected = trace_reference([cloud], grid, time, xyz, counters)
     index = ScanIndex([cloud], None)
     index.populate()
     bounds = time[0] - 1, time[-1] + 1
-    windows = time_windows.plan(index, grid, time, xyz, bounds, 6, occlusion.DEFAULT_BUDGET)
+    layers = np.zeros(grid.shape[:2], np.int32), np.full(grid.shape[:2], grid.shape[2], np.int32)
+    windows = time_windows.plan(index, grid, time, xyz, bounds, 6, occlusion.DEFAULT_BUDGET, layers)
     assert len(windows) >= 2
-    time_windows.init_worker(index, grid, time, xyz, tmp_path, ())
+    time_windows.init_worker(index, grid, time, xyz, tmp_path, (), layers)
     stats = [time_windows.trace_window(number, window) for number, window in enumerate(windows)]
     block = tuple(slice(0, size) for size in grid.shape)
-    (_, _, summed), = time_windows.summed_counts(tmp_path, windows, [block])
+    (_, _, summed), = time_windows.summed_counts(tmp_path, windows, [block], layers)
     np.testing.assert_array_equal(summed, expected)
     assert sum(window["traversed_pulses"] for window in stats) == len(time)
 

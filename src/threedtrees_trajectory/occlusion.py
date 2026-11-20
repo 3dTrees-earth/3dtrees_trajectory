@@ -31,7 +31,7 @@ import numpy as np
 from .cloud import is_copc
 from .pulses import Pulses, _crs, _time_system
 from .resources import RunResources, available_memory, decoding_threads
-from . import time_windows
+from . import ray_walk, time_windows
 from .window_input import ScanIndex
 from .window_jobs import execute, identify, lock_job
 
@@ -267,7 +267,7 @@ def _product_blocks(grid, top, ground):
         # uses float32 heights, so keep one extra layer for boundary rounding.
         low = max(0, math.floor((float(ground[xy].min()) - grid.origin[2]) / grid.voxel) - 1)
         if low <= high:
-            yield (*xy, slice(low, high + 1))
+            yield (*xy, slice(low, min(grid.shape[2], high + 2)))
 
 
 def _copc_header(grid: Grid, crs_wkt: str | None) -> laspy.LasHeader:
@@ -369,7 +369,7 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
         with laspy.open(flat, "w", header=_copc_header(grid, crs_wkt)) as writer, rasterio.open(raster, "w", **profile) as out:
             out.descriptions = tuple(names)
             out.update_tags(OCCLUSION_BAND_M=str(BAND_M), **tags, OCCLUSION_VALUE="occluded / (filled + empty + occluded)")
-            with _stage(resources, "classify + ground"):
+            with _stage(resources, "classify + ground", scratch=work.parent):
                 for (xs, ys), z, counts in blocks:
                     hits = counts[0] > 0
                     local_top = np.where(hits.any(axis=2), z.stop - 1 - hits[:, :, ::-1].argmax(axis=2), -1)
@@ -386,11 +386,11 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
                     seen_total += seen
                     hidden_total += hidden
             size = writer.header.point_count
-        with _stage(resources, "COPC write", children=True) as stage:
+        with _stage(resources, "COPC write", children=True, scratch=work.parent) as stage:
             stage["bytes_read"] = flat.stat().st_size
             _index_copc(flat, copc, size, work)
             stage["bytes_written"] = copc.stat().st_size
-        with _stage(resources, "COG write") as stage:
+        with _stage(resources, "COG write", scratch=work.parent) as stage:
             stage["bytes_read"] = raster.stat().st_size
             stage.update(threads=cog_threads, bands=len(names))
             copy_raster(raster, cog, driver="COG", compress="DEFLATE", predictor=3, blocksize=512,
@@ -437,9 +437,10 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         grid, top, ground, spikes = _crop(full_grid, low, high, dtm, crs_wkt, extent)
         del low, high
         extent.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape))
+    layer_ranges = ray_walk.layers(grid, top, ground)
     with _stage(resources, "plan GPS-time windows") as planning:
-        layout = time_windows.plan(index, grid, time, xyz, time_bounds, slots, min(budget, available_memory()))
-        planning.update(windows=len(layout), estimated_checkpoint_bytes=sum(12 * math.prod(w.shape) for w in layout))
+        layout = time_windows.plan(index, grid, time, xyz, time_bounds, slots, min(budget, available_memory()), layer_ranges)
+        planning.update(windows=len(layout), estimated_checkpoint_bytes=sum(12 * w.count_cells for w in layout))
     identity = identify([*paths, *([dtm] if dtm is not None else [])],
                         [str(copc.resolve()), str(cog.resolve()), voxel, source, quality, list(single_files),
                          [(w.lower, w.upper, [(s.start, s.stop) for s in w.bounds]) for w in layout]], time, xyz)
@@ -457,12 +458,12 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             tags["OCCLUSION_DELIVERED_MISS_FLAG"] = "unavailable" if flag is None else str(flag).lower()
             if flag is not None:
                 tags["OCCLUSION_DELIVERED_MISS_MEDIAN_M"] = str(delivered_check["median_m"])
-        specs = [(number, window.memory, window.shape, (window,)) for number, window in enumerate(layout)]
+        specs = [(number, window.memory, (window.count_cells, 3), (window,)) for number, window in enumerate(layout)]
         specs.sort(key=lambda job: (-layout[job[0]].echoes, -job[1]))
         try:
-            with _stage(resources, "traversal", children=True) as stage:
+            with _stage(resources, "traversal", children=True, scratch=work) as stage:
                 windows = execute(work, specs, slots, time_windows.trace_window, time_windows.init_worker,
-                                  (index, grid, time, xyz, work, single_files), stage)
+                                  (index, grid, time, xyz, work, single_files, layer_ranges), stage)
                 stage["windows"] = [windows[i] | {"estimated_worker_bytes": w.memory} for i, w in enumerate(layout)]
                 stage["bytes_written"] = sum(w["bytes_written"] for w in windows.values())
         except BrokenProcessPool as error:
@@ -471,14 +472,14 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
              TemporaryDirectory(prefix=".occlusion-", dir=cog.parent) as cog_folder:
             merge, staged_cog = Path(folder), Path(cog_folder) / "occlusion.tif"
             staged_copc = merge / "voxels.copc.laz"
-            blocks = time_windows.summed_counts(work, layout, _product_blocks(grid, top, ground))
+            blocks = time_windows.summed_counts(work, layout, _product_blocks(grid, top, ground), layer_ranges)
             products = _write_products(grid, blocks, top, ground, staged_copc, staged_cog,
                                        crs_wkt, tags, merge, resources, slots)
             os.replace(staged_copc, copc)
             os.replace(staged_cog, cog)
         shutil.rmtree(work)
     return {
-        "method": "OccPy voxel traversal (occpy_ls 0.3.0 raytr core)",
+        "method": "OccPy-compatible whole-grid traversal with compact window counts",
         "trajectory": source,
         "single_return_fallback_files": [str(paths[index]) for index in single_files],
         **({"quality": quality} if quality else {}),

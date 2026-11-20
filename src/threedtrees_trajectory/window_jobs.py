@@ -13,7 +13,7 @@ import numpy as np
 
 from .resources import available_memory
 
-SCHEMA = 2
+SCHEMA = 3
 
 
 class JobBusy(ValueError):
@@ -68,26 +68,11 @@ def finished(work, index, shape):
     if marker.is_file() and counts.is_file():
         try:
             array = np.load(counts, mmap_mode="r", allow_pickle=False)
-            if array.shape == (3, *shape) and array.dtype == np.int32:
+            if array.shape == shape and array.dtype == np.uint32:
                 return json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, ValueError, EOFError):
             pass
     return None
-
-
-def save_window(work, index, counts, data):
-    final, marker = window_files(work, index)
-    pending = final.with_suffix(".part")
-    out = np.lib.format.open_memmap(pending, mode="w+", dtype=np.int32, shape=(3, *counts[0].shape))
-    for dest, values in zip(out, counts):
-        dest[...] = values
-    del dest
-    out.flush()
-    del out
-    with pending.open("rb") as stream:
-        os.fsync(stream.fileno())
-    pending.replace(final)
-    atomic_json(marker, data)
 
 
 def execute(work, specs, slots, worker, init, initargs, stage):
