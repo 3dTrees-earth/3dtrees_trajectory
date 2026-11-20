@@ -1,0 +1,41 @@
+run,input,stage,wall_s,cores,peak_ram_gib,scratch_gib
+1807 ULS 53 M,"LAZ, round 2",read/time-sort,9.0,2.4,1.2,1.1
+1807 ULS 53 M,"LAZ, round 2",platform check,0.2,1.0,0.8,1.1
+1807 ULS 53 M,"LAZ, round 2",path estimation,5.2,1.0,0.8,1.2
+1807 ULS 53 M,"LAZ, round 2",grid extent/crop pass,7.7,1.0,0.5,1.2
+1807 ULS 53 M,"LAZ, round 2",route tile spools,7.5,1.0,0.4,2.2
+1807 ULS 53 M,"LAZ, round 2",traversal,65.6,1.0,1.6,2.2
+1807 ULS 53 M,"LAZ, round 2",COPC write,3.4,1.7,0.6,1.2
+1807 ULS 53 M,"LAZ, round 2",COG write,0.4,1.0,0.3,0.5
+2014 ULS multi,"LAZ, round 2",read/time-sort,10.8,2.6,1.5,0.8
+2014 ULS multi,"LAZ, round 2",platform check,0.2,1.0,0.8,1.0
+2014 ULS multi,"LAZ, round 2",path estimation,5.7,1.0,0.8,1.2
+2014 ULS multi,"LAZ, round 2",grid extent/crop pass,10.0,1.0,0.5,1.2
+2014 ULS multi,"LAZ, round 2",route tile spools,26.7,1.0,0.5,2.5
+2014 ULS multi,"LAZ, round 2",traversal,70.2,4.3,16.6,5.6
+2014 ULS multi,"LAZ, round 2",COPC write,7.6,3.4,0.9,6.2
+2014 ULS multi,"LAZ, round 2",COG write,8.6,1.0,0.5,6.3
+1788 MLS 25 M wide,"standardized LAZ, round 3",read/time-sort,4.4,2.3,1.1,
+1788 MLS 25 M wide,"standardized LAZ, round 3",platform check,0.2,1.0,0.8,
+1788 MLS 25 M wide,"standardized LAZ, round 3",path estimation,87.5,1.0,1.0,
+1788 MLS 25 M wide,"standardized LAZ, round 3",grid extent/crop pass,8.5,1.0,0.5,
+1788 MLS 25 M wide,"standardized LAZ, round 3",route tile spools,11.9,1.0,0.4,
+1788 MLS 25 M wide,"standardized LAZ, round 3",traversal,381.6,9.3,48.4,
+1788 MLS 25 M wide,"standardized LAZ, round 3",COPC write,11.5,6.6,1.6,
+1788 MLS 25 M wide,"standardized LAZ, round 3",COG write,14.5,2.1,1.6,
+1844 ULS 678 M,"LAZ, round 2",read/time-sort,101.4,2.5,1.4,15.0
+1844 ULS 678 M,"LAZ, round 2",platform check,0.2,1.0,1.7,15.0
+1844 ULS 678 M,"LAZ, round 2",path estimation,9.8,1.0,1.8,15.2
+1844 ULS 678 M,"LAZ, round 2",grid extent/crop pass,104.9,1.0,0.9,15.2
+1844 ULS 678 M,"LAZ, round 2",route tile spools,134.1,1.0,0.9,32.5
+1844 ULS 678 M,"LAZ, round 2",traversal,614.3,1.9,8.5,18.9
+1844 ULS 678 M,"LAZ, round 2",COPC write,9.1,4.1,1.6,4.4
+1844 ULS 678 M,"LAZ, round 2",COG write,8.5,1.0,0.9,4.4
+2585 ULS 7.0 B,"LAZ, round 2",read/time-sort,1238.8,2.9,2.1,157.5
+2585 ULS 7.0 B,"LAZ, round 2",platform check,0.4,1.0,1.7,157.5
+2585 ULS 7.0 B,"LAZ, round 2",path estimation,10.9,1.0,1.7,157.5
+2585 ULS 7.0 B,"LAZ, round 2",grid extent/crop pass,1676.9,1.0,2.0,157.5
+2585 ULS 7.0 B,"LAZ, round 2",route tile spools,1124.9,8.4,4.8,355.8
+2585 ULS 7.0 B,"LAZ, round 2",traversal,17568.3,9.4,34.5,567.9
+2585 ULS 7.0 B,"LAZ, round 2",COPC write,38.3,6.9,2.3,39.4
+2585 ULS 7.0 B,"LAZ, round 2",COG write,6203.6,1.0,1.1,39.5
