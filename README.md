@@ -22,7 +22,7 @@ formats 0 and 2 have no GPS time and receive a refusal report.
 | File | Contents |
 | --- | --- |
 | `trajectory.csv` | `3dtrees-trajectory/2` with columns `time,x,y,z,roll,pitch,yaw,name`. Time and XYZ use the cloud's clock and coordinates. Attitude and name are empty. |
-| `trajectory.report.json` | Method, quality, reasons for refusing the input, point counts, and job resources. |
+| `trajectory.report.json` | Method, quality, per-file return modes, exit code, refusal reason, point counts, and stage and job resources. |
 | `trajectory.geojson` | Path segments separated at gaps over 5 seconds, thinned to about one vertex per metre. Uses WGS84 when the CRS is known and cloud coordinates otherwise. |
 
 `--report` and `--geojson` override the default paths next to the CSV. The tool creates their parent directories
@@ -35,7 +35,12 @@ existing trajectory CSV.
 | Code | Meaning |
 | --- | --- |
 | `0` | The path was estimated or the delivered-path occlusion products were written. In a combined job, the estimated path may succeed with an occlusion error in the report. |
-| `2` | Invalid arguments, unreadable or unsuitable cloud, static scan, no reliable fit, or an output write failed. The JSON report records the reason when the report path is available and writable. Safe, writable CSV and GeoJSON destinations receive zero-byte files. |
+| `2` | Invalid arguments or data, a static acquisition without provided stations, or a failed output operation. |
+| `3` | GPS time is missing, nonfinite or constant in a moving acquisition. A constant point clock cannot be aligned with a moving delivered path. |
+| `4` | The cloud has no usable estimate and no delivered path to support occlusion. |
+
+For a refusal, the JSON records the reason when the report destination is writable. Safe, writable product
+destinations receive zero-byte files.
 
 Supply one to 65,536 per-file LAS/LAZ strips from one acquisition, or one merged COPC (`.copc.laz`).
 Supply an output CSV for an estimated path. The CSV, GeoJSON, report and input paths must be distinct.
@@ -54,7 +59,7 @@ the cloud's GPS times to fit into a signed 64-bit window index. `--threads` take
 
 Supply both occlusion destinations. When `--trajectory` is supplied, occlusion uses that path. With no
 `-o` the tool checks the cloud and writes the occlusion products and report without fitting a path.
-The delivered CSV starts with `time,x,y,z`, optionally preceded by `#` metadata. It needs at least two
+A delivered moving-path CSV starts with `time,x,y,z`, optionally preceded by `#` metadata. It needs at least two
 positions, finite coordinates, and unique timestamps in the cloud's GPS clock and coordinate system.
 Resolve week seconds versus adjusted GPS time before running. Both modes require a moving sensor.
 
@@ -80,8 +85,8 @@ occlusion error both destinations are zero bytes and the report gives the reason
 still return its estimated trajectory. The report includes traversal counts, in-range class totals,
 and the pooled occluded share per height band.
 
-The CLI decodes each source point once for the trajectory sample and occlusion. It reads COPC spatial
-nodes and records compact echoes in scratch. From those records, it derives ground and canopy extents and routes
+The CLI normally decodes the source once for the trajectory sample and occlusion. It reads COPC
+spatial nodes and records compact echoes in scratch. Testing a fallback can read an affected file again. From those records, it derives ground and canopy extents and routes
 whole pulses to each buffered XY tile they touch. Separated returns are joined by GPS time, source and scanner
 channel within each input file. Each tile uses its own local ground and canopy envelope on the original voxel
 lattice. Traversal keeps the vegetation band from ground minus 1 m to canopy top plus 1 m. The products cap
@@ -126,14 +131,15 @@ datasets before scheduling a job.
 
 | Input evidence | Method |
 | --- | --- |
-| Enough multi-return pulses with GPS time | `lines` fits the position and velocity in each time window from the line through each pulse's first and last returns. |
-| Usable scan angles and GPS time | `scan_angle` uses each point's angle off nadir. It assumes a line scanner in level flight. |
-| Too little geometric information for either method | The report asks for the delivered trajectory. |
+| Enough multi-return pulses with GPS time | `lines` fits position and velocity in each window using pulse endpoints. Pairing uses time, point source and scanner channel within each file. |
+| Too many unpaired LAS/LAZ returns | The reader tries a 1 µs time tolerance for complete, unique return sequences on the same source and channel. |
+| Usable scan angles and GPS time | `scan_angle` fits the angle off nadir, assuming a level line scanner. If pairing failed, the affected file goes to the single-return traversal. |
+| A delivered path in the cloud's clock and CRS | Occlusion uses the delivered positions. An estimated trajectory is optional. |
+| Too little geometric information for either estimator | The report asks for the delivered trajectory. |
 
 Line fits that miss their pulse lines by more than ten times the median, with a threshold of at least 0.25 m, are
 dropped. The tool also drops positions over 1 m from the path described by nearby fits. The line quality labels are
-`good` through a 0.1 m median miss and `rough` through 0.5 m. A line estimate above 0.5 m is refused
-as unreliable. Scan-angle fits are labelled `rough`. On the archived 3Dtrees comparison, most YellowScan multi-return paths were accurate to a few
+`good` through a 0.1 m median miss and `rough` through 0.5 m. A line estimate above 0.5 m falls back to scan angles if available. Scan-angle fits are labelled `rough`. On the archived 3Dtrees comparison, most YellowScan multi-return paths were accurate to a few
 centimetres. Scan-angle estimates had about 1 m horizontal error on RIEGL and DJI flights and about 8 m on
 YellowScan.
 
@@ -148,8 +154,9 @@ the path tool's scope.
 - The reader decodes up to five million points per batch. The job uses up to `GALAXY_SLOTS` or the
   lower `--threads` limit for decoding and tile workers, also capped by CPU affinity and the cgroup v2
   quota. The default is eight slots. The path solver uses single-threaded numerical reductions.
-- COPC trajectory estimation orders the sampled GPS-time groups by time, source, scanner channel and
-  return number. Its temporary sort uses 38 bytes per candidate echo, including contiguous time keys.
+- COPC uses lazrs to decode hierarchy nodes in parallel within the job slots, with at most 1,024 nodes,
+  128 MiB of compressed data, and five million points per batch. It then orders the sampled GPS-time
+  groups by time, source, scanner channel and return number. Its temporary sort uses 38 bytes per candidate echo, including contiguous time keys.
   Pulse population counts from thinned COPC inputs are estimates and carry a flag in the report.
   The defaults retain approximately 40 million multi-return and 10 million single-return pulses,
   or 40 million single-return pulses for single-return acquisitions. `--full` explicitly samples
@@ -159,7 +166,7 @@ the path tool's scope.
   windows. For acquisitions above the native 32-bit echo limit, tile spools use lossless compressed
   blocks to limit scratch use as buffers duplicate echoes. Large LAS/LAZ inputs route separate strips
   concurrently, and large COPC inputs join independent hash partitions concurrently. Both use the job
-  caps. Ambiguous or incomplete return sequences are reported as skipped echoes.
+  caps. The report records unpaired echoes and the files traced in single-return mode.
   Each durable tile uses 12 bytes per core voxel for the three count arrays until merge.
 - `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements
   when available. `stages` records wall, self and child CPU, peak process RSS and I/O where available.
@@ -274,6 +281,8 @@ uv pip install -e '.[test]'
 .venv/bin/python -m pytest -q
 docker build -t 3dtrees_trajectory:dev .
 ```
+
+The Dockerfile pins both base image digests, the Untwine and system Expat versions, and the Linux Python runtime packages.
 
 Tests generate small LAS/LAZ clouds with known positions and verify the coordinates, refusals, resource reporting,
 and byte-for-byte stability across decoder thread counts.
