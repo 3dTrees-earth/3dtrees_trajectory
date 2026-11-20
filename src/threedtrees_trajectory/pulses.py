@@ -68,6 +68,7 @@ class CloudInfo:
     files: list[str]
     kept_every: tuple[int, int] = (1, 1)  # (multi-return, single-return) pulse strides
     points_read: int = 0
+    read_workers: int = 1
     incomplete_multi_pulses: int = 0
     multi_pulses: int = 0
     joined_out_of_order_points: int = 0
@@ -316,6 +317,10 @@ def _single_returns(chunk):
     return chunk
 
 
+_PARTIAL_COUNTS = ("incomplete_multi_pulses", "multi_pulses", "joined_out_of_order_points",
+                   "fragment_echoes", "complete_multi_echoes", "unpaired_multi_echoes")
+
+
 class _FilePulses:
     """Keep one file's original and recovered endpoints until its return mode is known."""
 
@@ -334,6 +339,16 @@ class _FilePulses:
         if self.stray_count > MAX_STRAY and not self.stray_limit_exceeded:
             self.stray.columns.clear()
             self.stray_limit_exceeded = True
+
+    def append_batch(self, part):
+        self.stray_count += part.stray_count
+        self.stray_limit_exceeded = part.stray_limit_exceeded or self.stray_count > MAX_STRAY
+        self.counts += part.counts
+        self.pulses.extend(part.pulses)
+        if not self.stray_limit_exceeded:
+            self.stray.extend(part.stray)
+        for key in _PARTIAL_COUNTS:
+            setattr(self.info, key, getattr(self.info, key) + getattr(part.info, key))
 
     def finish(self, stride):
         info = self.info
@@ -366,10 +381,14 @@ def _fallback_chunks(path, mode, copc):
             yield _repair_times(chunk)[0]
 
 
+def _strides(points, full, max_multi, max_single):
+    return (1, 1) if full else (max(1, -(-points // max_multi)), max(1, -(-points // max_single)))
+
+
 def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int = MAX_SINGLE,
                 full: bool = False, *, info: CloudInfo | None = None, prepared=None,
                 scratch: Path | None = None, resources=None, scan_index=None,
-                copc_threads: int | None = None, _selection=None) -> tuple[Pulses, CloudInfo]:
+                threads: int | None = None, _selection=None) -> tuple[Pulses, CloudInfo]:
     """Build pulse endpoints from strips or from a COPC whose sampled echoes are ordered by time."""
     info = CloudInfo.from_paths(paths) if info is None else info
     if len(paths) > np.iinfo(np.uint16).max + 1:
@@ -407,9 +426,9 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
         with TemporaryDirectory(dir=directory, prefix=".copc-sort-") as folder:
             with (resources.stage("COPC sample read/sort") if resources else nullcontext({})) as stage:
                 sorted_input = TimeSortedCopc(path, Path(folder), CHUNK, select=selection,
-                                                      spatial=copc_threads is not None)
-                if copc_threads is not None:
-                    stage.update(decoder="lazrs COPC hierarchy nodes", decoder_threads=copc_threads,
+                                                      spatial=threads is not None)
+                if threads is not None:
+                    stage.update(decoder="lazrs COPC hierarchy nodes", decoder_threads=threads,
                                  decode_batch_max_points=CHUNK, decode_batch_max_compressed_bytes=COPC_BATCH_BYTES,
                                  decode_batch_max_nodes=COPC_BATCH_NODES)
                 if sorted_input.points_read != declared_points:
@@ -418,7 +437,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                              points_read=sorted_input.points_read, sampled_echoes=sorted_input.points_spooled)
             return read_pulses(paths, max_multi, max_single, full, info=info, prepared=sorted_input,
                                scratch=scratch, resources=resources, _selection=selection,
-                               scan_index=scan_index)
+                               scan_index=scan_index, threads=threads)
 
     origin = np.floor(np.min(origins, axis=0) / 1000) * 1000
     crs = None
@@ -464,26 +483,44 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                     if time_min == time_max:
                         raise UnusableTime("GPS time must vary across the input points. "
                                            "A moving delivered path cannot be matched to a constant point clock.")
-                chunks = prepared.chunks() if prepared is not None else pulse_chunks(point_chunks(path, CHUNK), CHUNK)
-                for chunk in chunks:
-                    if _selection is None:
-                        info.points_read += len(chunk)
-                    if scan_index is not None:
-                        scan_index.observe(index, chunk)
+                parallel = None
+                if prepared is None and (threads or 1) > 1 and header.point_count >= 2 * CHUNK:
+                    from .parallel_read import SerialReadRequired, collect_ranges, probe_single_returns
+
+                    strides = info.kept_every
                     if first_chunk:
-                        looks_single = (_looks_single_return(chunk) if _selection is None
-                                        else _selection.looks_single(prepared))
-                        single_limit = MAX_SINGLE_ONLY if looks_single else max_single
-                        multi_every = 1 if full else max(1, -(-info.points // max_multi))
-                        single_every = 1 if full else max(1, -(-info.points // single_limit))
-                        info.kept_every = (multi_every, single_every)
-                        info.population_counts_estimated = _selection is not None and info.kept_every != (1, 1)
-                        first_chunk = False
-                    low, high = float(chunk.gps_time.min()), float(chunk.gps_time.max())
-                    if not np.isfinite([low, high]).all():
-                        raise UnusableTime("GPS times must be finite.")
-                    time_min, time_max = min(time_min, low), max(time_max, high)
-                    local.collect(chunk, index, shift, info.kept_every, prepared is not None, _selection is not None)
+                        looks_single = probe_single_returns(path, min(PROBE, CHUNK))
+                        strides = _strides(info.points, full, max_multi, MAX_SINGLE_ONLY if looks_single else max_single)
+                    try:
+                        parallel = collect_ranges(path, index, header.point_count, CHUNK, header.point_format.size,
+                                                  shift, strides, scan_index, threads, min(PROBE, CHUNK))
+                    except (SerialReadRequired, UnusableTime):
+                        pass
+                if parallel is not None:
+                    local, time_min, time_max, points, slots = parallel
+                    info.points_read += points
+                    info.read_workers = max(info.read_workers, slots)
+                    info.kept_every = strides
+                    first_chunk = False
+                else:
+                    chunks = prepared.chunks() if prepared is not None else pulse_chunks(point_chunks(path, CHUNK), CHUNK)
+                    for chunk in chunks:
+                        if _selection is None:
+                            info.points_read += len(chunk)
+                        if scan_index is not None:
+                            scan_index.observe(index, chunk)
+                        if first_chunk:
+                            looks_single = (_looks_single_return(chunk) if _selection is None
+                                            else _selection.looks_single(prepared))
+                            single_limit = MAX_SINGLE_ONLY if looks_single else max_single
+                            info.kept_every = _strides(info.points, full, max_multi, single_limit)
+                            info.population_counts_estimated = _selection is not None and info.kept_every != (1, 1)
+                            first_chunk = False
+                        low, high = float(chunk.gps_time.min()), float(chunk.gps_time.max())
+                        if not np.isfinite([low, high]).all():
+                            raise UnusableTime("GPS times must be finite.")
+                        time_min, time_max = min(time_min, low), max(time_max, high)
+                        local.collect(chunk, index, shift, info.kept_every, prepared is not None, _selection is not None)
                 if time_min == time_max:
                     raise UnusableTime("GPS time must vary across the input points. "
                                        "A moving delivered path cannot be matched to a constant point clock.")
@@ -519,8 +556,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                 angles = local.has_angles()
                 info.return_modes.append({"file": str(path), "index": index, "mode": mode, "has_scan_angle": angles,
                                           "unpaired_multi_echoes": local.info.unpaired_multi_echoes})
-                for key in ("incomplete_multi_pulses", "multi_pulses", "joined_out_of_order_points",
-                            "fragment_echoes", "complete_multi_echoes", "unpaired_multi_echoes"):
+                for key in _PARTIAL_COUNTS:
                     setattr(info, key, getattr(info, key) + getattr(local.info, key))
                 counts += local.counts
                 pulses.extend(local.pulses)

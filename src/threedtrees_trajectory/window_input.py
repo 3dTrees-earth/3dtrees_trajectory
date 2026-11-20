@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import laspy
 import numpy as np
 
-from .cloud import LAZ_FIELDS, is_copc, point_chunks, pulse_chunks
+from .cloud import is_copc, open_cloud, point_chunks, pulse_chunks, read_points_exact
 from .pulses import TIME_TOLERANCE_S, _repair_times
 
 INDEX_POINTS = 200_000
@@ -38,6 +38,7 @@ class ScanIndex:
         self.summaries = [[] for _ in paths]
         self.repaired = set()
         self.copc = False
+        self.source_identity = None
 
     def observe(self, index, chunk):
         if self.copc:
@@ -119,15 +120,16 @@ class ScanIndex:
         """Read selected blocks in scanner order, coalescing consecutive record ranges."""
         if not blocks:
             return
-        arguments = dict(laz_backend=laspy.LazBackend.Lazrs, decompression_selection=LAZ_FIELDS)
-        with laspy.open(self.paths[file], **arguments) as reader:
+        with open_cloud(self.paths[file], sequential=True) as reader:
             if file in self.repaired:
                 for block in blocks:
                     reader.seek(block.start)
-                    yield _repair_times(_read(reader, block.stop - block.start))[0]
+                    yield _repair_times(read_points_exact(reader, block.stop - block.start))[0]
+            elif group_pulses:
+                for contiguous in _contiguous_ranges(blocks):
+                    yield from pulse_chunks(_read_ranges(reader, contiguous), TRACE_BATCH)
             else:
-                chunks = _read_ranges(reader, blocks)
-                yield from pulse_chunks(chunks, TRACE_BATCH) if group_pulses else chunks
+                yield from _read_ranges(reader, blocks)
 
 
 def _surface_summary(chunk, grid):
@@ -160,11 +162,13 @@ def _surface_summary(chunk, grid):
     return columns.astype(np.uint32) if nx * ny <= 2**32 else columns, low, high
 
 
-def _read(reader, count):
-    chunk = reader.read_points(count)
-    if len(chunk) != count:
-        raise ValueError(f"Truncated point data: expected {count:,} records, read {len(chunk):,}.")
-    return chunk
+def _contiguous_ranges(blocks):
+    start = 0
+    for number in range(1, len(blocks)):
+        if blocks[number - 1].stop != blocks[number].start:
+            yield blocks[start:number]
+            start = number
+    yield blocks[start:]
 
 
 def _read_ranges(reader, blocks):
@@ -172,10 +176,10 @@ def _read_ranges(reader, blocks):
         if reader.points_read != block.start:
             reader.seek(block.start)
         # Each indexed block is independently bounded. The pulse reader holds the tail.
-        yield _read(reader, block.stop - block.start)
+        yield read_points_exact(reader, block.stop - block.start)
 
 
-# Compact incomplete echoes only. Complete pulses go straight to traversal.
+# Compact echo records for pulse grouping. Only fragments are retained between batches.
 ECHO = np.dtype([("time", "<f8"), ("x", "<i4"), ("y", "<i4"), ("z", "<i4"),
                  ("source", "<u2"), ("returns", "u1"), ("channel", "u1")])
 

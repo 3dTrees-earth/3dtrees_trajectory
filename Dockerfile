@@ -23,9 +23,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libexpat1=2.5.0-1+deb12u5 \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /src/requirements.txt
-RUN python -m pip install --no-cache-dir --only-binary=:all: --no-deps -r /src/requirements.txt \
-    # Only OccPy's compiled voxel traversal (raytr) is used; its Python layer would pull open3d, pyvista and OpenCV.
-    && python -m pip install --no-cache-dir --only-binary=:all: --no-deps occpy_ls==0.3.0
+RUN python -m pip install --no-cache-dir --only-binary=:all: --no-deps -r /src/requirements.txt
 COPY --from=untwine /tmp/untwine /opt/untwine
 COPY src/ /src/
 COPY --from=ray-walker /tmp/_ray_walk.so /src/threedtrees_trajectory/_ray_walk.so

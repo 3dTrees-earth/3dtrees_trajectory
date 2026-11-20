@@ -14,9 +14,9 @@ dependencies = [
   "pyproj==3.7.2",  # laspy needs it to read the CRS from the header
   "rasterio==1.4.3",  # occlusion COG
 ]
-# Occlusion also needs OccPy's compiled voxel traversal and untwine (for the COPC):
-#   pip install --no-deps occpy_ls==0.3.0   (its Python layer would pull open3d, pyvista and OpenCV)
-#   untwine 1.5.1 from conda-forge at /opt/untwine/bin/untwine, or set TRAJECTORY_UNTWINE
+# The package builds its C++17 ray walker. Occlusion also needs Untwine 1.5.1
+# at /opt/untwine/bin/untwine, or an executable set in TRAJECTORY_UNTWINE.
+# The whole-grid reference tests use pip install --no-deps occpy_ls==0.3.0.
 
 [project.optional-dependencies]
 test = ["pytest==8.3.4"]

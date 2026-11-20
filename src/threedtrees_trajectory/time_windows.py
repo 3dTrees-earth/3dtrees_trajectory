@@ -5,12 +5,13 @@ import math
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from time import perf_counter, process_time
 
 import numpy as np
 
 from .ray_walk import Columns, Walker, sum_block
-from .resources import _rss
+from .resources import _proc_rss, _rss
 from .window_input import TRACE_BATCH, TRACE_LIMIT, group_multi, pack_echoes
 from .window_jobs import atomic_json, window_files
 
@@ -82,6 +83,8 @@ def _plan_window(index, grid, time, xyz, lower, upper, layer_ranges):
 
 
 def plan(index, grid, time, xyz, time_bounds, slots, budget, layer_ranges):
+    if budget <= WORKING_BYTES:
+        raise ValueError("The occlusion job lacks memory for one GPS-time worker.")
     lower, upper = time_bounds
     samples = [block.sample for blocks in index.blocks for block in blocks
                if block.sample is not None and block.overlaps(lower, upper)]
@@ -110,14 +113,18 @@ def plan(index, grid, time, xyz, time_bounds, slots, budget, layer_ranges):
     return windows
 
 
-def init_worker(index, grid, time, xyz, work, single_files, layer_ranges):
+def init_worker(index, grid, time, xyz, work, single_files, layer_ranges, coverage):
     global _CONTEXT
-    _CONTEXT = index, grid, time, xyz, work, single_files, layer_ranges
+    _CONTEXT = index, grid, time, xyz, work, single_files, layer_ranges, coverage
 
 
 def trace_window(number, window):
-    index, grid, time, xyz, work, single_files, layer_ranges = _CONTEXT
+    index, grid, time, xyz, work, single_files, layer_ranges, coverage = _CONTEXT
     start_wall, start_cpu = perf_counter(), process_time()
+    try:
+        Path("/proc/self/clear_refs").write_text("5", encoding="ascii")
+    except OSError:
+        pass
     columns = Columns.from_bounds(window.bounds, *layer_ranges)
     destination, marker = window_files(work, number)
     pending = destination.with_suffix(".part")
@@ -134,27 +141,32 @@ def trace_window(number, window):
             keep = (t >= window.lower) & (t < window.upper)
             if not keep.any():
                 continue
-            if file in single_files:
-                single = keep
-                keep = np.zeros(len(t), bool)
-            else:
-                single = keep & (np.asarray(chunk.return_number) <= 1) & (np.asarray(chunk.number_of_returns) <= 1)
-                keep &= ~single
+            force_single = file in single_files
+            one = (np.ones(len(t), bool) if force_single else
+                   (np.asarray(chunk.return_number) <= 1) & (np.asarray(chunk.number_of_returns) <= 1))
+            single = keep & one
             if single.any():
                 seconds = t[single]
                 coords = [axis[single] * scale + offset + grid.voxel * 1e-7 for axis, scale, offset in
                           zip((chunk.X, chunk.Y, chunk.Z), scales, offsets)]
                 tracer.add(coords, _positions(seconds, time, xyz))
                 traced += len(seconds)
-            if keep.any():
-                records = pack_echoes(chunk, keep)
+            if (keep & ~one).any():
+                # Group in acquisition order before selecting this window.
+                # Removing other GPS times first can turn separated echoes
+                # into an apparently consecutive multi-return pulse.
+                records = pack_echoes(chunk, ~one & (t >= coverage[0]) & (t < coverage[1]))
                 sizes, complete = group_multi(records, acquisition_order=True)
-                paired = np.repeat(complete, sizes)
+                first = np.cumsum(sizes) - sizes
+                clocks = records["time"][first]
+                selected = (clocks >= window.lower) & (clocks < window.upper)
+                paired = selected & complete
                 if paired.any():
-                    _trace_multi(tracer, records[paired], sizes[complete], scales, offsets, grid.voxel, time, xyz)
-                    traced += int(paired.sum())
-                if not paired.all():
-                    fragments.append(records[~paired])
+                    _trace_multi(tracer, records[np.repeat(paired, sizes)], sizes[paired],
+                                 scales, offsets, grid.voxel, time, xyz)
+                    traced += int(sizes[paired].sum())
+                if (selected & ~complete).any():
+                    fragments.append(records[np.repeat(selected & ~complete, sizes)])
         if fragments:
             records = np.concatenate(fragments)
             fragments.clear()
@@ -181,7 +193,7 @@ def trace_window(number, window):
                 traversed_pulses=traversed, missing_returns=missing,
                 grid_shape=window.shape, grid_voxels=math.prod(window.shape), count_voxels=columns.cells,
                 wall_seconds=perf_counter() - start_wall, cpu_seconds=process_time() - start_cpu,
-                peak_rss_bytes=_rss(), bytes_written=destination.stat().st_blocks * 512)
+                peak_rss_bytes=_proc_rss('self', 'VmHWM') or _rss(), bytes_written=destination.stat().st_blocks * 512)
     atomic_json(marker, data)
     return data
 

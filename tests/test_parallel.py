@@ -43,6 +43,18 @@ def test_reuse_finished_window_after_a_worker_is_killed(tmp_path):
     assert first.stat().st_mtime_ns == committed
 
 
+def test_concurrent_cli_run_preserves_shared_outputs(tmp_path):
+    cloud = tmp_path / "cloud.las"
+    flight(cloud, seconds=2, rate=300)
+    copc, cog = tmp_path / "voxels.copc.laz", tmp_path / "occlusion.tif"
+    path = tmp_path / "path.csv"
+    for product in (copc, cog, path):
+        product.write_bytes(b"owner output")
+    with window_jobs.lock_output(copc):
+        assert main([str(cloud), "-o", str(path), "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 2
+    assert all(product.read_bytes() == b"owner output" for product in (copc, cog, path))
+
+
 @needs_untwine
 def test_parallel_and_sequential_windows_write_identical_products(tmp_path):
     cloud = tmp_path / "flight.las"
@@ -123,12 +135,30 @@ def test_time_window_counts_match_whole_grid(tmp_path, monkeypatch, voxel):
     layers = np.zeros(grid.shape[:2], np.int32), np.full(grid.shape[:2], grid.shape[2], np.int32)
     windows = time_windows.plan(index, grid, time, xyz, bounds, 6, occlusion.DEFAULT_BUDGET, layers)
     assert len(windows) >= 2
-    time_windows.init_worker(index, grid, time, xyz, tmp_path, (), layers)
+    time_windows.init_worker(index, grid, time, xyz, tmp_path, (), layers, bounds)
     stats = [time_windows.trace_window(number, window) for number, window in enumerate(windows)]
     block = tuple(slice(0, size) for size in grid.shape)
     (_, _, summed), = time_windows.summed_counts(tmp_path, windows, [block], layers)
     np.testing.assert_array_equal(summed, expected)
     assert sum(window["traversed_pulses"] for window in stats) == len(time)
+
+
+def test_parallel_record_reads_preserve_order_and_extent(tmp_path, monkeypatch):
+    cloud = tmp_path / "flight.laz"
+    time, _ = flight(cloud, seconds=3, rate=400)
+    monkeypatch.setattr(pulses, "CHUNK", 313)
+    monkeypatch.setattr(pulses, "PROBE", 100)
+    expected_index, _ = occlusion.prepare_index([cloud], 0.5)
+    actual_index, _ = occlusion.prepare_index([cloud], 0.5)
+    expected, serial = read_pulses([cloud], max_multi=700, scan_index=expected_index, threads=1)
+    actual, parallel = read_pulses([cloud], max_multi=700, scan_index=actual_index, threads=4)
+    assert parallel.read_workers == 4 and parallel.points_read == serial.points_read
+    assert parallel.return_modes == serial.return_modes
+    for field in ("time", "first", "last", "returns", "source", "file", "scan_angle"):
+        np.testing.assert_array_equal(getattr(actual, field), getattr(expected, field))
+    clock = time[100], time[-100]
+    for first, second in zip(expected_index.surfaces(*clock, {}), actual_index.surfaces(*clock, {})):
+        np.testing.assert_array_equal(first, second)
 
 
 def test_first_read_surfaces_decode_only_coverage_boundary(tmp_path, monkeypatch):

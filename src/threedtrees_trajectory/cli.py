@@ -6,6 +6,7 @@ import argparse
 import math
 import os
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from struct import error as StructError
 
@@ -38,6 +39,11 @@ def _paths_overlap(first: Path, second: Path) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    with ExitStack() as output_locks:
+        return _run(argv, output_locks)
+
+
+def _run(argv, output_locks) -> int:
     resources = RunResources()
     parser = argparse.ArgumentParser(prog="3dtrees-trajectory", description=__doc__, allow_abbrev=False)
     parser.add_argument("clouds", nargs="*", type=Path, help="standardized LAS/LAZ files from one dataset, in collection order")
@@ -46,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--geojson", type=Path, help="map layer of the path (default next to the CSV)")
     parser.add_argument("--no-platform-check", action="store_true", help="skip static (TLS) cloud detection when estimating a path")
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
-    parser.add_argument("--threads", help="maximum decoding threads and GPS-time window workers (defaults to GALAXY_SLOTS or 8)")
+    parser.add_argument("--threads", help="maximum decoding threads and GPS-time window workers (defaults to GALAXY_SLOTS or 10)")
     parser.add_argument("--full", action="store_true", help="keep all pulses (requires more memory)")
     parser.add_argument("--trajectory", type=Path,
                         help="delivered path (3Dtrees trajectory CSV); used for occlusion instead of estimating one")
@@ -127,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     from .estimate import STATIC_REFUSAL, detect_platform, estimate
     from .output import geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
     from .pulses import CloudInfo, read_pulses
-    from .window_jobs import JobBusy
+    from .window_jobs import JobBusy, lock_output
 
     info = CloudInfo.from_paths(args.clouds)
     pulses = None
@@ -136,9 +142,10 @@ def main(argv: list[str] | None = None) -> int:
     indexed_clouds = None
     if error_message is None:
         try:
-            with resources.stage("read/time-sort") as stage:
+            with resources.stage("read/time-sort", children=True) as stage:
                 work = report_path.resolve().parent
                 if occlusion_paths:
+                    output_locks.enter_context(lock_output(args.occlusion_copc.resolve()))
                     from .occlusion import prepare_index
 
                     try:
@@ -149,8 +156,9 @@ def main(argv: list[str] | None = None) -> int:
                 pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
                                         scratch=work, resources=resources,
                                         scan_index=indexed_clouds[0] if isinstance(indexed_clouds, tuple) else None,
-                                        copc_threads=threads)
-                stage["bytes_read"] = sum(path.stat().st_size for path in args.clouds)
+                                        threads=threads)
+                stage.update(bytes_read=sum(path.stat().st_size for path in args.clouds),
+                             parallel_record_workers=info.read_workers)
             if not len(pulses):
                 raise NoTrajectory("No usable pulses could be reconstructed from the input.")
             evidence = "given"

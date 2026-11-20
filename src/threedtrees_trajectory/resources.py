@@ -36,7 +36,7 @@ def _limit(value: str) -> int | None:
 def decoding_threads(requested: int | None) -> int:
     """Limit work to Galaxy slots, CPU affinity, and any ancestor cgroup v2 quota."""
     configured = _limit(os.environ.get("GALAXY_SLOTS", "")) or None
-    budgets = [requested or configured or 8]
+    budgets = [requested or configured or 10]
     if configured is not None:
         budgets.append(configured)
     if hasattr(os, "sched_getaffinity"):

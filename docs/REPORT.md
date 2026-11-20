@@ -38,13 +38,13 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
 1. **Argument checks** (`cli.py`). Outputs must not overwrite inputs. The voxel size must be 0.05 to 10 m.
    At least one file is needed. A delivered trajectory is only accepted together with occlusion outputs. Any failure
    gives **exit 2**.
-2. **Read and time-sort** (`cli.py`, `pulses.py`). Files are decoded in parallel chunks. GPS time must
+2. **Read and time-sort** (`cli.py`, `pulses.py`). Large files use independently decoded, ordered record ranges. GPS time must
    exist, be finite and vary (`pulses.py`). If not: **exit 3** (`coverage.py`). Returns are
    paired into pulses per file. With no usable pulse: **exit 4** (`cli.py`).
 3. **Platform check** (`cli.py`, `estimate.py`). A static scanner is recognised when one position
    explains all pulse lines within 5 cm, or when ground points pile up 15 times or more around one spot. TLS is
    refused with **exit 2**. The TLS code is on the branch `feat/tls-stations-v1.1`.
-4. **Path estimation** (`cli.py`, `estimate.py`, `solve.py`). The method is chosen per file:
+4. **Path estimation** (`cli.py`, `estimate.py`, `solve.py`). The method is chosen per file, with independent fits started concurrently:
    - multi-return files: the pulse lines (first to last return) meet at the sensor. Method `lines`.
    - single-return files with a scan angle: cone fit on the scan angle. Method `scan_angle`.
    - mixed: lines, with gaps filled from scan angles per file. Method `lines_scan_angle`.
@@ -93,36 +93,36 @@ source records. The stage CSV includes the spatial-spool reference and the histo
 <!-- stages:start -->
 | Stage | 1807 ULS | 1844 ULS | 2014 ULS | 1788 MLS |
 | --- | ---: | ---: | ---: | ---: |
-| Read, reconstruct pulses and index source | 15.0 s / 1.8 cores | — | 16.6 s / 1.9 cores | 6.3 s / 1.9 cores |
-| Path fitting | 2.0 s / 3.4 cores | — | 2.1 s / 3.2 cores | 91.6 s / 1.9 cores |
-| Extent and crop | 0.2 s / 1.0 cores | — | 1.6 s / 1.0 cores | 6.8 s / 0.7 cores |
-| Plan GPS windows | 0.0 s / 1.0 cores | — | 0.1 s / 1.0 cores | 0.2 s / 0.5 cores |
-| Rebuild and trace pulses | 12.7 s / 6.2 cores | — | 43.7 s / 4.9 cores | 67.9 s / 5.2 cores |
-| Merge, classify and write intermediates | 1.0 s / 1.0 cores | — | 11.8 s / 0.7 cores | 38.7 s / 1.0 cores |
-| Write voxel COPC | 3.6 s / 1.6 cores | — | 14.5 s / 1.7 cores | 13.4 s / 5.7 cores |
-| Write height-band COG | 0.4 s / 1.0 cores | — | 4.7 s / 1.4 cores | 14.4 s / 2.2 cores |
+| Read, reconstruct pulses and index source | 4.7 s / 6.5 cores | 38.5 s / 8.2 cores | 7.6 s / 5.1 cores | 4.6 s / 3.3 cores |
+| Path fitting | 1.0 s / 5.8 cores | 5.2 s / 3.4 cores | 1.0 s / 6.1 cores | 96.9 s / 2.4 cores |
+| Extent and crop | 0.2 s / 1.0 cores | 0.8 s / 1.0 cores | 1.6 s / 1.0 cores | 4.8 s / 1.0 cores |
+| Plan GPS windows | 0.0 s / 1.0 cores | 0.2 s / 1.0 cores | 0.1 s / 1.0 cores | 0.1 s / 1.0 cores |
+| Rebuild and trace pulses | 10.7 s / 7.3 cores | 139.2 s / 7.5 cores | 24.6 s / 8.4 cores | 43.0 s / 8.0 cores |
+| Merge, classify and write intermediates | 1.1 s / 1.0 cores | 9.0 s / 1.0 cores | 9.1 s / 1.0 cores | 39.3 s / 1.0 cores |
+| Write voxel COPC | 3.5 s / 1.7 cores | 9.6 s / 4.0 cores | 7.7 s / 3.5 cores | 13.0 s / 5.9 cores |
+| Write height-band COG | 0.5 s / 1.0 cores | 4.0 s / 2.2 cores | 3.8 s / 2.3 cores | 18.0 s / 1.6 cores |
 <!-- stages:end -->
 
 CPU use is CPU seconds divided by wall seconds. Traversal includes source seeks, decoding, pulse grouping,
 the ray walk and checkpoint writes. The first read reduces per-column minima and maxima. Once the path is
 known, preparation decodes only indexed ranges that straddle the accepted time limits. The measurements
-separate preparation from the streaming traversal's own source reads.
+separate preparation from the streaming traversal's own source reads. Extent preparation decoded one
+200,000-record boundary range on 1807 and zero records on 1844, 2014 and 1788.
 
 ## 4. Streaming evaluation and speed-up
 
 <!-- comparison:start -->
 | Dataset | Spatial spool wall / CPU | GPS windows wall / CPU | Peak RSS, GiB | Peak scratch, GiB | Peak RSS per window, GiB |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1807 | 103 s / 1.2 cores | 36 s / 3.4 cores | 1.57 → 1.67 | 2.17 → 0.15† | 0.59 |
-| 1844 | 994 s / 1.7 cores | — | 8.48 → — | 32.49 | — |
-| 2014 | 145 s / 2.8 cores | 97 s / 3.1 cores | 16.81 → 4.89 | 6.48 → 0.96† | 0.91 |
-| 1788 | 579 s / 6.6 cores | 242 s / 2.9 cores | 48.42 → 8.69 | — → 2.24† | 0.72 |
+| 1807 | 103 s / 1.2 cores | 22 s / 5.5 cores | 1.57 → 3.83 | 2.17 → 0.49 | 0.12 |
+| 1844 | 1061 s / 1.7 cores | 208 s / 6.9 cores | 8.69 → 5.84 | 32.49 → 3.25 | 0.31 |
+| 2014 | 145 s / 2.8 cores | 57 s / 5.3 cores | 16.81 → 4.66 | 6.48 → 2.36 | 0.49 |
+| 1788 | 597 s / 6.6 cores | 223 s / 3.3 cores | 45.66 → 8.87 | 28.96 → 6.32 | 0.48 |
 <!-- comparison:end -->
 
 The RSS column shows the maximum of the largest process and the sampled sum of active worker RSS. Scratch
-uses allocated blocks. Spatial-spool scratch for the raw replays comes from the archived matching-input
-runs. † Checkpoint files alone, a lower bound on scratch. The first GPS-window measurements shared the
-capped CPU set with a baseline replay.
+uses samples of allocated blocks. Spatial-spool scratch for the raw replays comes from archived matching-input
+runs. File cache is accounted for separately by the capped job scope.
 
 ### Product equality
 
@@ -131,22 +131,54 @@ capped CPU set with a baseline replay.
 | 1807 | Round 4, one whole grid | 1,445,111 / 2,526,490 / 212,799 / 22 | 0 | 0 | 0 |
 | 2014 | Round 4, one whole grid, 64 GiB planning budget | 6,951,441 / 11,182,745 / 1,001,850 / 24,589 | 0 | 0 | 0 |
 
-The trajectory CSV, GeoJSON and COG bytes agree for both controls. COPC equality compares voxel coordinates,
-classes, hit/pass/hidden counts and derived fields. Untwine can encode equivalent voxels in different COPC
-hierarchies. The 2014 compressed COPC files have different bytes despite equal decoded fields.
+The trajectory CSV, GeoJSON and COG bytes agree for both controls. The complete decoded COPC point
+records also agree byte for byte when sorted by voxel centre. The compressed files differ after Untwine
+indexing.
+
+| Dataset | Round-4 spool reference | Filled / empty / occluded / unobserved change | COG cells differing | Max COG difference | Old-only / new-only COPC centres |
+| --- | --- | --- | ---: | ---: | ---: |
+| 1807 | 1 grid | 0 / 0 / 0 / 0 | 0 | 0 | 0 / 0 |
+| 1844 | 2 spatial tiles | −1 / +1 / 0 / 0 | 0 | 0 | 1 / 0 |
+| 2014 | 8 spatial tiles | 0 / 0 / 0 / 0 | 11 | 1.0 | 6 / 6 |
+
+The prior tile cores were traced with local grid boundaries and buffered inputs. The full-grid controls
+isolate equivalence from that clipping. The 1844 difference is one previously filled centre at
+(366537.75, 5977455.25, 9.25). The 2014 COG differences against spatial tiles disappear when the
+reference uses the same round-4 whole grid.
 
 ### GPS windows on a wide strip
 
 The initial rectangular window grids exceeded the budget on 2014 and 1788. The compiled walker retains the
 whole-grid entry and lattice calculations. Each worker stores counts only for the ground-to-canopy layers
 in its indexed reach. The 1788 grid spans 2,000 × 2,000 × 1,278 voxels. Its widest planned windows each
-reserved 67.1 million count cells and finished within the 16 GiB per-window budget. The scheduler bisects
-any window whose estimated bytes or echo count exceed its budget.
+reserved 67.1 million count cells and finished within the 16 GiB per-window budget. The largest
+scanner-order ULS strip checked in local staging was 2014 at 658 × 740 m. Its per-window process
+RSS and the 1788 measurements are in the comparison table. The scheduler bisects a window when
+its estimated bytes or echo count exceed its budget.
 
 Use direct GPS-window streaming for scanner-order LAS/LAZ. Pulse grouping runs inside each worker for all
 job sizes. The output merge adds counts blockwise before assigning classes. Interleaved GPS times can make
 several workers decode the same compressed record range. Half-open time bands assign each retained echo to
-one window. Time bands can therefore save scratch even when the underlying decoder does repeated work.
+one window. The 1788 traversal decoded 41.1 million records for 24.7 million echoes traced.
+
+### Read parallelism
+
+<!-- read:start -->
+| Dataset | Spatial-spool first read | GPS-window first read | Record-range workers |
+| --- | ---: | ---: | ---: |
+| 1807 | 9.6 s / 2.3 cores | 4.7 s / 6.5 cores | 10 |
+| 1844 | 102.3 s / 2.5 cores | 38.5 s / 8.2 cores | 10 |
+| 2014 | 11.1 s / 2.5 cores | 7.6 s / 5.1 cores | 10 |
+| 1788 | 4.6 s / 2.2 cores | 4.6 s / 3.3 cores | 5 |
+<!-- read:end -->
+
+The old path used a native parallel LAZ decoder inside a sequential Python batch pipeline. The 2014
+control spent 3.27 s decoding at 6.1 cores, 3.50 s reconstructing sampled pulses and 1.65 s writing
+the source echo spool. Each batch waited for those operations before the next decode. Independent
+record-range workers now decode, reconstruct and index their own ranges. The reader joins their pulse
+columns in scanner order and carries the equal-time tail across range boundaries. The read figures
+include worker startup, result collection and the ordered merge. The averages reached 8.2 cores
+on 1844 and 5.1 on 2014 with ten workers.
 
 The local 2585 COPC remains a historical control. Its previous 7.0 billion point spool run routed 28.3
 billion echoes and peaked at 568 GiB scratch. A comparable scanner-order standardized 2585 collection was

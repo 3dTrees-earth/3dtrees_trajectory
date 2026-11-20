@@ -234,12 +234,24 @@ def prepare_index(paths, voxel):
                 index = ScanIndex(paths, None)
                 index.copc = True
                 return index, None
+    source_identity = _source_identity(paths)
     grid, crs_wkt = _grid(paths, voxel)
     nx, ny, nz = grid.shape
     if nx * ny * 96 > HARD_BUDGET - time_windows.WORKING_BYTES or nz > np.iinfo(np.int32).max:
         raise ValueError(f"The occlusion extent {grid.shape} exceeds the 64 GiB surface budget; "
                          "increase --voxel or restrict the acquisition.")
-    return ScanIndex(paths, grid), crs_wkt
+    index = ScanIndex(paths, grid)
+    index.source_identity = source_identity
+    return index, crs_wkt
+
+
+def _source_identity(paths):
+    return identify(paths, "source", np.empty(0), np.empty(0))
+
+
+def _validate_source(index):
+    if _source_identity(index.paths) != index.source_identity:
+        raise ValueError("The LAS/LAZ collection changed during the run. Retry with stable source files.")
 
 
 def _crop(grid, low, high, dtm, crs_wkt, stats):
@@ -433,6 +445,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         index, crs_wkt = prepared
     if index.copc:
         raise ValueError("Occlusion requires scanner-order LAS/LAZ. Supply the standardized files instead of COPC.")
+    _validate_source(index)
     full_grid = index.grid
     time_bounds = time[0] - TIME_MARGIN, np.nextafter(time[-1] + TIME_MARGIN, np.inf)
     with _stage(resources, "finalize extent/crop") as extent:
@@ -467,7 +480,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         try:
             with _stage(resources, "traversal", children=True, scratch=work) as stage:
                 windows = execute(work, specs, slots, time_windows.trace_window, time_windows.init_worker,
-                                  (index, grid, time, xyz, work, single_files, layer_ranges), stage)
+                                  (index, grid, time, xyz, work, single_files, layer_ranges, time_bounds), stage)
                 stage["windows"] = [windows[i] | {"estimated_worker_bytes": w.memory} for i, w in enumerate(layout)]
                 stage["bytes_written"] = sum(w["bytes_written"] for w in windows.values())
         except BrokenProcessPool as error:
@@ -479,6 +492,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             blocks = time_windows.summed_counts(work, layout, _product_blocks(grid, top, ground), layer_ranges)
             products = _write_products(grid, blocks, top, ground, staged_copc, staged_cog,
                                        crs_wkt, tags, merge, resources, slots)
+            _validate_source(index)
             os.replace(staged_copc, copc)
             os.replace(staged_cog, cog)
         shutil.rmtree(work)

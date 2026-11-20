@@ -150,7 +150,8 @@ the path tool's scope.
 ## Resources and limits
 
 - The reader decodes up to five million points per batch. The job caps decoding, path fitting and window workers
-  at the configured `GALAXY_SLOTS` or `--threads`, CPU affinity and cgroup quota. The path solver runs independent
+  at the configured `GALAXY_SLOTS` or `--threads`, CPU affinity and cgroup quota. The default is ten slots.
+  Large files decode independent record ranges and merge them in scanner order. The path solver runs independent
   fits concurrently and merges them in order.
 - The defaults retain approximately 40 million multi-return and 10 million single-return pulses, or 40 million
   single-return pulses for single-return acquisitions. `--full` keeps every pulse and uses memory proportional

@@ -24,8 +24,9 @@ def is_copc(header) -> bool:
     return any(type(vlr).__name__ == "CopcInfoVlr" for vlr in header.vlrs)
 
 
-def open_cloud(path: Path) -> laspy.LasReader:
-    reader = laspy.open(path, decompression_selection=LAZ_FIELDS)
+def open_cloud(path: Path, *, sequential: bool = False) -> laspy.LasReader:
+    backend = laspy.LazBackend.Lazrs if sequential else None
+    reader = laspy.open(path, laz_backend=backend, decompression_selection=LAZ_FIELDS)
     if is_copc(reader.header):
         # Variable-sized COPC chunks cannot be decoded by laspy's parallel LAS reader.
         reader.laz_backend = laspy.LazBackend.Lazrs
@@ -59,6 +60,13 @@ def _copc_chunks(path: Path, size: int):
             yield reader._fetch_and_decompress_points_of_nodes(batch)
 
 
+def read_points_exact(reader, count):
+    chunk = reader.read_points(count)
+    if len(chunk) != count:
+        raise ValueError(f"Truncated point data: expected {count:,} records, read {len(chunk):,}.")
+    return chunk
+
+
 def point_chunks(path: Path, size: int, *, spatial: bool = False):
     if spatial:
         yield from _copc_chunks(path, size)
@@ -66,10 +74,7 @@ def point_chunks(path: Path, size: int, *, spatial: bool = False):
         with open_cloud(path) as reader:
             while reader.points_read < reader.header.point_count:
                 expected = min(size, reader.header.point_count - reader.points_read)
-                chunk = reader.read_points(expected)
-                if len(chunk) != expected:
-                    raise ValueError(f"Truncated point data: expected {expected:,} records, read {len(chunk):,}.")
-                yield chunk
+                yield read_points_exact(reader, expected)
 
 
 def pulse_chunks(chunks, size: int, *, time_tolerance: float = 0):

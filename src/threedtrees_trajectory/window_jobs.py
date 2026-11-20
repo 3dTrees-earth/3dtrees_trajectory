@@ -13,7 +13,7 @@ import numpy as np
 
 from .resources import available_memory
 
-SCHEMA = 3
+SCHEMA = 4
 
 
 class JobBusy(ValueError):
@@ -43,6 +43,18 @@ def lock_job(work):
         yield
     finally:
         os.close(fd)
+
+
+@contextmanager
+def lock_output(output):
+    """Serialize CLI publication for a single pair of occlusion destinations."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    work = output.parent / f".trajectory-output-{identify([], str(output), np.empty(0), np.empty(0))}"
+    with lock_job(work):
+        try:
+            yield
+        finally:
+            work.rmdir()
 
 
 def atomic_json(path, data):
