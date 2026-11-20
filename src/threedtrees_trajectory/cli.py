@@ -161,12 +161,12 @@ def main(argv: list[str] | None = None) -> int:
                             raise NoTrajectory("Single returns without scan angle: no usable pulse lines or scan "
                                                "angles in one or more files. Please provide the delivered trajectory file.")
                         angle_files = [mode["index"] for mode in info.return_modes if mode["mode"] == "single"]
-                        result = estimate(pulses, check_platform=False, interval=interval, angle_files=angle_files)
+                        result = estimate(pulses, check_platform=False, interval=interval, angle_files=angle_files, workers=threads)
                         if report(info, result, pulses.multi_share)["quality"] == "unreliable":
                             if not pulses.has_scan_angle:
                                 raise NoTrajectory("Pulse lines miss the fitted path by more than 0.5 m at the "
                                                    "median and there is no usable scan angle.")
-                            result = estimate(pulses, check_platform=False, interval=interval, use_lines=False)
+                            result = estimate(pulses, check_platform=False, interval=interval, use_lines=False, workers=threads)
                             info.single_return_files = list(range(len(args.clouds)))
                             result.warnings.append("Pulse lines missed the fitted path by more than 0.5 m at the median.")
                         result.evidence = evidence

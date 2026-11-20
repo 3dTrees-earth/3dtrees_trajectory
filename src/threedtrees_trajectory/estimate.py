@@ -70,12 +70,12 @@ def detect_platform(p: Pulses) -> tuple[str, str]:
 
 
 def estimate(p: Pulses, check_platform: bool = True, interval: float = 0.5, *, use_lines: bool = True,
-             angle_files=()) -> Result:
+             angle_files=(), workers: int = 1) -> Result:
     """Path positions in the cloud's coordinates (the solvers work relative to ``p.origin``)."""
-    result = _estimate(p, check_platform, interval, use_lines)
+    result = _estimate(p, check_platform, interval, use_lines, workers)
     if (result.method == "lines" and angle_files
             and np.median([fit.miss for fit in result.fits]) <= UNRELIABLE_LINE_MISS):
-        result = _fill_angle_windows(p, result, interval, angle_files)
+        result = _fill_angle_windows(p, result, interval, angle_files, workers)
     if not result.fits:
         raise NoTrajectory("No reliable position could be fitted. Please provide the trajectory file.")
     result.fits = [solve.Fit(f.time, f.xyz + p.origin, f.pulses, f.miss) for f in result.fits]
@@ -84,7 +84,7 @@ def estimate(p: Pulses, check_platform: bool = True, interval: float = 0.5, *, u
     return result
 
 
-def _fill_angle_windows(p, result, interval, angle_files):
+def _fill_angle_windows(p, result, interval, angle_files, workers):
     """Use paired pulse lines where available and fit missing windows from the affected file."""
     by_window = {int(np.floor(fit.time / interval)): fit for fit in result.fits}
     line_windows = set(by_window)
@@ -95,7 +95,7 @@ def _fill_angle_windows(p, result, interval, angle_files):
         windows = np.unique(np.floor(p.time[group] / interval).astype(np.int64))
         if all(window in by_window for window in windows):
             continue
-        for fit in solve.path_from_scan_angle(p, interval=interval, group=group):
+        for fit in solve.path_from_scan_angle(p, interval=interval, group=group, workers=workers):
             by_window.setdefault(int(np.floor(fit.time / interval)), fit)
         if not any(window in by_window for window in windows):
             raise NoTrajectory("No reliable scan-angle position could be fitted for a file with unpaired returns. "
@@ -108,7 +108,7 @@ def _fill_angle_windows(p, result, interval, angle_files):
     return result
 
 
-def _estimate(p: Pulses, check_platform: bool, interval: float, use_lines: bool) -> Result:
+def _estimate(p: Pulses, check_platform: bool, interval: float, use_lines: bool, workers: int) -> Result:
     if len(p) == 0:
         raise ValueError("The cloud has no points.")
     if not p.has_time:
@@ -124,7 +124,7 @@ def _estimate(p: Pulses, check_platform: bool, interval: float, use_lines: bool)
         platform, evidence = detect_platform(p)
         if platform == "static":
             raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
-    lines = solve.path_from_lines(p, interval=interval) if use_lines and multi_share >= MULTI_SHARE_MIN else []
+    lines = solve.path_from_lines(p, interval=interval, workers=workers) if use_lines and multi_share >= MULTI_SHARE_MIN else []
     if len(lines) >= MIN_LINE_POSITIONS:  # a gappy path from lines beats a full one from scan angles (metres off)
         kept = solve.drop_outliers(lines)
         if len(kept) < len(lines):
@@ -134,7 +134,7 @@ def _estimate(p: Pulses, check_platform: bool, interval: float, use_lines: bool)
     if p.has_scan_angle:
         warnings.append("Single returns only: path from scan angles, about 1 m horizontally and 0.1 m vertically on "
                         "RIEGL and DJI flights, much worse where the scan angle isn't measured off nadir (YellowScan 8 m).")
-        return Result("scan_angle", solve.path_from_scan_angle(p, interval=interval), warnings, evidence)
+        return Result("scan_angle", solve.path_from_scan_angle(p, interval=interval, workers=workers), warnings, evidence)
     if multi_share >= MULTI_SHARE_MIN:
         raise NoTrajectory("Too few reliable positions from multi-return pulses and no usable scan angle. "
                          "Please provide the trajectory file.")

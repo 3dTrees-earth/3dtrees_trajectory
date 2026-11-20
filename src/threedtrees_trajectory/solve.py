@@ -12,6 +12,7 @@ recognise a static (TLS) cloud, which 1.0.0 refuses.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -93,7 +94,16 @@ def fit_lines(origin: np.ndarray, direction: np.ndarray, time: np.ndarray, movin
     return Fit(t0, fit[0] + centre, int(keep.sum()), float(np.median(miss[keep])))
 
 
-def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_length: float = 1.0) -> list[Fit]:
+def _fit_windows(fit, starts, length, minimum, workers):
+    windows = [(lo, hi) for lo, hi in zip(starts, np.r_[starts[1:], length]) if hi - lo >= minimum]
+    if workers == 1 or len(windows) <= 1:
+        return [value for window in windows if (value := fit(window)) is not None]
+    with ThreadPoolExecutor(max_workers=min(workers, len(windows))) as pool:
+        return [value for value in pool.map(fit, windows) if value is not None]
+
+
+def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_length: float = 1.0, *,
+                    workers: int = 1) -> list[Fit]:
     """Moving sensor: one position (with velocity) per time window and point source."""
     index = _line_indices(p, min_length)
     if len(index) < min_pulses:
@@ -103,15 +113,13 @@ def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_
     order = np.lexsort((source, window))
     index, source, window = index[order], source[order], window[order]
     starts = np.flatnonzero(np.r_[True, (window[1:] != window[:-1]) | (source[1:] != source[:-1])])
-    fits = []
-    for lo, hi in zip(starts, np.r_[starts[1:], len(index)]):
-        if hi - lo < min_pulses:
-            continue
+    def fit_window(window):
+        lo, hi = window
         selected = index[lo:hi]
         origin, line, length = _line_vectors(p, selected)
-        fit = fit_lines(origin, line / length[:, None], p.time[selected], True, min_pulses)
-        if fit is not None:
-            fits.append(fit)
+        return fit_lines(origin, line / length[:, None], p.time[selected], True, min_pulses)
+
+    fits = _fit_windows(fit_window, starts, len(index), min_pulses, workers)
     # A window whose lines don't meet (median miss 0.7-30 m against 0.02 m) fitted noise or mixed pulses: drop it.
     if fits:
         limit = max(0.25, 10 * float(np.median([f.miss for f in fits])))
@@ -132,7 +140,7 @@ def station_from_lines(p: Pulses, min_pulses: int = 2000, min_length: float = 0.
 
 
 def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200, *,
-                         group: np.ndarray | None = None) -> list[Fit]:
+                         group: np.ndarray | None = None, workers: int = 1) -> list[Fit]:
     """Moving sensor, single returns: per window, the position from which each point is seen at its scan angle."""
     # Preserve the mean reduction order, but expand coordinates and angles only for the current window.
     points = p.first if group is None else p.first[group]
@@ -149,10 +157,8 @@ def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200
     time = p.time[order]
     window = np.floor(time / interval).astype(np.int64)
     starts = np.flatnonzero(np.r_[True, window[1:] != window[:-1]])
-    fits = []
-    for lo, hi in zip(starts, np.r_[starts[1:], len(time)]):
-        if hi - lo < min_pulses:
-            continue
+    def fit_window(window):
+        lo, hi = window
         selected = order[lo:hi]
         x, y, z = (p.first[selected].astype(np.float64) - centre).T
         tn = np.tan(np.radians(np.abs(p.scan_angle[selected].astype(float))))
@@ -164,9 +170,10 @@ def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200
         start = [np.median(x), np.median(y), np.percentile(z, 95) + 50, 0.0, 0.0]
         result = least_squares(residual, start, loss="soft_l1", f_scale=0.5)
         if not result.success or result.x[2] <= np.percentile(z, 95):
-            continue
-        fits.append(Fit(float(time[lo:hi].mean()), result.x[:3] + centre, int(hi - lo), float(np.median(np.abs(result.fun)))))
-    return fits
+            return None
+        return Fit(float(time[lo:hi].mean()), result.x[:3] + centre, int(hi - lo), float(np.median(np.abs(result.fun))))
+
+    return _fit_windows(fit_window, starts, len(time), min_pulses, workers)
 
 
 def _peak(points: np.ndarray, cell: float, smooth: float, extent_max: float) -> tuple[float, float]:
