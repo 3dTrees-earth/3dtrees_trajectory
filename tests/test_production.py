@@ -61,7 +61,7 @@ def test_laz_traversal_recovers_bounded_separated_echoes(tmp_path, monkeypatch):
     data.points = data.points[order]
     data.write(separated)
     grid, _ = occlusion._grid([original], 1)
-    monkeypatch.setattr(occlusion, "CHUNK", 47)
+    monkeypatch.setattr("legacy_occlusion.CHUNK", 47)
 
     def trace(path):
         stats = dict(echoes_read=0, echoes_outside_path=0, traversed_pulses=0, missing_returns=0)
@@ -89,17 +89,17 @@ def test_crop_keeps_products_inside_vegetation_band(tmp_path, monkeypatch):
     data.gps_time[-2:] = time[-1] + 10
     data.z[-2:] = [-20, 80]
     data.write(cloud)
-    crop = occlusion._extent_pass
+    crop = occlusion._crop
 
-    def without_crop(paths, grid, *args, **kwargs):
-        clipped, top, ground, spikes = crop(paths, grid, *args, **kwargs)
+    def without_crop(grid, *args, **kwargs):
+        clipped, top, ground, spikes = crop(grid, *args, **kwargs)
         offset = round((clipped.origin[2] - grid.origin[2]) / grid.voxel)
         return grid, np.where(top >= 0, top + offset, top), ground, spikes
 
     results = []
     for index in range(2):
         if index:
-            monkeypatch.setattr(occlusion, "_extent_pass", without_crop)
+            monkeypatch.setattr(occlusion, "_crop", without_crop)
         copc, cog = (tmp_path / f"{index}.{suffix}" for suffix in ("copc.laz", "tif"))
         report = occlusion.run([cloud], time, xyz, copc, cog, voxel=1)
         with rasterio.open(cog) as tif:
@@ -123,7 +123,7 @@ def test_window_plan_splits_on_memory(monkeypatch):
     from threedtrees_trajectory.window_input import ScanBlock, ScanIndex
 
     grid = occlusion.Grid(np.zeros(3), (400, 10, 60), 1)
-    index = ScanIndex([Path("acquisition.laz")])
+    index = ScanIndex([Path("acquisition.laz")], None)
     index.blocks[0] = [
         ScanBlock(0, 100, 0., 1., np.array([1., 1., 0.]), np.array([199., 2., 2.])),
         ScanBlock(100, 200, 2., 3., np.array([201., 1., 0.]), np.array([399., 2., 2.])),
@@ -154,7 +154,7 @@ def test_delivered_miss_flag_is_written_without_replacing_path(tmp_path):
     check = data["occlusion"]["delivered_path_check"]
     assert check["threshold_exceeded"] and check["median_m"] > 0.1
     assert {s["name"] for s in data["stages"]} >= {"read/time-sort", "platform check", "delivered-path check",
-                                                  "grid extent/crop pass", "traversal", "classify + ground",
+                                                  "finalize extent/crop", "traversal", "classify + ground",
                                                   "COPC write", "COG write"}
     with rasterio.open(cog) as raster:
         assert raster.tags()["OCCLUSION_DELIVERED_MISS_FLAG"] == "true"

@@ -120,21 +120,29 @@ def main(argv: list[str] | None = None) -> int:
     from .estimate import STATIC_REFUSAL, detect_platform, estimate
     from .output import geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
     from .pulses import CloudInfo, read_pulses
-    from .window_input import ScanIndex
     from .window_jobs import JobBusy
 
     info = CloudInfo.from_paths(args.clouds)
     pulses = None
     result = None
     data = None
-    index = ScanIndex(args.clouds) if occlusion_paths else None
+    indexed_clouds = None
     if error_message is None:
         try:
             with resources.stage("read/time-sort") as stage:
                 work = report_path.resolve().parent
+                if occlusion_paths:
+                    from .occlusion import prepare_index
+
+                    try:
+                        indexed_clouds = prepare_index(args.clouds, voxel)
+                    except (OSError, ValueError, LaspyException, StructError, EOFError) as error:
+                        # Let the trajectory reader retain its own refusal codes and messages.
+                        indexed_clouds = {"error": str(error)}
                 pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
                                         scratch=work, resources=resources,
-                                        scan_index=index, copc_threads=threads)
+                                        scan_index=indexed_clouds[0] if isinstance(indexed_clouds, tuple) else None,
+                                        copc_threads=threads)
                 stage["bytes_read"] = sum(path.stat().st_size for path in args.clouds)
             if not len(pulses):
                 raise NoTrajectory("No usable pulses could be reconstructed from the input.")
@@ -202,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     if error_message is None and occlusion_paths:
         path_inputs = _occlusion_path(args, result, pulses, resources)
         pulses = None
-        data["occlusion"] = _occlusion(args, path_inputs, resources, info, requested, index)
+        data["occlusion"] = _occlusion(args, path_inputs, resources, info, requested, indexed_clouds)
         if "error" in data["occlusion"]:
             if result is None:
                 error_message = data["occlusion"]["error"]
@@ -264,7 +272,7 @@ def _occlusion_path(args, result, pulses, resources):
     return time, xyz, result.method, None
 
 
-def _occlusion(args, path_inputs, resources, info, threads, index) -> dict:
+def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds) -> dict:
     """Run the occlusion part; a failure is reported in its section instead of failing the trajectory."""
     from laspy.errors import LaspyException
     from lazrs import LazrsError
@@ -274,12 +282,14 @@ def _occlusion(args, path_inputs, resources, info, threads, index) -> dict:
     if isinstance(path_inputs, dict):
         return path_inputs
     time, xyz, method, check = path_inputs
+    if isinstance(indexed_clouds, dict):
+        return indexed_clouds
     try:
         return occlusion.run(
             args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=float(args.voxel),
             dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
             quality="rough" if method in ("scan_angle", "lines_scan_angle") or info.single_return_files else None,
-            delivered_check=check, threads=threads, index=index, single_files=info.single_return_files,
+            delivered_check=check, threads=threads, prepared=indexed_clouds, single_files=info.single_return_files,
             budget=int(args.grid_memory_gib * 2**30), resources=resources,
         )
     except (OSError, ValueError, MemoryError, ImportError, LaspyException, LazrsError) as error:

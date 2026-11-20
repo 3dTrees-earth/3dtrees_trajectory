@@ -498,13 +498,14 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                     if prepared is None:
                         mode = "time_tolerance"
                         local = _FilePulses([path])
+                        original_index = scan_index.begin_repair(index) if scan_index is not None else None
                         for chunk in _fallback_chunks(path, mode, False):
                             local.collect(chunk, index, shift, strides, False)
-                        okay = local.finish(strides[0])
-                        if okay and scan_index is not None:
-                            scan_index.reset(index)
-                            for chunk in _fallback_chunks(path, mode, False):
+                            if scan_index is not None:
                                 scan_index.observe(index, chunk)
+                        okay = local.finish(strides[0])
+                        if not okay and scan_index is not None:
+                            scan_index.abandon_repair(index, original_index)
                     if not okay:
                         mode = "single"
                         info.single_return_files.append(index)

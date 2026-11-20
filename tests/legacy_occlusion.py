@@ -2,7 +2,7 @@
 import numpy as np
 
 from threedtrees_trajectory import occlusion
-from threedtrees_trajectory.cloud import point_chunks, pulse_chunks
+from threedtrees_trajectory.cloud import CHUNK, point_chunks, pulse_chunks
 from threedtrees_trajectory.occlusion import _positions, _time_mask
 
 FRAGMENT_BATCH = 1_000_000
@@ -53,7 +53,7 @@ def _recover_fragments(tracer, fragments, time, xyz) -> int:
 
 
 def _trace_file(path, tracer, grid, time, xyz, counters, traced_records):
-    chunks = pulse_chunks(point_chunks(path, occlusion.CHUNK), occlusion.CHUNK)
+    chunks = pulse_chunks(point_chunks(path, CHUNK), CHUNK)
     fragments = []
     num_fragments = unpaired = 0
     for chunk in chunks:

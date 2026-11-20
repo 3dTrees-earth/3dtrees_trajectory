@@ -68,7 +68,7 @@ def test_estimated_path_gives_trajectory_2_report_copc_and_cog(tmp_path):
     assert report["method"] == "lines" and report["quality"] == "good"
     assert report["resources"]["points_read"] == report["points"]
     stages = {stage["name"] for stage in report["stages"]}
-    assert stages >= {"read/time-sort", "platform check", "path estimation", "grid extent/crop pass",
+    assert stages >= {"read/time-sort", "platform check", "path estimation", "finalize extent/crop",
                       "plan GPS-time windows", "traversal", "classify + ground", "COPC write", "COG write"}
     for stage in report["stages"]:
         assert stage["start_seconds"] >= 0
@@ -143,7 +143,7 @@ def test_streamed_and_unsorted_multi_return_counts_agree(tmp_path, monkeypatch):
     order = np.argsort(las.gps_time, kind="stable")[::-1]
     las.points = las.points[order]
     las.write(unsorted_cloud)
-    monkeypatch.setattr(occlusion, "CHUNK", 77)
+    monkeypatch.setattr("legacy_occlusion.CHUNK", 77)
     grid, _ = occlusion._grid([sorted_cloud], 0.5)
 
     def trace(paths):

@@ -115,7 +115,7 @@ def test_time_window_counts_match_whole_grid(tmp_path, monkeypatch):
     grid, _ = occlusion._grid([cloud], 0.5)
     counters = dict(echoes_read=0, echoes_outside_path=0, traversed_pulses=0, missing_returns=0)
     expected = trace_reference([cloud], grid, time, xyz, counters)
-    index = ScanIndex([cloud])
+    index = ScanIndex([cloud], None)
     index.populate()
     bounds = time[0] - 1, time[-1] + 1
     windows = time_windows.plan(index, grid, time, xyz, bounds, 6, occlusion.DEFAULT_BUDGET)
@@ -126,6 +126,26 @@ def test_time_window_counts_match_whole_grid(tmp_path, monkeypatch):
     (_, _, summed), = time_windows.summed_counts(tmp_path, windows, [block])
     np.testing.assert_array_equal(summed, expected)
     assert sum(window["traversed_pulses"] for window in stats) == len(time)
+
+
+def test_first_read_surfaces_decode_only_coverage_boundary(tmp_path, monkeypatch):
+    from threedtrees_trajectory import window_input
+
+    monkeypatch.setattr(window_input, "INDEX_POINTS", 51)
+    cloud = tmp_path / "flight.laz"
+    time, _ = flight(cloud, seconds=2, rate=300)
+    index, _ = occlusion.prepare_index([cloud], 0.5)
+    read_pulses([cloud], scan_index=index)
+    low, high = time[100], time[-100]
+    stage = {}
+    minimum, maximum = index.surfaces(low, high, stage)
+    assert 0 < stage["boundary_points_decoded"] <= 2 * window_input.INDEX_POINTS
+    assert stage["echoes_read"] == index.grid.points
+    las = laspy.read(cloud)
+    points = las.xyz[(las.gps_time >= low) & (las.gps_time < high)]
+    cells = np.floor((points - index.grid.origin) / index.grid.voxel + 1e-8).astype(int)
+    np.testing.assert_array_equal(np.unique(cells[:, :2], axis=0), np.argwhere(maximum >= 0))
+    assert (minimum[maximum >= 0] <= maximum[maximum >= 0]).all()
 
 
 def test_copc_node_window_keeps_file_order_and_respects_all_budgets(monkeypatch, tmp_path):

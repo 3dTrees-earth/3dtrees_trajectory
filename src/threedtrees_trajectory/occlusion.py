@@ -28,7 +28,7 @@ from tempfile import TemporaryDirectory
 import laspy
 import numpy as np
 
-from .cloud import CHUNK, point_chunks
+from .cloud import is_copc
 from .pulses import Pulses, _crs, _time_system
 from .resources import RunResources, available_memory, decoding_threads
 from . import time_windows
@@ -223,35 +223,19 @@ def _stage(resources, name, **kwargs):
     return resources.stage(name, **kwargs) if resources is not None else nullcontext({})
 
 
-def _extent_pass(paths, grid, time, dtm, crs_wkt, stats):
-    """Accumulate surface limits from all echoes overlapping the path."""
+def prepare_index(paths, voxel):
+    for path in paths:
+        with laspy.open(path, read_evlrs=False) as reader:
+            if is_copc(reader.header):
+                index = ScanIndex(paths, None)
+                index.copc = True
+                return index, None
+    grid, crs_wkt = _grid(paths, voxel)
     nx, ny, nz = grid.shape
     if nx * ny * 96 > HARD_BUDGET - time_windows.WORKING_BYTES or nz > np.iinfo(np.int32).max:
         raise ValueError(f"The occlusion extent {grid.shape} exceeds the 64 GiB surface budget; "
                          "increase --voxel or restrict the acquisition.")
-    low = np.full(nx * ny, nz, np.int32)
-    high = np.full(nx * ny, -1, np.int32)
-    read = retained = 0
-    for path in paths:
-        for chunk in point_chunks(path, CHUNK):
-            t = chunk.gps_time
-            keep = _time_mask(t, time)
-            read += len(t)
-            retained += int(keep.sum())
-            if not keep.any():
-                continue
-            coord = np.column_stack([np.asarray(axis)[keep] for axis in (chunk.x, chunk.y, chunk.z)])
-            cells = np.floor((coord - grid.origin) / grid.voxel + 1e-8).astype(np.int64)
-            for axis, maximum in enumerate(grid.shape):
-                np.clip(cells[:, axis], 0, maximum - 1, out=cells[:, axis])
-            flat = cells[:, 0] * ny + cells[:, 1]
-            np.minimum.at(low, flat, cells[:, 2])
-            np.maximum.at(high, flat, cells[:, 2])
-    if read != grid.points:
-        raise ValueError("The occlusion scan did not decode the point count declared by its headers.")
-    stats.update(echoes_read=read, echoes_outside_path=read - retained,
-                 bytes_read=sum(path.stat().st_size for path in paths))
-    return _crop(grid, low.reshape(nx, ny), high.reshape(nx, ny), dtm, crs_wkt, stats)
+    return ScanIndex(paths, grid), crs_wkt
 
 
 def _crop(grid, low, high, dtm, crs_wkt, stats):
@@ -429,7 +413,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         dtm: Path | None = None, scratch: Path | None = None, source: str = "estimated", *,
         quality: str | None = None, delivered_check: dict | None = None,
         budget: int = DEFAULT_BUDGET, resources: RunResources | None = None,
-        threads: int | None = None, index: ScanIndex | None = None, single_files=()) -> dict:
+        threads: int | None = None, prepared=None, single_files=()) -> dict:
     """Trace disjoint GPS-time windows and sum the voxel counts before classification."""
     validate_trajectory(time, xyz)
     scratch = scratch or copc.parent
@@ -437,15 +421,21 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
     cog.parent.mkdir(parents=True, exist_ok=True)
     slots = decoding_threads(threads)
     budget = min(budget, HARD_BUDGET)
-    if index is None:
-        index = ScanIndex(paths)
-        index.populate()
+    if prepared is None:
+        index, crs_wkt = prepare_index(paths, voxel)
+        if not index.copc:
+            index.populate()
+    else:
+        index, crs_wkt = prepared
     if index.copc:
         raise ValueError("Occlusion requires scanner-order LAS/LAZ. Supply the standardized files instead of COPC.")
-    full_grid, crs_wkt = _grid(paths, voxel)
+    full_grid = index.grid
     time_bounds = time[0] - TIME_MARGIN, np.nextafter(time[-1] + TIME_MARGIN, np.inf)
-    with _stage(resources, "grid extent/crop pass") as extent:
-        grid, top, ground, spikes = _extent_pass(paths, full_grid, time, dtm, crs_wkt, extent)
+    with _stage(resources, "finalize extent/crop") as extent:
+        low, high = index.surfaces(*time_bounds, extent)
+        index.release_surfaces()
+        grid, top, ground, spikes = _crop(full_grid, low, high, dtm, crs_wkt, extent)
+        del low, high
         extent.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape))
     with _stage(resources, "plan GPS-time windows") as planning:
         layout = time_windows.plan(index, grid, time, xyz, time_bounds, slots, min(budget, available_memory()))

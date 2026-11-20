@@ -134,4 +134,3 @@ def execute(work, specs, slots, worker, init, initargs, stage):
     finally:
         stage["completed_windows"] = len(results)
     return results
-

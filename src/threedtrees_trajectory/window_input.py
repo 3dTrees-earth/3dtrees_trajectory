@@ -31,9 +31,11 @@ class ScanBlock:
 class ScanIndex:
     """Keep metadata for source reads, including clock corrections accepted by the path reader."""
 
-    def __init__(self, paths):
+    def __init__(self, paths, grid):
         self.paths = paths
+        self.grid = grid
         self.blocks = [[] for _ in paths]
+        self.summaries = [[] for _ in paths]
         self.repaired = set()
         self.copc = False
 
@@ -52,10 +54,19 @@ class ScanIndex:
             blocks.append(ScanBlock(start + offset, start + offset + len(block),
                                     float(time.min()), float(time.max()), lower, upper,
                                     time[::max(1, len(block) // 16)].copy()))
+            if self.grid is not None:
+                self.summaries[index].append(_surface_summary(block, self.grid))
 
-    def reset(self, index):
-        self.blocks[index].clear()
+    def begin_repair(self, index):
+        """Build the repaired index during the required fallback read."""
+        original = self.blocks[index], self.summaries[index]
+        self.blocks[index], self.summaries[index] = [], []
         self.repaired.add(index)
+        return original
+
+    def abandon_repair(self, index, original):
+        self.blocks[index], self.summaries[index] = original
+        self.repaired.remove(index)
 
     def populate(self):
         for index, path in enumerate(self.paths):
@@ -65,7 +76,46 @@ class ScanIndex:
             for chunk in point_chunks(path, INDEX_POINTS):
                 self.observe(index, chunk)
 
-    def read(self, file, blocks):
+    def surfaces(self, lower, upper, stats):
+        """Merge first-read column limits and decode only blocks crossing the path endpoints."""
+        grid = self.grid
+        nx, ny, nz = grid.shape
+        low = np.full(nx * ny, nz, np.int32)
+        high = np.full(nx * ny, -1, np.int32)
+        points_read = points_kept = boundary_points = 0
+        for file, blocks in enumerate(self.blocks):
+            boundary = []
+            for block, summary in zip(blocks, self.summaries[file], strict=True):
+                count = block.stop - block.start
+                points_read += count
+                if not block.overlaps(lower, upper):
+                    continue
+                if block.time_min < lower or block.time_max >= upper:
+                    boundary.append(block)
+                    continue
+                columns, z_min, z_max = summary
+                low[columns] = np.minimum(low[columns], z_min)
+                high[columns] = np.maximum(high[columns], z_max)
+                points_kept += count
+            for chunk in self.read(file, boundary, group_pulses=False):
+                t = chunk.gps_time
+                keep = (t >= lower) & (t < upper)
+                boundary_points += len(t)
+                points_kept += int(keep.sum())
+                if keep.any():
+                    columns, z_min, z_max = _surface_summary(chunk[keep], grid)
+                    low[columns] = np.minimum(low[columns], z_min)
+                    high[columns] = np.maximum(high[columns], z_max)
+        if points_read != grid.points:
+            raise ValueError("The occlusion index does not cover the point count declared by its headers.")
+        stats.update(echoes_read=points_read, echoes_outside_path=points_read - points_kept,
+                     boundary_points_decoded=boundary_points, bytes_read=0)
+        return low.reshape(nx, ny), high.reshape(nx, ny)
+
+    def release_surfaces(self):
+        self.summaries.clear()
+
+    def read(self, file, blocks, *, group_pulses=True):
         """Read selected blocks in scanner order, coalescing consecutive record ranges."""
         if not blocks:
             return
@@ -76,7 +126,38 @@ class ScanIndex:
                     reader.seek(block.start)
                     yield _repair_times(_read(reader, block.stop - block.start))[0]
             else:
-                yield from pulse_chunks(_read_ranges(reader, blocks), TRACE_BATCH)
+                chunks = _read_ranges(reader, blocks)
+                yield from pulse_chunks(chunks, TRACE_BATCH) if group_pulses else chunks
+
+
+def _surface_summary(chunk, grid):
+    """Lossless extrema for touched columns, with a bounded dense fast path."""
+    nx, ny, nz = grid.shape
+    x, y, z = [np.floor((axis * scale + offset - origin) / grid.voxel + 1e-8).astype(np.int64)
+               for axis, scale, offset, origin in zip((chunk.X, chunk.Y, chunk.Z),
+                                                      chunk.scales, chunk.offsets, grid.origin)]
+    for axis, maximum in zip((x, y, z), (nx, ny, nz)):
+        np.clip(axis, 0, maximum - 1, out=axis)
+    x0, y0 = int(x.min()), int(y.min())
+    width, height = int(x.max()) - x0 + 1, int(y.max()) - y0 + 1
+    if width * height <= 2 * len(chunk):
+        key = (x - x0) * height + y - y0
+        low = np.full(width * height, nz, np.int32)
+        high = np.full(width * height, -1, np.int32)
+        np.minimum.at(low, key, z)
+        np.maximum.at(high, key, z)
+        occupied = np.flatnonzero(high >= 0)
+        columns = (x0 + occupied // height) * ny + y0 + occupied % height
+        low, high = low[occupied], high[occupied]
+    else:
+        key = x * ny + y
+        order = np.argsort(key, kind="stable")
+        ordered = key[order]
+        starts = np.flatnonzero(np.r_[True, ordered[1:] != ordered[:-1]])
+        columns = ordered[starts]
+        low = np.minimum.reduceat(z[order], starts).astype(np.int32)
+        high = np.maximum.reduceat(z[order], starts).astype(np.int32)
+    return columns.astype(np.uint32) if nx * ny <= 2**32 else columns, low, high
 
 
 def _read(reader, count):
