@@ -3,10 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import laspy
 import numpy as np
 
-from .cloud import is_copc, open_cloud, point_chunks, pulse_chunks, read_points_exact
+from .cloud import TRACE_FIELDS, XYZ_TIME_FIELDS, is_copc, open_cloud, point_chunks, pulse_chunks, read_points_exact
 from .pulses import TIME_TOLERANCE_S, _repair_times
 
 INDEX_POINTS = 200_000
@@ -71,10 +70,10 @@ class ScanIndex:
 
     def populate(self):
         for index, path in enumerate(self.paths):
-            with laspy.open(path, read_evlrs=False) as reader:
+            with open_cloud(path, read_evlrs=False) as reader:
                 if is_copc(reader.header):
                     raise ValueError("Occlusion requires scanner-order LAS/LAZ. Supply the standardized files instead of COPC.")
-            for chunk in point_chunks(path, INDEX_POINTS):
+            for chunk in point_chunks(path, INDEX_POINTS, fields=XYZ_TIME_FIELDS):
                 self.observe(index, chunk)
 
     def surfaces(self, lower, upper, stats):
@@ -120,7 +119,8 @@ class ScanIndex:
         """Read selected blocks in scanner order, coalescing consecutive record ranges."""
         if not blocks:
             return
-        with open_cloud(self.paths[file], sequential=True) as reader:
+        fields = TRACE_FIELDS if group_pulses or file in self.repaired else XYZ_TIME_FIELDS
+        with open_cloud(self.paths[file], sequential=True, fields=fields) as reader:
             if file in self.repaired:
                 for block in blocks:
                     reader.seek(block.start)

@@ -12,8 +12,12 @@ from laspy.copc import CopcReader, load_octree_for_query
 CHUNK = 5_000_000
 COPC_BATCH_NODES = 1024
 COPC_BATCH_BYTES = 128 * 2**20
-LAZ_FIELDS = (laspy.DecompressionSelection.base().decompress_z().decompress_gps_time()
-              .decompress_scan_angle().decompress_point_source_id())
+# LASzip's base layer includes returns and scanner channel. The selection
+# applies only to compressed LAS 1.4 point formats 6–10.
+RETURN_FIELDS = laspy.DecompressionSelection.base()
+XYZ_TIME_FIELDS = RETURN_FIELDS.decompress_z().decompress_gps_time()
+TRACE_FIELDS = XYZ_TIME_FIELDS.decompress_point_source_id()
+TRAJECTORY_FIELDS = TRACE_FIELDS.decompress_scan_angle()
 FORMAT = laspy.PointFormat(6)
 TIME_BYTES = np.dtype(np.float64).itemsize
 SORT_BYTES_PER_POINT = FORMAT.size + TIME_BYTES
@@ -24,9 +28,10 @@ def is_copc(header) -> bool:
     return any(type(vlr).__name__ == "CopcInfoVlr" for vlr in header.vlrs)
 
 
-def open_cloud(path: Path, *, sequential: bool = False) -> laspy.LasReader:
+def open_cloud(path: Path, *, sequential: bool = False, fields=TRAJECTORY_FIELDS,
+               read_evlrs: bool = True) -> laspy.LasReader:
     backend = laspy.LazBackend.Lazrs if sequential else None
-    reader = laspy.open(path, laz_backend=backend, decompression_selection=LAZ_FIELDS)
+    reader = laspy.open(path, laz_backend=backend, decompression_selection=fields, read_evlrs=read_evlrs)
     if is_copc(reader.header):
         # Variable-sized COPC chunks cannot be decoded by laspy's parallel LAS reader.
         reader.laz_backend = laspy.LazBackend.Lazrs
@@ -52,8 +57,8 @@ def _node_batches(nodes, size, path):
         yield batch
 
 
-def _copc_chunks(path: Path, size: int):
-    with CopcReader.open(path, decompression_selection=LAZ_FIELDS) as reader:
+def _copc_chunks(path: Path, size: int, fields):
+    with CopcReader.open(path, decompression_selection=fields) as reader:
         nodes = load_octree_for_query(reader.source, reader.copc_info, reader.root_page)
         for batch in _node_batches(nodes, size, path):
             # laspy passes the node chunk table to lazrs's native Rayon pool.
@@ -67,11 +72,11 @@ def read_points_exact(reader, count):
     return chunk
 
 
-def point_chunks(path: Path, size: int, *, spatial: bool = False):
+def point_chunks(path: Path, size: int, *, spatial: bool = False, fields=TRAJECTORY_FIELDS):
     if spatial:
-        yield from _copc_chunks(path, size)
+        yield from _copc_chunks(path, size, fields)
     else:
-        with open_cloud(path) as reader:
+        with open_cloud(path, fields=fields) as reader:
             while reader.points_read < reader.header.point_count:
                 expected = min(size, reader.header.point_count - reader.points_read)
                 yield read_points_exact(reader, expected)

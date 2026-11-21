@@ -10,7 +10,7 @@ from itertools import islice
 
 import numpy as np
 
-from .cloud import open_cloud, read_points_exact
+from .cloud import RETURN_FIELDS, open_cloud, read_points_exact
 from .coverage import UnusableTime
 from .resources import available_memory
 
@@ -80,7 +80,7 @@ def _collect_range(path, index, start, stop, total, shift, strides, grid, probe)
 def probe_single_returns(path, size):
     from .pulses import _looks_single_return
 
-    with open_cloud(path, sequential=True) as reader:
+    with open_cloud(path, sequential=True, fields=RETURN_FIELDS) as reader:
         return _looks_single_return(read_points_exact(reader, size))
 
 

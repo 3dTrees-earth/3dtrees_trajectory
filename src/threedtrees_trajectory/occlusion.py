@@ -30,7 +30,7 @@ import laspy
 import numpy as np
 from laspy.vlrs.vlrlist import VLRList
 
-from .cloud import is_copc
+from .cloud import is_copc, open_cloud
 from .output import delivered_miss_flag
 from .pulses import Pulses, _crs, _time_system
 from .resources import RunResources, available_memory, decoding_threads
@@ -87,7 +87,7 @@ def _grid(paths: list[Path], voxel: float) -> tuple[Grid, str | None]:
     system, crs = None, None
     point_count = 0
     for path in paths:
-        with laspy.open(path) as reader:
+        with open_cloud(path) as reader:
             header = reader.header
             if not header.point_count:
                 continue
@@ -206,7 +206,7 @@ def _stage(resources, name, **kwargs):
 
 def prepare_index(paths, voxel):
     for path in paths:
-        with laspy.open(path, read_evlrs=False) as reader:
+        with open_cloud(path, read_evlrs=False) as reader:
             if is_copc(reader.header):
                 index = ScanIndex(paths, None)
                 index.copc = True

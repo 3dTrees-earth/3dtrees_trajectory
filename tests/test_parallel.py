@@ -196,6 +196,50 @@ def test_parallel_record_reads_preserve_order_and_extent(tmp_path, monkeypatch):
         np.testing.assert_array_equal(first, second)
 
 
+@pytest.fixture
+def pf7_cloud(tmp_path):
+    original, compressed = (tmp_path / name for name in ("pf7.las", "pf7.laz"))
+    flight(original, seconds=2, rate=300, point_format=7)
+    data = laspy.read(original)
+    _, pulse = np.unique(data.gps_time, return_inverse=True)
+    data.scanner_channel = (pulse % 4).astype(np.uint8)
+    data.point_source_id = (1 + pulse % 3).astype(np.uint16)
+    data.red = (1 + pulse).astype(np.uint16)
+    data.intensity = (2 + pulse).astype(np.uint16)
+    data.add_extra_dim(laspy.ExtraBytesParams(name="unused", type=np.uint16))
+    data.unused = (3 + pulse).astype(np.uint16)
+    data.write(original)
+    data.write(compressed)
+    return original, compressed, data
+
+
+def test_pf7_selective_read_preserves_required_values(pf7_cloud, monkeypatch):
+    original, compressed, data = pf7_cloud
+    monkeypatch.setattr(pulses, "CHUNK", 313)
+    monkeypatch.setattr(pulses, "PROBE", 100)
+    expected, _ = read_pulses([original], threads=1)
+    for threads in (1, 4):
+        actual, info = read_pulses([compressed], threads=threads)
+        if threads == 4:
+            assert info.read_workers == 4
+        for field in ("time", "first", "last", "returns", "source", "file", "scan_angle"):
+            np.testing.assert_array_equal(getattr(actual, field), getattr(expected, field))
+
+    with cloud_io.open_cloud(compressed) as reader:
+        chunk = reader.read()
+    for field in ("red", "intensity", "unused"):
+        assert not np.array_equal(chunk[field], data[field])
+
+    index = ScanIndex([compressed], None)
+    index.populate()
+    chunk, = index.read(0, index.blocks[0], group_pulses=False)
+    for field in ("X", "Y", "Z", "gps_time", "scanner_channel", "return_number", "number_of_returns"):
+        np.testing.assert_array_equal(chunk[field], data[field])
+    assert not np.array_equal(chunk.scan_angle, data.scan_angle)
+    traced = list(index.read(0, index.blocks[0]))
+    np.testing.assert_array_equal(np.concatenate([batch.point_source_id for batch in traced]), data.point_source_id)
+
+
 def test_first_read_surfaces_decode_only_coverage_boundary(tmp_path, monkeypatch):
     from threedtrees_trajectory import window_input
 

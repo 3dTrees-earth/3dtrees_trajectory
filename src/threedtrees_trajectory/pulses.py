@@ -399,7 +399,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
         try:
             if not path.is_file():
                 raise ValueError("Input must be an existing regular file.")
-            with laspy.open(path, read_evlrs=False) as reader:
+            with open_cloud(path, read_evlrs=False) as reader:
                 if reader.header.point_count:
                     origins.append(reader.header.mins)
                 info.points += reader.header.point_count
