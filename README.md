@@ -72,10 +72,7 @@ if seen clear, occluded (3) if only traversed behind returns, or unobserved (4) 
 
 Voxel size defaults to 0.5 m. `--voxel` accepts 0.05–10 m. Ground is the centre of the lowest filled voxel
 per column. Gaps take the nearest available ground estimate. Ground more than 2 m above its 5 m
-neighbourhood median is replaced by that median. With `--dtm terrain.tif`, ground comes from band 1 at
-each column centre. The DTM must cover part of the cloud with valid elevations and share its CRS if both
-declare one. Uncovered columns use the nearest sampled elevation. The highest filled voxel caps each
-column.
+neighbourhood median is replaced by that median. The highest filled voxel caps each column.
 
 | File | Contents |
 | --- | --- |

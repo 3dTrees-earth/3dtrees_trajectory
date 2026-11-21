@@ -5,8 +5,8 @@ grid edge with OccPy's voxel traversal (Kuekenbrink et al. 2017, the compiled ``
 Each voxel collects hits, passes (miss) and passes behind the last return (occluded); OccPy's rule turns the counts
 into a class: filled (any hit), empty (passed, no hit), occluded (only behind returns), unobserved (no pulse).
 
-Heights above ground come from a DTM when one is given, else from the lowest filled voxel of each column, with
-columns more than 2 m above their 5 m neighbourhood replaced by it (no pulse reached the ground there).
+Heights above ground come from the lowest filled voxel of each column, with
+columns more than 2 m above their 5 m neighbourhood median replaced by that median.
 
 Outputs: a COPC with one point per voxel between the ground and the canopy top that is not empty (class, counts,
 occluded fraction, height above ground), and a COG with the voxel columns as pixels and one band per metre above
@@ -165,32 +165,6 @@ def _fill_nearest(surface: np.ndarray) -> np.ndarray:
     return surface
 
 
-def ground_from_dtm(path: Path, grid: Grid, crs_wkt: str | None = None) -> np.ndarray:
-    """DTM height at every column centre (nearest cell); columns outside the DTM take their nearest neighbour."""
-    import rasterio
-
-    nx, ny, _ = grid.shape
-    cx = grid.origin[0] + (np.arange(nx) + 0.5) * grid.voxel
-    cy = grid.origin[1] + (np.arange(ny) + 0.5) * grid.voxel
-    with rasterio.open(path) as dtm:
-        if crs_wkt and dtm.crs and dtm.crs != rasterio.crs.CRS.from_wkt(crs_wkt):
-            raise ValueError(f"{path.name} and the point cloud must use the same coordinate reference system.")
-        rows, cols = rasterio.transform.rowcol(dtm.transform, *np.meshgrid(cx, cy, indexing="ij"))
-        rows, cols = rows.reshape(nx, ny), cols.reshape(nx, ny)
-        inside = (rows >= 0) & (rows < dtm.height) & (cols >= 0) & (cols < dtm.width)
-        ground = np.full((nx, ny), np.nan)
-        if inside.any():
-            r, c = rows[inside], cols[inside]
-            row, col = int(r.min()), int(c.min())
-            window = rasterio.windows.Window(col, row, int(c.max()) - col + 1, int(r.max()) - row + 1)
-            band = dtm.read(1, window=window, masked=True).astype(np.float64).filled(np.nan)
-            band[~np.isfinite(band)] = np.nan
-            ground[inside] = band[r - row, c - col]
-    if np.isnan(ground).all():
-        raise ValueError(f"{path.name} does not cover the point cloud with valid elevations.")
-    return _fill_nearest(ground)
-
-
 def _xy_windows(grid: Grid):
     nx, ny, _ = grid.shape
     for x in range(0, nx, WINDOW):
@@ -254,17 +228,13 @@ def _validate_source(index):
         raise ValueError("The LAS/LAZ collection changed during the run. Retry with stable source files.")
 
 
-def _crop(grid, low, high, dtm, crs_wkt, stats):
+def _crop(grid, low, high):
     nx, ny, nz = grid.shape
     if (high < 0).all():
         raise PathCoverageError("The point cloud and path have no overlapping GPS times. "
                          "Check GPS week seconds versus adjusted GPS time.")
     low[low == nz] = -1
-    if dtm is None:
-        ground, spikes = _ground_from_lowest(low, grid)
-    else:
-        ground, spikes = ground_from_dtm(dtm, grid, crs_wkt), 0
-        stats["bytes_read"] += dtm.stat().st_size
+    ground, spikes = _ground_from_lowest(low, grid)
     top_z = grid.origin[2] + (int(high.max()) + 0.5) * grid.voxel
     offset = max(0, math.floor((float(ground.min()) - 1 - grid.origin[2]) / grid.voxel))
     offset = min(offset, nz - 1)
@@ -426,7 +396,7 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
 
 
 def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: Path, voxel: float = 0.5,
-        dtm: Path | None = None, scratch: Path | None = None, source: str = "estimated", *,
+        scratch: Path | None = None, source: str = "estimated", *,
         quality: str | None = None, delivered_check: dict | None = None,
         budget: int = DEFAULT_BUDGET, resources: RunResources | None = None,
         threads: int | None = None, prepared=None, single_files=()) -> dict:
@@ -451,14 +421,14 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
     with _stage(resources, "finalize extent/crop") as extent:
         low, high = index.surfaces(*time_bounds, extent)
         index.release_surfaces()
-        grid, top, ground, spikes = _crop(full_grid, low, high, dtm, crs_wkt, extent)
+        grid, top, ground, spikes = _crop(full_grid, low, high)
         del low, high
         extent.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape))
     layer_ranges = ray_walk.layers(grid, top, ground)
     with _stage(resources, "plan GPS-time windows") as planning:
         layout = time_windows.plan(index, grid, time, xyz, time_bounds, slots, min(budget, available_memory()), layer_ranges)
         planning.update(windows=len(layout), estimated_checkpoint_bytes=sum(12 * w.count_cells for w in layout))
-    identity = identify([*paths, *([dtm] if dtm is not None else [])],
+    identity = identify(paths,
                         [str(copc.resolve()), str(cog.resolve()), voxel, source, quality, list(single_files),
                          [(w.lower, w.upper, [(s.start, s.stop) for s in w.bounds]) for w in layout]], time, xyz)
     work = scratch / f".occlusion-{identity}"
@@ -466,8 +436,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         for orphan in work.glob("merge-*"):
             if orphan.is_dir():
                 shutil.rmtree(orphan)
-        ground_source = "dtm" if dtm is not None else "lowest_hit"
-        tags = dict(OCCLUSION_GROUND=ground_source, OCCLUSION_TRAJECTORY=source)
+        tags = dict(OCCLUSION_GROUND="lowest_hit", OCCLUSION_TRAJECTORY=source)
         if quality is not None:
             tags["OCCLUSION_QUALITY"] = quality
         if delivered_check is not None:
@@ -509,7 +478,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         "time_windows": {"windows": len(layout), "budget_bytes": budget,
                          "peak_concurrent_workers": stage["peak_concurrent_workers"],
                          "reused_windows": stage["reused_windows"]},
-        "ground": ground_source,
+        "ground": "lowest_hit",
         "ground_spikes_replaced": spikes,
         **{key: extent[key] for key in ("echoes_read", "echoes_outside_path")},
         **{key: sum(w[key] for w in windows.values()) for key in

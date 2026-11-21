@@ -16,7 +16,6 @@ The tool takes the point cloud of one ULS or MLS dataset and does two things.
 | --- | --- | --- |
 | One collection of standardized LAS/LAZ files per dataset | yes | The output of the standardization tool. One job takes the whole collection. Files are read in parallel chunks, in scanner order. |
 | Delivered trajectory (3Dtrees trajectory CSV) | no | If given, it is always used for occlusion instead of the estimate. |
-| DTM raster | no | Ground for heights above ground. Default: the lowest hits per column. |
 
 A merged COPC is accepted for trajectory estimation. Occlusion requires the scanner-order LAS/LAZ collection.
 

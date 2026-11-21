@@ -61,7 +61,6 @@ def _run(argv, output_locks) -> int:
     parser.add_argument("--voxel", default="0.5", help="occlusion voxel size in metres (default 0.5)")
     parser.add_argument("--grid-memory-gib", type=float, default=16,
                         help="soft occlusion worker budget in GiB before further GPS-time splitting (default 16, maximum 64)")
-    parser.add_argument("--dtm", type=Path, help="terrain raster for heights above ground (default: lowest hits)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args, unknown = parser.parse_known_intermixed_args(argv)
     if args.output is None and args.report is None:
@@ -78,7 +77,7 @@ def _run(argv, output_locks) -> int:
     safe_report = False
     try:
         clouds = [path.resolve() for path in args.clouds]
-        inputs = clouds + [item.resolve() for item in (args.trajectory, args.dtm) if item is not None]
+        inputs = clouds + ([args.trajectory.resolve()] if args.trajectory is not None else [])
         resolved_report = report_path.resolve()
         resolved_products = tuple(path.resolve() for path in products)
         _validate_paths((resolved_report,), inputs)
@@ -302,7 +301,7 @@ def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds) -> d
     try:
         return occlusion.run(
             args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=float(args.voxel),
-            dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
+            scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
             quality="rough" if method in ("scan_angle", "lines_scan_angle") or info.single_return_files else None,
             delivered_check=check, threads=threads, prepared=indexed_clouds, single_files=info.single_return_files,
             budget=int(args.grid_memory_gib * 2**30), resources=resources,

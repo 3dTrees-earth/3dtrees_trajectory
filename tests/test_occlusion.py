@@ -172,35 +172,6 @@ def test_single_returns_are_independent_even_with_a_shared_time(tmp_path, return
     assert stats["traversed_pulses"] == 3
 
 
-def test_dtm_without_coverage_is_rejected(tmp_path):
-    import rasterio
-    from rasterio.transform import from_origin
-
-    dtm = tmp_path / "out-of-extent.tif"
-    with rasterio.open(dtm, "w", driver="GTiff", width=3, height=3, count=1, dtype="float32",
-                       transform=from_origin(50, 60, 1, 1)) as out:
-        out.write(np.ones((3, 3), np.float32), 1)
-    with pytest.raises(ValueError, match="does not cover"):
-        occlusion.ground_from_dtm(dtm, occlusion.Grid(np.zeros(3), (5, 5, 40), 0.5))
-
-
-def test_ground_above_canopy_gives_empty_copc_and_readable_cog(tmp_path):
-    import rasterio
-    from rasterio.transform import from_origin
-
-    cloud, dtm, copc, cog = [tmp_path / name for name in ("flight.las", "dtm.tif", "out.laz", "out.tif")]
-    time, sensor = flight(cloud, seconds=1, rate=101)
-    with rasterio.open(dtm, "w", driver="GTiff", width=20, height=10, count=1, dtype="float32",
-                       transform=from_origin(900, 2050, 10, 10)) as out:
-        out.write(np.full((10, 20), 1000, np.float32), 1)
-    stats = occlusion.run([cloud], time, sensor, copc, cog, dtm=dtm)
-    assert stats["copc_points"] == copc.stat().st_size == 0
-    with rasterio.open(cog) as raster:
-        assert raster.tags(ns="IMAGE_STRUCTURE")["LAYOUT"] == "COG"
-        assert raster.descriptions == ("occluded_0-1m", "unobserved_column")
-        assert np.isnan(raster.read()).all()
-
-
 @needs_untwine
 def test_product_windows_preserve_cog_and_copc(tmp_path, monkeypatch):
     import rasterio
