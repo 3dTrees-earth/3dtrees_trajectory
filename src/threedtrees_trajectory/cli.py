@@ -48,7 +48,8 @@ def _run(argv, output_locks) -> int:
     parser = argparse.ArgumentParser(prog="3dtrees-trajectory", description=__doc__, allow_abbrev=False)
     parser.add_argument("clouds", nargs="*", type=Path, help="standardized LAS/LAZ files from one dataset, in collection order")
     parser.add_argument("-o", "--output", type=Path, help="3Dtrees trajectory CSV")
-    parser.add_argument("--report", type=Path, help="JSON quality report (default next to the CSV)")
+    parser.add_argument("--debug", action="store_true", help="write a JSON quality and resource report")
+    parser.add_argument("--report", type=Path, help="debug report path (requires --debug, defaults next to the CSV)")
     parser.add_argument("--geojson", type=Path, help="map layer of the path (default next to the CSV)")
     parser.add_argument("--no-platform-check", action="store_true", help="skip static (TLS) cloud detection when estimating a path")
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
@@ -64,11 +65,15 @@ def _run(argv, output_locks) -> int:
                         help="soft occlusion worker budget in GiB before further GPS-time splitting (default 16, maximum 64)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args, unknown = parser.parse_known_intermixed_args(argv)
-    if args.output is None and args.report is None:
+    if args.report is not None and not args.debug:
+        parser.error("--report requires --debug")
+    if args.output is None and args.trajectory is None and args.report is None:
         parser.error("the following argument is required: -o/--output")
+    if args.debug and args.output is None and args.report is None:
+        parser.error("--debug without -o/--output requires --report PATH")
 
     occlusion_paths = tuple(p for p in (args.occlusion_copc, args.occlusion_cog) if p is not None)
-    report_path = args.report or args.output.with_suffix(".report.json")
+    report_path = (args.report or args.output.with_suffix(".report.json")) if args.debug else None
     geojson_path = args.geojson or (args.output.with_suffix(".geojson") if args.output is not None else None)
     products = ((args.output, geojson_path) if args.output is not None else ()) + occlusion_paths
     threads = None
@@ -79,11 +84,14 @@ def _run(argv, output_locks) -> int:
     try:
         clouds = [path.resolve() for path in args.clouds]
         inputs = clouds + ([args.trajectory.resolve()] if args.trajectory is not None else [])
-        resolved_report = report_path.resolve()
         resolved_products = tuple(path.resolve() for path in products)
-        _validate_paths((resolved_report,), inputs)
-        safe_report = not any(_paths_overlap(resolved_report, product) for product in resolved_products)
-        _validate_paths((*resolved_products, resolved_report), inputs)
+        destinations = resolved_products
+        if report_path is not None:
+            resolved_report = report_path.resolve()
+            _validate_paths((resolved_report,), inputs)
+            safe_report = not any(_paths_overlap(resolved_report, product) for product in resolved_products)
+            destinations += (resolved_report,)
+        _validate_paths(destinations, inputs)
         safe_products = bool(products)
         if unknown:
             raise ValueError(f"Unrecognized arguments: {' '.join(unknown)}")
@@ -131,7 +139,7 @@ def _run(argv, output_locks) -> int:
     from pyproj.exceptions import ProjError
 
     from .estimate import STATIC_REFUSAL, detect_platform, estimate
-    from .output import geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
+    from .output import estimate_quality, geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
     from .pulses import CloudInfo, read_pulses
     from .window_jobs import JobBusy, lock_output
 
@@ -140,10 +148,14 @@ def _run(argv, output_locks) -> int:
     result = None
     data = None
     indexed_clouds = None
+    layer = None
+    path_inputs = None
+    delivered_check = None
+    path_warnings = []
     if error_message is None:
         try:
             with resources.stage("read/time-sort", children=True) as stage:
-                work = report_path.resolve().parent
+                work = (report_path or args.output or args.occlusion_copc).resolve().parent
                 if occlusion_paths:
                     output_locks.enter_context(lock_output(args.occlusion_copc.resolve()))
                     from .occlusion import prepare_index
@@ -177,7 +189,7 @@ def _run(argv, output_locks) -> int:
                                                "angles in one or more files. Please provide the delivered trajectory file.")
                         angle_files = [mode["index"] for mode in info.return_modes if mode["mode"] == "single"]
                         result = estimate(pulses, check_platform=False, interval=interval, angle_files=angle_files, workers=threads)
-                        if report(info, result, pulses.multi_share)["quality"] == "unreliable":
+                        if estimate_quality(result) == "unreliable":
                             if not pulses.has_scan_angle:
                                 raise NoTrajectory("Pulse lines miss the fitted path by more than 0.5 m at the "
                                                    "median and there is no usable scan angle.")
@@ -189,31 +201,39 @@ def _run(argv, output_locks) -> int:
                         if args.trajectory is None:
                             raise
                         result = None
+                        path_warnings.append(f"Estimated path: {error}")
                         data["estimated_path_error"] = str(error)
-                if result is None:
-                    write_empty(args.output)
-                    write_empty(geojson_path)
-                else:
+                if result is not None:
                     try:
                         layer = geojson(info, result)
                     except ProjError:
-                        layer = None
                         result.warnings.append("The map layer could not be projected to WGS84.")
-                    write_csv(args.output, info, result)
-                    if layer is None or not layer["features"]:
-                        write_empty(geojson_path)
-                    else:
-                        write_geojson(geojson_path, layer)
-                    data = report(info, result, pulses.multi_share)
-            data["pulse_check"] = {
-                "kept": len(pulses), "multi_return_share": round(pulses.multi_share, 6),
-                "has_scan_angle": pulses.has_scan_angle, "complete_multi_pulses": info.multi_pulses,
-                "incomplete_multi_pulses": info.incomplete_multi_pulses,
-                "out_of_order_records_sampled": info.joined_out_of_order_points,
-                "unpaired_multi_echoes": info.unpaired_multi_echoes,
-                "population_counts_estimated": info.population_counts_estimated,
-                "return_modes": info.return_modes,
-            }
+                    path_warnings = result.warnings
+                    if safe_report:
+                        data = report(info, result, pulses.multi_share)
+            if occlusion_paths:
+                path_inputs = _occlusion_path(args, result, pulses, resources)
+                if not isinstance(path_inputs, dict):
+                    delivered_check = path_inputs[3]
+            if args.output is not None:
+                if result is None:
+                    write_empty(args.output)
+                else:
+                    write_csv(args.output, info, result, delivered_check=delivered_check)
+                if layer is None or not layer["features"]:
+                    write_empty(geojson_path)
+                else:
+                    write_geojson(geojson_path, layer)
+            if safe_report:
+                data["pulse_check"] = {
+                    "kept": len(pulses), "multi_return_share": round(pulses.multi_share, 6),
+                    "has_scan_angle": pulses.has_scan_angle, "complete_multi_pulses": info.multi_pulses,
+                    "incomplete_multi_pulses": info.incomplete_multi_pulses,
+                    "out_of_order_records_sampled": info.joined_out_of_order_points,
+                    "unpaired_multi_echoes": info.unpaired_multi_echoes,
+                    "population_counts_estimated": info.population_counts_estimated,
+                    "return_modes": info.return_modes,
+                }
         except (NoTrajectory, UnusableTime) as error:
             error_message = _supplementary(str(error))
             exit_code = error.exit_code
@@ -223,14 +243,19 @@ def _run(argv, output_locks) -> int:
         except (OSError, ValueError, MemoryError, LaspyException, LazrsError, StructError, EOFError) as error:
             error_message = str(error) or "The job could not read its input or ran out of memory."
     if error_message is None and occlusion_paths:
-        path_inputs = _occlusion_path(args, result, pulses, resources)
         pulses = None
-        data["occlusion"] = _occlusion(args, path_inputs, resources, info, requested, indexed_clouds)
+        path_quality = estimate_quality(result) if result is not None and args.trajectory is None else None
+        data["occlusion"] = _occlusion(args, path_inputs, resources, info, requested, indexed_clouds,
+                                       path_quality, path_warnings)
         if "error" in data["occlusion"]:
             if result is None:
                 error_message = data["occlusion"]["error"]
             else:
                 result.warnings.append(f"Occlusion: {data['occlusion']['error']}")
+                try:
+                    write_csv(args.output, info, result, delivered_check=delivered_check)
+                except OSError as error:
+                    error_message = f"cannot publish trajectory metadata {args.output}: {error}"
                 for path in occlusion_paths:
                     try:
                         write_empty(path)
@@ -238,8 +263,9 @@ def _run(argv, output_locks) -> int:
                         error_message = f"cannot publish empty output {path}: {error}"
     if error_message is not None:
         print(f"error: {error_message}", file=sys.stderr)
-        details = {field: data[field] for field in ("occlusion", "pulse_check") if data is not None and field in data}
-        data = refusal(info, pulses, error_message) | details
+        if safe_report:
+            details = {field: data[field] for field in ("occlusion", "pulse_check") if data is not None and field in data}
+            data = refusal(info, pulses, error_message) | details
         if safe_products:
             for path in products:
                 try:
@@ -287,7 +313,7 @@ def _occlusion_path(args, result, pulses, resources):
     return time, xyz, result.method, None
 
 
-def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds) -> dict:
+def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds, path_quality, path_warnings) -> dict:
     """Run the occlusion part; a failure is reported in its section instead of failing the trajectory."""
     from laspy.errors import LaspyException
     from lazrs import LazrsError
@@ -304,6 +330,7 @@ def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds) -> d
             args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=float(args.voxel),
             scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
             quality="rough" if method in ("scan_angle", "lines_scan_angle") or info.single_return_files else None,
+            path_method=method, path_quality=path_quality, path_warnings=path_warnings,
             delivered_check=check, threads=threads, prepared=indexed_clouds, single_files=info.single_return_files,
             budget=int(args.grid_memory_gib * 2**30), resources=resources,
         )

@@ -45,11 +45,11 @@ def test_las_point_formats(tmp_path, point_format, version):
     output = tmp_path / "output.csv"
     assert path.stat().st_size < 1_000_000
     if point_format in (0, 2):
-        assert main([str(path), "-o", str(output)]) == 3
+        assert main([str(path), "--debug", "-o", str(output)]) == 3
         _assert_refusal(output, "needs GPS time")
         return
-    assert main([str(path), "-o", str(output)]) == 0
-    rows = np.loadtxt(output, delimiter=",", skiprows=14, usecols=(0, 1, 2, 3))
+    assert main([str(path), "--debug", "-o", str(output)]) == 0
+    rows = np.loadtxt(output, delimiter=",", comments=("#", "time,"), usecols=(0, 1, 2, 3))
     assert len(rows) == 12
     assert np.max(np.abs(rows[:, 1:] - np.column_stack([
         np.interp(rows[:, 0], time, coord) for coord in sensor.T
@@ -73,8 +73,8 @@ def test_multifile_with_matched_crs_and_different_las_versions(tmp_path, monkeyp
     monkeypatch.setattr(pulses, "CHUNK", 313)
     monkeypatch.setattr(pulses, "PROBE", 100)
     output = tmp_path / "output.csv"
-    assert main(["-o", str(output), str(first), str(second)]) == 0
-    rows = np.loadtxt(output, delimiter=",", skiprows=14, usecols=(0, 1, 2, 3))
+    assert main(["--debug", "-o", str(output), str(first), str(second)]) == 0
+    rows = np.loadtxt(output, delimiter=",", comments=("#", "time,"), usecols=(0, 1, 2, 3))
     assert len(rows) == 20
     assert np.max(np.abs(rows[:, 1:] - np.column_stack([
         np.interp(rows[:, 0], time, coord) for coord in sensor.T
@@ -138,7 +138,7 @@ def test_bad_input_has_refusal_and_clears_stale_outputs(tmp_path, scenario, reas
     output.write_text("stale")
     output.with_suffix(".geojson").write_text("stale")
     expected = {"constant_time": 3, "nonfinite_time": 3, "no_fit": 4}.get(scenario, 2)
-    assert main([*paths, "-o", str(output)]) == expected
+    assert main([*paths, "--debug", "-o", str(output)]) == expected
     report = _assert_refusal(output, reason)
     assert report["exit_code"] == expected
     if expected in (3, 4):
@@ -157,7 +157,7 @@ def test_bad_input_has_refusal_and_clears_stale_outputs(tmp_path, scenario, reas
 ])
 def test_invalid_arguments_have_a_refusal(tmp_path, option, reason):
     output = tmp_path / "output.csv"
-    assert main(["input.las", "-o", str(output), option]) == 2
+    assert main(["input.las", "--debug", "-o", str(output), option]) == 2
     assert _assert_refusal(output, reason)["resources"]["points_read"] == 0
 
 
@@ -166,7 +166,7 @@ def test_outputs_cannot_alias_the_input(tmp_path):
     input_path.write_bytes(b"unchanged")
     output = tmp_path / "alias.las"
     output.symlink_to(input_path)
-    assert main([str(input_path), "-o", str(output)]) == 2
+    assert main([str(input_path), "--debug", "-o", str(output)]) == 2
     assert input_path.read_bytes() == b"unchanged"
     assert "differ from input" in _report(output)["error"]
 
@@ -188,7 +188,7 @@ def test_decoder_threads_do_not_change_trajectory_bytes(tmp_path):
         output = tmp_path / name / "trajectory.csv"
         env = os.environ | {"GALAXY_SLOTS": slots}
         entrypoint = Path(__file__).resolve().parents[1] / "src" / "run.py"
-        subprocess.run([sys.executable, str(entrypoint), str(path), "-o", str(output), "--threads", "16"],
+        subprocess.run([sys.executable, str(entrypoint), str(path), "--debug", "-o", str(output), "--threads", "16"],
                        env=env, check=True)
         results.append((output.read_bytes(), output.with_suffix(".geojson").read_bytes()))
         assert 1 <= _report(output)["resources"]["decoding_threads"] <= int(slots)
@@ -199,7 +199,7 @@ def test_one_position_skips_the_map_layer(tmp_path):
     path = tmp_path / "input.laz"
     flight(path, seconds=6, rate=1600, single_return=True)
     output = tmp_path / "output.csv"
-    assert main([str(path), "-o", str(output), "--interval", "10"]) == 0
+    assert main([str(path), "--debug", "-o", str(output), "--interval", "10"]) == 0
     assert _report(output)["positions"] == 1
     assert output.with_suffix(".geojson").read_bytes() == b""
 

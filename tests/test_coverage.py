@@ -62,7 +62,7 @@ def test_unpaired_points_reach_single_return_traversal(tmp_path, delivered):
         path = tmp_path / "delivered.csv"
         np.savetxt(path, np.column_stack((time[::25], xyz[::25])), delimiter=",", header="time,x,y,z", comments="")
         args += ["--trajectory", str(path)]
-    assert main(args) == 0
+    assert main(["--debug", *args]) == 0
     report = json.loads(output.with_suffix(".report.json").read_text())
     assert report["pulse_check"]["return_modes"][0]["mode"] == "single"
     assert report["occlusion"]["quality"] == "rough"
@@ -81,7 +81,7 @@ def test_constant_clock_refuses_a_moving_delivered_path(tmp_path, monkeypatch):
     delivered = tmp_path / "delivered.csv"
     delivered.write_text("time,x,y,z\n299999,0,0,10\n300001,1,0,10\n")
     monkeypatch.setattr(pulses, "CHUNK", 100)
-    assert main([str(cloud), "--report", str(report), "--trajectory", str(delivered),
+    assert main([str(cloud), "--debug", "--report", str(report), "--trajectory", str(delivered),
                  "--occlusion-cog", str(tmp_path / "o.tif"), "--occlusion-copc", str(tmp_path / "o.copc.laz")]) == 3
     assert "cannot be matched to a constant point clock" in json.loads(report.read_text())["error"]
 
@@ -98,7 +98,7 @@ def test_single_return_file_fills_missing_time_windows(tmp_path, declared_single
         cloud.number_of_returns[:] = 15
     cloud.write(bad)
     out = tmp_path / "trajectory.csv"
-    assert main([str(good), str(bad), "-o", str(out), "--voxel", "2",
+    assert main([str(good), str(bad), "--debug", "-o", str(out), "--voxel", "2",
                  "--occlusion-cog", str(tmp_path / "o.tif"), "--occlusion-copc", str(tmp_path / "o.copc.laz")]) == 0
     report = json.loads(out.with_suffix(".report.json").read_text())
     assert report["method"] == "lines_scan_angle" and report["quality"] == "rough"

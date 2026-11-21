@@ -148,7 +148,7 @@ def test_delivered_miss_flag_is_written_without_replacing_path(tmp_path):
                                    ("path.csv", "out.tif", "out.copc.laz", "report.json")]
     _delivered(delivered, time[::50], xyz[::50] + [0.5, 0, 0])
     assert main([str(cloud), "--trajectory", str(delivered), "--occlusion-cog", str(cog), "--occlusion-copc", str(copc),
-                 "--report", str(report)]) == 0
+                 "--debug", "--report", str(report)]) == 0
     data = json.loads(report.read_text())
     assert data["occlusion"]["trajectory"] == "delivered"
     check = data["occlusion"]["delivered_path_check"]
@@ -168,7 +168,7 @@ def test_single_return_scan_angle_occlusion_is_rough(tmp_path):
     cloud = tmp_path / "single.laz"
     flight(cloud, seconds=5, rate=1400, single_return=True)
     trajectory, cog, copc = [tmp_path / name for name in ("path.csv", "out.tif", "out.copc.laz")]
-    assert main([str(cloud), "-o", str(trajectory), "--occlusion-cog", str(cog), "--occlusion-copc", str(copc)]) == 0
+    assert main([str(cloud), "--debug", "-o", str(trajectory), "--occlusion-cog", str(cog), "--occlusion-copc", str(copc)]) == 0
     data = json.loads(trajectory.with_suffix(".report.json").read_text())
     assert data["method"] == "scan_angle" and data["occlusion"]["quality"] == "rough"
     assert data["occlusion"]["traversed_pulses"] > 0
@@ -186,7 +186,7 @@ def test_single_returns_without_an_angle_need_a_delivered_path(tmp_path):
     path = tmp_path / "estimated.csv"
     report = tmp_path / "report.json"
     products = ["--occlusion-copc", str(tmp_path / "o.copc.laz"), "--occlusion-cog", str(tmp_path / "o.tif")]
-    args = [str(cloud), "--report", str(report), *products]
+    args = [str(cloud), "--debug", "--report", str(report), *products]
     assert main([*args, "-o", str(path)]) == 4
     assert "Single returns without scan angle" in json.loads(report.read_text())["error"]
 

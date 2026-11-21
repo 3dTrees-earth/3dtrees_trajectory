@@ -15,6 +15,7 @@ above ground holding the occluded share of the observed voxels, plus a last band
 from __future__ import annotations
 
 import csv
+import json
 import math
 import os
 import shutil
@@ -23,12 +24,15 @@ from concurrent.futures.process import BrokenProcessPool
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from struct import pack
 from tempfile import TemporaryDirectory
 
 import laspy
 import numpy as np
+from laspy.vlrs.vlrlist import VLRList
 
 from .cloud import is_copc
+from .output import delivered_miss_flag
 from .pulses import Pulses, _crs, _time_system
 from .resources import RunResources, available_memory, decoding_threads
 from . import ray_walk, time_windows
@@ -46,6 +50,7 @@ SPIKE_M = 2.0  # a lowest-hit ground this far above its neighbourhood is vegetat
 SPIKE_WINDOW_M = 5.0
 TIME_MARGIN = 1.0  # seconds a pulse may lie outside the trajectory's span
 UNTWINE = os.environ.get("TRAJECTORY_UNTWINE", "/opt/untwine/bin/untwine")
+LAS14_EVLR_COUNT_OFFSET = 243
 
 
 @dataclass
@@ -272,7 +277,7 @@ def _copc_header(grid: Grid, crs_wkt: str | None) -> laspy.LasHeader:
     return header
 
 
-def _index_copc(flat: Path, copc: Path, size: int, work: Path) -> None:
+def _index_copc(flat: Path, copc: Path, size: int, work: Path, *, tags: dict[str, str] | None = None) -> None:
     if not size:
         copc.write_bytes(b"")
         return
@@ -282,9 +287,21 @@ def _index_copc(flat: Path, copc: Path, size: int, work: Path) -> None:
                           env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if done.returncode != 0 or not copc.is_file():
         raise ValueError(f"could not write the occlusion COPC: {done.stderr.strip()[-500:]}")
-    with laspy.open(copc) as check:
-        if check.header.point_count != size:
+    with copc.open("r+b" if tags else "rb") as stream:
+        header = laspy.LasHeader.read_from(stream, read_evlrs=False)
+        if header.point_count != size:
             raise ValueError("the occlusion COPC lost voxels")
+        if tags:
+            if header.version.minor != 4 or not header.number_of_evlrs:
+                raise ValueError("the occlusion COPC has no LAS 1.4 extended records")
+            # Untwine ends the file with the hierarchy EVLR. Append the tags
+            # there so all existing COPC chunk and hierarchy offsets stay valid.
+            record = laspy.VLR("3dtrees", 1, "3Dtrees occlusion metadata",
+                               json.dumps(tags, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+            stream.seek(0, os.SEEK_END)
+            VLRList([record]).write_to(stream, as_extended=True)
+            stream.seek(LAS14_EVLR_COUNT_OFFSET)
+            stream.write(pack("<I", header.number_of_evlrs + 1))
 
 
 def _write_voxels(writer, grid: Grid, xy, centres, heights, classes, inside, counts) -> None:
@@ -383,7 +400,7 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
             size = writer.header.point_count
         with _stage(resources, "COPC write", children=True, scratch=work.parent) as stage:
             stage["bytes_read"] = flat.stat().st_size
-            _index_copc(flat, copc, size, work)
+            _index_copc(flat, copc, size, work, tags=tags)
             stage["bytes_written"] = copc.stat().st_size
         with _stage(resources, "COG write", scratch=work.parent) as stage:
             stage["bytes_read"] = raster.stat().st_size
@@ -408,6 +425,7 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
 def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: Path, voxel: float = 0.5,
         scratch: Path | None = None, source: str = "estimated", *,
         quality: str | None = None, delivered_check: dict | None = None,
+        path_method: str | None = None, path_quality: str | None = None, path_warnings=(),
         budget: int = DEFAULT_BUDGET, resources: RunResources | None = None,
         threads: int | None = None, prepared=None, single_files=()) -> dict:
     """Trace disjoint GPS-time windows and sum the voxel counts before classification."""
@@ -446,12 +464,13 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         for orphan in work.glob("merge-*"):
             if orphan.is_dir():
                 shutil.rmtree(orphan)
-        tags = dict(OCCLUSION_GROUND="lowest_hit", OCCLUSION_TRAJECTORY=source)
-        if quality is not None:
-            tags["OCCLUSION_QUALITY"] = quality
+        tags = dict(OCCLUSION_GROUND="lowest_hit", OCCLUSION_TRAJECTORY=source,
+                    OCCLUSION_PATH_METHOD=path_method or source, OCCLUSION_QUALITY=quality or path_quality or "unavailable")
+        if path_warnings:
+            tags["OCCLUSION_WARNINGS"] = json.dumps(path_warnings, ensure_ascii=False, separators=(",", ":"))
         if delivered_check is not None:
+            tags["OCCLUSION_DELIVERED_MISS_FLAG"] = delivered_miss_flag(delivered_check)
             flag = delivered_check["threshold_exceeded"]
-            tags["OCCLUSION_DELIVERED_MISS_FLAG"] = "unavailable" if flag is None else str(flag).lower()
             if flag is not None:
                 tags["OCCLUSION_DELIVERED_MISS_MEDIAN_M"] = str(delivered_check["median_m"])
         specs = [(number, window.memory, (window.count_cells, 3), (window,)) for number, window in enumerate(layout)]

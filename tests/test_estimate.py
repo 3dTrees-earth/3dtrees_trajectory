@@ -15,7 +15,7 @@ def _read(path):
 
 def test_flight_multi_return_recovers_path_to_centimetres(tmp_path):
     time, sensor = flight(tmp_path / "f.laz")
-    assert main([str(tmp_path / "f.laz"), "-o", str(tmp_path / "p.csv")]) == 0
+    assert main([str(tmp_path / "f.laz"), "--debug", "-o", str(tmp_path / "p.csv")]) == 0
     columns, rows = _read(tmp_path / "p.csv")
     assert columns == ["time", "x", "y", "z", "roll", "pitch", "yaw", "name"]
     est = np.array([r[:4] for r in rows], float)
@@ -32,7 +32,7 @@ def test_flight_multi_return_recovers_path_to_centimetres(tmp_path):
 
 def test_flight_single_return_uses_scan_angle_and_warns(tmp_path):
     time, sensor = flight(tmp_path / "f.laz", single_return=True)
-    assert main([str(tmp_path / "f.laz"), "-o", str(tmp_path / "p.csv")]) == 0
+    assert main([str(tmp_path / "f.laz"), "--debug", "-o", str(tmp_path / "p.csv")]) == 0
     est = np.array([r[:4] for r in _read(tmp_path / "p.csv")[1]], float)
     h = np.hypot(est[:, 1] - np.interp(est[:, 0], time, sensor[:, 0]), est[:, 2] - np.interp(est[:, 0], time, sensor[:, 1]))
     assert np.median(h) < 1.0
@@ -45,7 +45,7 @@ def test_static_scans_are_refused(tmp_path, capsys):
     """1.0.0 estimates paths only: a TLS scan (multi-return lines meeting in one point) is refused, with a report."""
     scan(tmp_path / "a.laz", (3.0, 4.0, 1.5), seed=1)
     scan(tmp_path / "b.laz", (25.0, -7.0, 1.6), seed=2)
-    assert main([str(tmp_path / "a.laz"), str(tmp_path / "b.laz"), "-o", str(tmp_path / "s.csv")]) == 2
+    assert main([str(tmp_path / "a.laz"), str(tmp_path / "b.laz"), "--debug", "-o", str(tmp_path / "s.csv")]) == 2
     assert "static (TLS)" in capsys.readouterr().err
     assert (tmp_path / "s.csv").stat().st_size == 0
     assert (tmp_path / "s.geojson").stat().st_size == 0
@@ -68,7 +68,7 @@ def test_platform_is_detected_for_single_returns(tmp_path, capsys):
     flight(tmp_path / "f.laz", single_return=True)
     assert main([str(tmp_path / "s.laz"), "-o", str(tmp_path / "s.csv")]) == 2
     assert "ground density" in capsys.readouterr().err
-    assert main([str(tmp_path / "f.laz"), "-o", str(tmp_path / "f.csv")]) == 0
+    assert main([str(tmp_path / "f.laz"), "--debug", "-o", str(tmp_path / "f.csv")]) == 0
     assert json.loads((tmp_path / "f.report.json").read_text())["method"] == "scan_angle"
 
 

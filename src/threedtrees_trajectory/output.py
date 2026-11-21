@@ -34,12 +34,21 @@ def _header(info: CloudInfo, result: Result, quality_label: str) -> list[str]:
     return lines
 
 
-def write_csv(path: Path, info: CloudInfo, result: Result) -> None:
+def delivered_miss_flag(check: dict) -> str:
+    flag = check["threshold_exceeded"]
+    return "unavailable" if flag is None else str(flag).lower()
+
+
+def write_csv(path: Path, info: CloudInfo, result: Result, *, delivered_check: dict | None = None) -> None:
     """``time,x,y,z,roll,pitch,yaw,name``, the layout delivered paths and scan positions share; the name comes last so
     readers that take time, x, y, z by position are unaffected. A path leaves the name empty. Roll, pitch and yaw stay
     empty: estimation gives positions only. Speed is not stored (viewers derive it), nor how well the pulse lines meet
-    (in the report)."""
-    rows = _header(info, result, quality(result, np.array([f.miss for f in result.fits], float)))
+    (in the debug report)."""
+    rows = _header(info, result, estimate_quality(result))
+    for warning in result.warnings:
+        rows.append("# warning: " + " ".join(warning.splitlines()))
+    if delivered_check is not None:
+        rows.append(f"# delivered_path_miss_flag: {delivered_miss_flag(delivered_check)}")
     rows.append(COLUMNS)
     timed = info.time_system != "none"
     for f in result.fits:
@@ -58,6 +67,10 @@ def quality(result: Result, miss: np.ndarray) -> str:
         return "rough"
     median = float(np.nanmedian(miss))
     return "good" if median <= 0.1 else "unreliable" if median > UNRELIABLE_LINE_MISS else "rough"
+
+
+def estimate_quality(result: Result) -> str:
+    return quality(result, np.array([f.miss for f in result.fits], float))
 
 
 def report(info: CloudInfo, result: Result, multi_share: float) -> dict:

@@ -111,7 +111,7 @@ def test_copc_occlusion_refuses_and_preserves_estimated_path(tmp_path):
     flight(original, seconds=4, rate=500)
     with laspy.open(original) as src:
         occlusion._index_copc(original, source, src.header.point_count, tmp_path)
-    assert main([str(source), "-o", str(tmp_path / "path.csv"),
+    assert main([str(source), "--debug", "-o", str(tmp_path / "path.csv"),
                  "--occlusion-copc", str(tmp_path / "out.copc.laz"),
                  "--occlusion-cog", str(tmp_path / "out.tif")]) == 0
     assert (tmp_path / "path.csv").stat().st_size

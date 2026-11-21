@@ -56,7 +56,7 @@ def test_estimated_path_gives_trajectory_2_report_copc_and_cog(tmp_path):
 
     flight(tmp_path / "f.laz", seconds=6, rate=500)
     out, copc, cog = tmp_path / "p.csv", tmp_path / "o.copc.laz", tmp_path / "o.tif"
-    assert main([str(tmp_path / "f.laz"), "-o", str(out), "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 0
+    assert main([str(tmp_path / "f.laz"), "--debug", "-o", str(out), "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 0
     lines = out.read_text().splitlines()
     assert lines[0] == "# format: 3dtrees-trajectory/2"
     header, *rows = csv.reader(line for line in lines if not line.startswith("#"))
@@ -112,7 +112,7 @@ def test_delivered_path_is_used_without_estimating(tmp_path, voxel):
     rows = "\n".join(f"{t:.6f},{x:.4f},{y:.4f},{z:.4f}" for t, (x, y, z) in zip(time[::400], sensor[::400]))
     path.write_text(f"# format: 3dtrees-trajectory/1\ntime,x,y,z\n{rows}\n")
     copc, cog, report = tmp_path / "o.copc.laz", tmp_path / "o.tif", tmp_path / "r.json"
-    assert main([str(tmp_path / "f.laz"), "--trajectory", str(path), "--report", str(report),
+    assert main([str(tmp_path / "f.laz"), "--trajectory", str(path), "--debug", "--report", str(report),
                  "--occlusion-copc", str(copc), "--occlusion-cog", str(cog), "--voxel", str(voxel)]) == 0
     data = json.loads(report.read_text())
     assert data["trajectory"] == "delivered" and data["occlusion"]["trajectory"] == "delivered"
@@ -141,7 +141,7 @@ def test_rejects_path_without_clock_overlap(tmp_path, offset):
     path, copc, cog, report = [tmp_path / name for name in ("delivered.csv", "out.laz", "out.tif", "report.json")]
     np.savetxt(path, np.column_stack((time[::10] + offset, sensor[::10])), delimiter=",",
                header="time,x,y,z", comments="")
-    assert main([str(cloud), "--trajectory", str(path), "--report", str(report),
+    assert main([str(cloud), "--trajectory", str(path), "--debug", "--report", str(report),
                  "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 2
     reason = json.loads(report.read_text())["occlusion"]["error"]
     assert "no overlapping GPS times" in reason
@@ -155,7 +155,7 @@ def test_delivered_path_does_not_bypass_static_cloud_refusal(tmp_path):
     path = tmp_path / "path.csv"
     path.write_text("time,x,y,z\n100000,1000,2000,5\n100001,1001,2000,5\n")
     report = tmp_path / "report.json"
-    assert main([str(cloud), "--trajectory", str(path), "--report", str(report),
+    assert main([str(cloud), "--trajectory", str(path), "--debug", "--report", str(report),
                  "--occlusion-copc", str(tmp_path / "out.laz"), "--occlusion-cog", str(tmp_path / "out.tif")]) == 2
     assert "static (TLS)" in report.read_text()
 
