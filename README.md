@@ -101,7 +101,10 @@ each file.
 Occlusion uses independent workers over disjoint GPS-time windows. Workers seek the original LAS/LAZ and
 trace each complete pulse once. They use the same voxel lattice and store compact counts between the ground
 and canopy. The planner splits a window further in time when its working memory or echo count exceeds the
-budget. Set the per-window target with `--grid-memory-gib` (16 GiB by default).
+budget. Set the planning ceiling with `--grid-memory-gib` (16 GiB by default). At runtime the scheduler reserves
+the estimated memory of each window within the available cgroup memory and `--threads` limit. It adjusts
+subsequent reservations using measured window peak RSS. A worker that runs out of memory is retried once
+on its own if a larger reservation is available.
 
 The merge adds window counts blockwise before classifying voxels. Repeat the same command to resume an
 interrupted run. Keep the `.occlusion-*` checkpoint beside the COPC until both outputs are published.
@@ -163,13 +166,17 @@ the path tool's scope.
 - The reader decodes up to five million points per batch. The job caps decoding, path fitting and window workers
   at the configured `GALAXY_SLOTS` or `--threads`, CPU affinity and cgroup quota. The default is ten slots.
   Large files decode independent record ranges and merge them in scanner order. The path solver runs independent
-  fits concurrently and merges them in order.
+  fits concurrently and merges them in order. Compressed LAS 1.4 point formats 6–10 decode only
+  coordinates, GPS time, return numbers, scanner channel, point source ID and scan angle during path
+  estimation. Window tracing skips scan angle, and ordinary extent rereads use only positions and GPS time
+  plus the LAZ base layer. Point formats 0–5 use full decoding.
 - The defaults retain approximately 40 million multi-return and 10 million single-return pulses, or 40 million
   single-return pulses for single-return acquisitions. `--full` keeps every pulse and uses memory proportional
   to input size.
 - GPS-window scratch contains durable compact counts at 12 bytes per stored voxel plus output intermediates.
   Count arrays are sparse files until the walker touches those cells. The debug report records recovered and unpaired
-  echoes, executed and reused windows, per-window RSS, sampled aggregate RSS and allocated scratch.
+  echoes, executed and reused windows, per-window RSS, sampled aggregate RSS, allocated scratch, peak worker
+  concurrency, memory reservations and retries.
 - `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements.
   Cgroup memory includes file cache.
 

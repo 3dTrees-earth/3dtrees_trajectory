@@ -51,7 +51,9 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
 1. **Argument checks** (`cli.py`). Outputs must not overwrite inputs. The voxel size must be 0.05 to 10 m.
    At least one file is needed. A delivered trajectory is only accepted together with occlusion outputs. Any failure
    gives **exit 2**.
-2. **Read and time-sort** (`cli.py`, `pulses.py`). Large files use independently decoded, ordered record ranges. GPS time must
+2. **Read and time-sort** (`cli.py`, `pulses.py`). Large files use independently decoded, ordered record ranges.
+   For compressed LAS 1.4 point formats 6–10, this pass asks lazrs for the XY/returns/scanner-channel base
+   layer, Z, GPS time, point source ID and scan angle. Formats 0–5 use full decoding. GPS time must
    exist, be finite and vary (`pulses.py`). If not: **exit 3** (`coverage.py`). Returns are
    paired into pulses per file. With no usable pulse: **exit 4** (`cli.py`).
 3. **Platform check** (`cli.py`, `estimate.py`). A static scanner is recognised when one position
@@ -77,7 +79,13 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
    The final vertical grid spans ground minus 1 m through canopy top plus 1 m, within the point extent.
 8. **Traversal** (`time_windows.py`, `ray_walk.cpp`). Workers seek the relevant LAS/LAZ ranges, rebuild whole
    pulses and trace them in disjoint GPS windows. The window planner uses the available slots and splits
-   further in time if needed. Finished count files can be reused after an interruption.
+   further in time if needed. The scheduler starts each worker with a reservation based on the window's echo
+   count, count voxels and columns. It scales the planning estimate for later workers by the highest observed
+   RSS-to-estimate ratio, adds 25% and 256 MiB, and checks cgroup headroom before admitting workers.
+   On suspected memory failure, it drains active workers before retrying the affected window alone
+   with a larger reservation. Completed count files can be reused after an interruption.
+   The reread needs point source ID for pulse grouping and clock repair, so it skips scan angle.
+   Unrepaired path-boundary rereads need just the base layer, Z and GPS time.
 9. **Classes and products** (`occlusion.py`). Sum hit, pass and hidden counts blockwise. A hit makes a filled
    voxel, a pass makes an empty voxel, and hidden-only makes an occluded voxel. Keep an unobserved class
    for voxels with zero coverage. Write voxel records to COPC and an occluded share to each COG band.
@@ -102,21 +110,33 @@ path as supplementary data.
 
 ![Stage resources](figures/stages.png)
 
-The round-6 local replays use ten CPU slots and a 140 GiB cap. Datasets 1807, 1844 and 2014 use local scanner-order
-LAZ replays. Dataset 1788 uses its standardized MLS file. Each round-6 run uses the same source records as its
-round-5 counterpart. The stage CSV includes the spatial-spool reference and the historical 2585 measurements.
+The round-7 baseline (`6e2410a`) and round 8 used the same local scanner-order LAZ inputs and ten
+CPU slots per job within a shared 140 GiB scope. Datasets 1807, 1844 and 2014 are ULS and 1788
+is the standardized MLS replay. The runs used separate CPU sets on the same host. Timing comes
+from one replay per dataset and version.
+
+| Dataset | Wall (s) | Mean cores | Peak RSS (GiB) | Peak workers | Peak reservations (GiB) | Read (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1807 | 25.1 → 24.5 | 5.12 → 5.10 | 4.09 → 3.80 | 10 → 10 | 25.95 → 25.95 | 5.3 → 4.8 |
+| 1844 | 200.4 → 199.3 | 7.30 → 7.20 | 5.86 → 5.86 | 10 → 10 | 96.09 → 96.09 | 37.0 → 35.3 |
+| 2014 | 65.0 → 65.8 | 4.91 → 4.81 | 5.08 → 5.06 | 10 → 10 | 29.53 → 29.53 | 7.6 → 7.2 |
+| 1788 | 242.1 → 238.6 | 3.21 → 3.31 | 8.86 → 8.90 | 10 → 10 | 32.67 → 32.67 | 4.9 → 4.8 |
+
+Each pair reads from round 7 to round 8. Mean cores are CPU seconds per wall second. Peak worker
+reservations reached the same values because all ten windows fit at startup on these four inputs.
+Peak RSS is the larger of the sampled worker-inclusive aggregate and the highest single-process RSS.
 
 <!-- stages:start -->
-| Stage | 1807 ULS | 1844 ULS | 2014 ULS | 1788 MLS |
+| Round 8 stage | 1807 ULS | 1844 ULS | 2014 ULS | 1788 MLS |
 | --- | ---: | ---: | ---: | ---: |
-| Read, reconstruct pulses and index source | 4.7 s / 6.5 cores | 34.6 s / 9.4 cores | 7.2 s / 5.4 cores | 5.8 s / 3.0 cores |
-| Path fitting | 1.0 s / 5.7 cores | 5.2 s / 3.5 cores | 2.8 s / 3.0 cores | 101.9 s / 2.4 cores |
-| Extent and crop | 0.2 s / 1.0 cores | 0.8 s / 1.0 cores | 1.7 s / 1.0 cores | 4.8 s / 1.0 cores |
+| Read, reconstruct pulses and index source | 4.8 s / 6.8 cores | 35.3 s / 9.1 cores | 7.2 s / 5.6 cores | 4.8 s / 3.4 cores |
+| Path fitting | 1.0 s / 5.7 cores | 5.3 s / 3.5 cores | 1.0 s / 6.2 cores | 92.6 s / 2.5 cores |
+| Extent and crop | 0.2 s / 1.0 cores | 0.8 s / 1.0 cores | 1.6 s / 1.0 cores | 4.8 s / 1.0 cores |
 | Plan GPS windows | 0.0 s / 1.0 cores | 0.2 s / 1.0 cores | 0.1 s / 1.0 cores | 0.1 s / 1.0 cores |
-| Rebuild and trace pulses | 10.6 s / 7.3 cores | 126.1 s / 8.2 cores | 25.8 s / 8.2 cores | 43.0 s / 8.0 cores |
-| Merge, classify and write intermediates | 1.4 s / 1.0 cores | 10.4 s / 1.0 cores | 11.4 s / 1.0 cores | 47.1 s / 1.0 cores |
-| Write voxel COPC | 3.6 s / 1.7 cores | 9.1 s / 4.1 cores | 7.9 s / 3.4 cores | 11.8 s / 6.5 cores |
-| Write height-band COG | 0.8 s / 1.0 cores | 9.7 s / 2.1 cores | 9.3 s / 2.1 cores | 28.4 s / 2.3 cores |
+| Rebuild and trace pulses | 11.9 s / 6.5 cores | 125.9 s / 8.1 cores | 26.2 s / 8.0 cores | 45.6 s / 7.6 cores |
+| Merge, classify and write intermediates | 1.4 s / 1.0 cores | 10.5 s / 1.0 cores | 11.2 s / 1.0 cores | 47.4 s / 1.0 cores |
+| Write voxel COPC | 3.6 s / 1.7 cores | 9.8 s / 3.8 cores | 8.0 s / 3.3 cores | 12.0 s / 6.4 cores |
+| Write height-band COG | 0.9 s / 1.0 cores | 9.6 s / 2.1 cores | 9.2 s / 2.1 cores | 28.6 s / 2.3 cores |
 <!-- stages:end -->
 
 CPU use is CPU seconds divided by wall seconds. Traversal includes source seeks, decoding, pulse grouping,
@@ -124,6 +144,31 @@ the ray walk and checkpoint writes. The first read reduces per-column minima and
 known, preparation decodes only indexed ranges that straddle the accepted time limits. The measurements
 separate preparation from the streaming traversal's own source reads. Extent preparation decoded one
 200,000-record boundary range on 1807 and zero records on 1844, 2014 and 1788.
+
+### Round-8 product equality
+
+| Dataset | CSV | GeoJSON | COG tiles | Decoded COPC records |
+| --- | --- | --- | --- | ---: |
+| 1807 | Exact | Exact | Exact | 1,657,932 exact |
+| 1844 | Exact | Exact | Exact | 10,525,300 exact |
+| 2014 | Exact | Exact | Exact | 7,977,880 exact |
+| 1788 | Exact | Exact | Exact | 23,932,359 exact |
+
+The complete CSV, GeoJSON and COG files match byte for byte, including every COG tile and overview. COPC
+comparison hashes the complete decoded records in voxel order and checks scales, offsets and product
+metadata. Untwine can place the same records differently in the compressed file.
+
+### Selective LAZ decoding
+
+The table compares all layers with selective decoding on local LAS 1.4 copies. Each value is the
+median of three read-only sweeps using ten CPU slots and one million records per batch. Required
+fields have the same byte digest in every sweep. The PF 8 conversion sets NIR to zero because
+the PF 3 source has no NIR channel.
+
+| LAS 1.4 copy | Points | Read wall (s) | Read CPU (s) | Peak RSS (MiB) |
+| --- | ---: | ---: | ---: | ---: |
+| 1807 PF 7 | 52,718,335 | 4.72 → 3.49 | 25.28 → 18.81 | 163.4 → 160.6 |
+| 2014 PF 8 | 52,650,235 | 4.23 → 3.51 | 21.63 → 16.95 | 165.1 → 163.0 |
 
 ### COG height-band comparison
 
@@ -188,7 +233,7 @@ whole-grid entry and lattice calculations. Each worker stores counts only for th
 in its indexed reach. The 1788 grid spans 2,000 × 2,000 × 1,278 voxels. Its widest planned windows each
 reserved 67.1 million count cells and finished within the 16 GiB per-window budget. The largest
 scanner-order ULS strip checked in local staging was 2014 at 658 × 740 m. Its per-window process
-RSS and the 1788 measurements are in the comparison table. The scheduler bisects a window when
+RSS and the 1788 measurements are in the comparison table. The planner bisects a window when
 its estimated bytes or echo count exceed its budget.
 
 Use direct GPS-window streaming for scanner-order LAS/LAZ. Pulse grouping runs inside each worker for all

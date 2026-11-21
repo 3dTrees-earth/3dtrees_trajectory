@@ -25,7 +25,7 @@ stages = [
     ("Merge + write", ("classify + ground", "COPC write", "COG write")),
 ]
 colors = ["#4878a8", "#d9822b", "#34846d", "#8256a2"]
-runs = list(dict.fromkeys((r["run"], r["mode"]) for r in table if r["mode"] != "Historical spool"))
+runs = list(dict.fromkeys((r["run"], r["mode"]) for r in table if r["mode"] in ("Round 7", "Round 8")))
 rows = {(r["run"], r["mode"], r["stage"]): r for r in table}
 labels = [f"{name} · {mode}" for name, mode in runs]
 fig, axes = plt.subplots(1, 3, figsize=(14, 6), gridspec_kw={"width_ratios": [1.8, 1, 1]})
@@ -57,7 +57,7 @@ axes[2].set(title="Peak stage RSS", xlabel="GiB, process or sampled worker sum",
 for ax in axes:
     ax.set_ylim(len(runs) - 0.5, -0.5)
     ax.spines[["top", "right"]].set_visible(False)
-fig.suptitle("Local LAS/LAZ replays · 10 CPU slots", y=0.98)
+fig.suptitle("Trajectory rounds 7 and 8 · 10 CPU slots", y=0.98)
 fig.tight_layout()
 fig.savefig(OUT / "stages.png", dpi=160)
 plt.close(fig)
@@ -100,13 +100,13 @@ stop(10.6, 19.4, "exit 2: TLS refused\n(v1.1 on branch)")
 box(5, 16.8, "Path method per file\n1 pulse lines (multi-return)  2 scan angle (single)\n3 lines + scan-angle gap fill", w=5.4, h=1.9)
 stop(10.6, 16.8, "exit 4: single returns\nwithout scan angle,\nno delivered path")
 box(5, 13.9, "Quality: median line miss ≤ 0.1 m good · ≤ 0.5 m rough\n> 0.5 m unreliable → retry with scan angle", w=5.6, h=1.6)
-ok(2.3, 11.4, "Trajectory CSV\n(3dtrees-trajectory/2)\n+ GeoJSON + report")
+ok(2.3, 11.4, "Trajectory CSV and GeoJSON\nJSON report with --debug")
 box(7.4, 11.4, "Occlusion requested?\npath = delivered (always, if given;\nflag if median miss > 0.1 m) else estimated", w=5.2, h=1.8)
 box(7.4, 8.6, "Merge first-read column bounds in path coverage\nGround from lowest hits", w=5.6, h=1.6)
-box(7.4, 6.0, "Stream disjoint GPS windows in parallel\nPair and trace each pulse once. Sum voxel counts.", w=5.6, h=1.6)
+box(7.4, 6.0, "Stream disjoint GPS windows in parallel\nAdmit workers by estimated memory and measured RSS.", w=5.6, h=1.6)
 box(7.4, 3.5, "Classify voxels: 1 filled · 2 empty · 3 occluded · 4 unobserved", w=5.8, h=1.2)
 ok(7.4, 1.2, "Occlusion COPC (classes 1, 3 and 4)\n+ COG (one band per voxel layer, 0.5 m default)")
-box(11.65, 8.6, "occlusion error:\nreport section,\nempty products,\npath kept", color="#fde2e1", w=2.4, h=1.9)
+box(11.65, 8.6, "Occlusion error\nstderr, empty products,\npath kept", color="#fde2e1", w=2.4, h=1.9)
 
 for y1, y2 in ((28.2, 27.4), (25.8, 25.0), (23.4, 22.6), (21.0, 20.2), (18.6, 17.8), (15.8, 14.7)):
     arrow(5, y1, 5, y2)
@@ -120,7 +120,7 @@ arrow(7.4, 5.2, 7.4, 4.1)
 arrow(7.4, 2.9, 7.4, 2.0)
 arrow(10.25, 8.6, 10.4, 8.6)
 ax.text(0.2, 0.2, "Exit codes: 0 done · 2 invalid input / TLS · 3 GPS time unusable · 4 no trajectory possible. "
-        "Refusals still write the JSON report.", fontsize=8.5)
+        "With --debug, refusals write a JSON report.", fontsize=8.5)
 fig.tight_layout()
 fig.savefig(OUT / "flow.png", dpi=150)
 plt.close(fig)
