@@ -208,8 +208,8 @@ Historical scanner-order LAZ benchmarks provide headroom estimates for the large
 
 The 2014 single-return replay reached 24.01 GiB, so the smallest class allows 32 GiB. The 1844 replay
 fits the 64 GiB class with room for the parent process and file cache. The 750 M–2.1 B class is interpolated.
-The raw 2585 replay reached its 190 GiB cap including file cache and used 34.5 GiB of sampled aggregate RSS
-in traversal. The proposed 140 GiB class needs a full standardized 2585 run at that cap before deployment.
+The round-2 raw 2585 replay reached its 190 GiB cap including file cache. Round 8 replayed the raw acquisition
+in 3 h 34 min with ten CPU slots and a 50 GiB cap. The proposed 140 GiB Galaxy class still needs a full standardized 2585 run.
 
 The standardized 1788 collection has 24.7 M points and a 2,000 × 2,000 × 1,278 grid at 0.5 m.
 Use `--debug` for current window memory and scratch measurements. [Stage resources](docs/REPORT.md#3-stage-resources)

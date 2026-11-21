@@ -151,3 +151,12 @@ run,mode,stage,wall_s,cores,peak_ram_gib,sampled_scratch_gib
 1788 MLS,Round 8,classify + ground,47.42,1.00,8.90,3.43
 1788 MLS,Round 8,COPC write,12.04,6.40,2.13,6.34
 1788 MLS,Round 8,COG write,28.62,2.30,2.78,6.34
+2585 ULS,Round 8 50 GiB,read/time-sort,519.44,9.01,16.08,
+2585 ULS,Round 8 50 GiB,platform check,0.38,1.00,12.38,
+2585 ULS,Round 8 50 GiB,path estimation,24.10,1.62,12.39,
+2585 ULS,Round 8 50 GiB,finalize extent/crop,15.90,1.00,11.86,
+2585 ULS,Round 8 50 GiB,plan GPS-time windows,15.11,1.00,11.93,
+2585 ULS,Round 8 50 GiB,traversal,10787.75,5.71,30.46,26.24
+2585 ULS,Round 8 50 GiB,classify + ground,1240.15,1.00,16.17,30.05
+2585 ULS,Round 8 50 GiB,COPC write,32.89,8.39,14.03,41.69
+2585 ULS,Round 8 50 GiB,COG write,177.30,1.65,13.65,41.69

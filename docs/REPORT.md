@@ -260,10 +260,30 @@ columns in scanner order and carries the equal-time tail across range boundaries
 include worker startup, result collection and the ordered merge. The averages reached 8.2 cores
 on 1844 and 5.1 on 2014 with ten workers.
 
-The local 2585 COPC remains a historical control. Its previous 7.0 billion point spool run routed 28.3
-billion echoes and peaked at 568 GiB scratch. A comparable scanner-order standardized 2585 collection was
-unavailable in the local staging used for these replays. The 140 GiB proposal for the highest Galaxy class
-still needs a full scanner-order run.
+### Dataset 2585 at 50 GiB
+
+The 50 GiB replay used 25 local scanner-order LAS 1.2 PF 3 files (7,044,924,732 input points) and ten CPU slots. Peak RSS takes the larger of the sampled worker-inclusive aggregate and the highest
+single-process RSS. The scratch values measure allocated blocks.
+
+| Stage | Wall (h:mm:ss or m:ss) | Mean cores | Peak RSS (GiB) | Sampled scratch (GiB) |
+| --- | ---: | ---: | ---: | ---: |
+| Read, reconstruct pulses and index source | 8:39 | 9.01 | 16.08 | — |
+| Platform check | 0:00 | 1.00 | 12.38 | — |
+| Path fitting | 0:24 | 1.62 | 12.39 | — |
+| Extent and crop | 0:16 | 1.00 | 11.86 | — |
+| Plan GPS windows | 0:15 | 1.00 | 11.93 | — |
+| Rebuild and trace pulses | 2:59:48 | 5.71 | 30.46 | 26.24 |
+| Merge, classify and write intermediates | 20:40 | 1.00 | 16.17 | 30.05 |
+| Write voxel COPC | 0:33 | 8.39 | 14.03 | 41.69 |
+| Write height-band COG | 2:57 | 1.65 | 13.65 | 41.69 |
+| Whole job | 3:33:44 | 5.31 | 30.46 | 41.69 |
+
+Traversal completed 99 GPS windows with 7 workers at peak. Peak reservations were 34.51 GiB, with 0 isolated retries. Median and maximum window RSS were 1.86 GiB and 5.02 GiB. Cgroup memory peaked at 50.00 GiB including file cache, with 0 OOM kills. The products contain 78,708,640 COPC records and a 4,520 × 2,426 COG with 127 bands.
+
+Read, pulse reconstruction and path fitting took 9.1 min, compared with 8.4 min in the stopped 50 GiB run. That run stopped after 33 windows and 3 h 15 min of traversal, averaging about 2.4 cores over the job. Round 8 passed its 2.68 billion traced echoes after 1:35:17 of total wall time, compared with 3 h 24 min in the stopped run. The full round-8 run averaged 5.31 cores and completed in 3:33:44. The round-2 spatial-tile replay took 7 h 46 min under a 190 GiB cap. Round 8 used 46% of that wall time.
+
+The verified input was the local raw acquisition. The standardized 2585 collection is still needed
+to validate the proposed Galaxy resource class.
 
 **Resource request for Galaxy (proposal, 10 cores)**
 
