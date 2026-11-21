@@ -20,7 +20,6 @@ import math
 import os
 import shutil
 import subprocess
-from concurrent.futures.process import BrokenProcessPool
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -475,14 +474,11 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
                 tags["OCCLUSION_DELIVERED_MISS_MEDIAN_M"] = str(delivered_check["median_m"])
         specs = [(number, window.memory, (window.count_cells, 3), (window,)) for number, window in enumerate(layout)]
         specs.sort(key=lambda job: (-layout[job[0]].echoes, -job[1]))
-        try:
-            with _stage(resources, "traversal", children=True, scratch=work) as stage:
-                windows = execute(work, specs, slots, time_windows.trace_window, time_windows.init_worker,
-                                  (index, grid, time, xyz, work, single_files, layer_ranges, time_bounds), stage)
-                stage["windows"] = [windows[i] | {"estimated_worker_bytes": w.memory} for i, w in enumerate(layout)]
-                stage["bytes_written"] = sum(w["bytes_written"] for w in windows.values())
-        except BrokenProcessPool as error:
-            raise ValueError(f"An occlusion worker stopped. Repeat the command to resume from {work.name}.") from error
+        with _stage(resources, "traversal", children=True, scratch=work) as stage:
+            windows = execute(work, specs, slots, time_windows.trace_window, time_windows.init_worker,
+                              (index, grid, time, xyz, work, single_files, layer_ranges, time_bounds), stage)
+            stage["windows"] = [windows[i] | {"estimated_worker_bytes": w.memory} for i, w in enumerate(layout)]
+            stage["bytes_written"] = sum(w["bytes_written"] for w in windows.values())
         with TemporaryDirectory(dir=work, prefix="merge-") as folder, \
              TemporaryDirectory(prefix=".occlusion-", dir=cog.parent) as cog_folder:
             merge, staged_cog = Path(folder), Path(cog_folder) / "occlusion.tif"
