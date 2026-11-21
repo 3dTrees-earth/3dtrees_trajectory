@@ -1,6 +1,6 @@
 # 3dtrees_trajectory: what the tool does, when, and where the time goes
 
-Status 21 Nov 2026, `main` after round 6. Version 1.0.0 covers moving lidar (ULS and MLS). TLS is v1.1.
+Status 21 Nov 2026, `main` after round 7. Version 1.0.0 covers moving lidar (ULS and MLS). TLS is v1.1.
 
 ## 1. What the tool does
 
@@ -23,10 +23,24 @@ A merged COPC is accepted for trajectory estimation. Occlusion requires the scan
 
 | Output | Content |
 | --- | --- |
-| Trajectory CSV (`3dtrees-trajectory/2`) | time, x, y, z per position, with method and quality in the header. Plus a GeoJSON line for the map. |
-| JSON report | Method, quality, warnings, refusal reason, exit code, COG height-band step (`occlusion.cog_band_step_m`), and time, CPU, RAM and scratch for every stage. |
+| Trajectory CSV (`3dtrees-trajectory/2`) | time, x, y, z per position, with method, quality, source and any warnings in the header. If the job also checks a delivered path, the header carries its miss flag. A companion GeoJSON provides the map layer. |
 | Occlusion COPC | One point per filled (1), occluded (3), or unobserved (4) voxel from ground through canopy top, with hit, pass and hidden counts. |
 | Occlusion COG | Occluded share per voxel layer above ground, followed by the unobserved share for the column. Pixels and height bands default to 0.5 m and follow `--voxel`. The `OCCLUSION_BAND_M` tag records the height step. |
+
+The COG dataset tags and the COPC's `3dtrees` extended variable length record (record ID 1) carry
+`OCCLUSION_PATH_METHOD`, `OCCLUSION_QUALITY`, and `OCCLUSION_TRAJECTORY`. When present,
+`OCCLUSION_WARNINGS` is a JSON array of warning strings stored as a tag value.
+`OCCLUSION_DELIVERED_MISS_FLAG` is `true`, `false`, or `unavailable` for a delivered path and
+corresponds to `# delivered_path_miss_flag:` in an accompanying CSV. CSV warnings use repeatable
+`# warning:` lines.
+
+### Debug report
+
+`--debug` writes a JSON report with method, quality, warnings, flags, refusal reason, exit code,
+COG height-band step (`occlusion.cog_band_step_m`), and time, CPU, RAM and scratch for every stage.
+The default path is `<csv-stem>.report.json` beside the CSV. Set `--debug --report PATH` to choose
+another path or to request a report for an occlusion-only run. `--report PATH` alone exits 2.
+The Galaxy wrapper lives outside this repository and must collect a JSON output only when debug is enabled.
 
 ## 2. What happens when
 
@@ -55,9 +69,8 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
    - **unreliable**: > 0.5 m. The tool then retries with scan angles. Without a scan angle: **exit 4**
      (`cli.py`).
 6. **Delivered path** (`cli.py`, `occlusion.py`). It always replaces the estimate for occlusion.
-   The tool measures how far the pulse lines miss it. A median above 0.1 m is flagged in the report, but the path
-   is still used. If the estimate fails but a delivered path exists, the job continues with the delivered path
-   (`cli.py`).
+   The tool measures how far the pulse lines miss it and flags a median above 0.1 m in the products and optional
+   debug report. Occlusion uses the delivered path even when the estimate fails (`cli.py`).
 7. **Occlusion grid** (`window_input.py`, `occlusion.py`). During the first read, indexed record ranges store time
    bounds and column extrema. Within path coverage, the lowest hits give ground and the highest hits give canopy.
    Empty columns take their nearest ground estimate, and ground spikes take the local median.
@@ -69,19 +82,21 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
    voxel, a pass makes an empty voxel, and hidden-only makes an occluded voxel. Keep an unobserved class
    for voxels with zero coverage. Write voxel records to COPC and an occluded share to each COG band.
    With voxel size `s`, band `k` covers `[k·s, (k+1)·s)` metres above ground.
-10. **Occlusion failure** (`cli.py`). Report the error, publish zero-byte occlusion files and retain any
-    successfully estimated trajectory.
+10. **Occlusion failure** (`cli.py`). Print the error to stderr, publish zero-byte occlusion files and retain any
+    successfully estimated trajectory with the warning in its CSV header.
 
 ### Exit codes
 
 | Code | Meaning | Where |
 | --- | --- | --- |
 | 0 | Done | `cli.py` |
-| 2 | Invalid arguments, unreadable input, out of memory, TLS refused, report not writable | `cli.py` |
+| 2 | Invalid arguments, unreadable input, out of memory, TLS refused, requested debug report not writable | `cli.py` |
 | 3 | GPS time missing, constant or not finite | `coverage.py`, `pulses.py`, `estimate.py` |
 | 4 | No path can be estimated (no pulses, single returns without scan angle, too few reliable positions) | `coverage.py`, `estimate.py`, `cli.py` |
 
-Refusals include a reason in the JSON report. Exit 3, exit 4 and errors using a delivered path also ask the uploader to retain the path as supplementary data.
+Refusals print a reason to stderr and write zero-byte products at safe destinations. The debug report also
+records the reason when requested. Exit 3, exit 4 and delivered-path check errors ask the uploader to retain the
+path as supplementary data.
 
 ## 3. Stage resources
 

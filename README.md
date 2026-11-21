@@ -1,8 +1,8 @@
 # 3dtrees_trajectory
 
 The 1.0.0 scope covers ULS and MLS. The tool estimates the flight or walking path from a standardized point cloud
-collection and writes a 3Dtrees trajectory CSV, a quality and resource report, and a map layer. It can also map
-occlusion along the estimated or delivered path. The current package version is 0.1.0.
+collection and writes a 3Dtrees trajectory CSV and a map layer. It can also map occlusion along the estimated or
+delivered path. Use `--debug` to write a separate quality and resource report. The current package version is 0.1.0.
 
 ## Run
 
@@ -17,32 +17,37 @@ standardization.
 
 The reader supports LAS/LAZ 1.2–1.4 and point formats 0–10. Each file needs finite, varying GPS time.
 All files must share a GPS time system and metric coordinates. If the CRS is missing, the tool assumes
-metres and preserves the input coordinates. Point formats 0 and 2 receive a refusal report because
-they lack GPS time.
+metres and preserves the input coordinates. The tool refuses point formats 0 and 2 because they lack GPS time.
 
 ### Outputs
 
 | File | Contents |
 | --- | --- |
-| `trajectory.csv` | `3dtrees-trajectory/2` with columns `time,x,y,z,roll,pitch,yaw,name`. Time and XYZ use the cloud's clock and coordinates. Attitude and name are empty. |
-| `trajectory.report.json` | Method, quality, per-file return modes, exit code, refusal reason, point counts, and stage and job resources. |
+| `trajectory.csv` | `3dtrees-trajectory/2` with columns `time,x,y,z,roll,pitch,yaw,name`. Time and XYZ use the cloud's clock and coordinates. Attitude and name are empty. The `#` header records method, quality, source, and any warnings or delivered-path miss flag. |
 | `trajectory.geojson` | Path segments separated at gaps over 5 seconds, thinned to about one vertex per metre. Uses WGS84 when the CRS is known and cloud coordinates otherwise. |
 
-`--report` and `--geojson` override the default paths next to the CSV. The tool creates their parent directories
+`--geojson` overrides the default map layer path next to the CSV. The tool creates output directories
 and publishes each file by rename. The GeoJSON file is zero bytes when there are no drawable segments or
 reprojection fails. `3dtrees-trajectory-geojson trajectory/trajectory.csv` can also draw the layer from an
 existing trajectory CSV.
+
+### Debug report
+
+`--debug` writes `trajectory.report.json` next to the CSV. It records method, quality, warnings, flags,
+refusal reason, exit code, point counts, per-file return modes, and stage and job resources.
+Use `--debug --report PATH` to choose the report location. `--report PATH` requires `--debug` and
+is required for an occlusion-only debug run. The Galaxy wrapper should publish JSON only when debug is enabled.
 
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The path was estimated or the delivered-path occlusion products were written. In a combined job, the estimated path may succeed with an occlusion error in the report. |
+| `0` | The path was estimated or the delivered-path occlusion products were written. In a combined job, the estimated path may succeed with an occlusion warning on stderr and in its CSV header. |
 | `2` | Invalid arguments or data, a detected static (TLS) acquisition, or a failed output operation. |
 | `3` | GPS time is missing, nonfinite or constant in a moving acquisition. A constant point clock cannot be aligned with a moving delivered path. |
 | `4` | The cloud has no usable estimate and no delivered path to support occlusion. |
 
-For a refusal, the JSON records the reason when the report destination is writable. Safe, writable product
+Refusals print their reason to stderr and record it in the debug report when requested. Safe, writable product
 destinations receive zero-byte files. Keep a delivered path as supplementary data when the tool cannot use it.
 
 Supply an output CSV for an estimated path. The CSV, GeoJSON, report and input paths must be distinct.
@@ -55,12 +60,12 @@ the cloud's GPS times to fit into a signed 64-bit window index. `--threads` take
 3dtrees-trajectory standardized/strip1.las standardized/strip2.laz -o trajectory.csv \
   --occlusion-copc occlusion.copc.laz --occlusion-cog occlusion.tif
 
-3dtrees-trajectory standardized/strip1.las standardized/strip2.laz --trajectory delivered.csv --report occlusion.report.json \
+3dtrees-trajectory standardized/strip1.las standardized/strip2.laz --trajectory delivered.csv \
   --occlusion-copc occlusion.copc.laz --occlusion-cog occlusion.tif
 ```
 
 Supply both occlusion destinations. When `--trajectory` is supplied, occlusion uses that path. With no
-`-o` the tool checks the cloud and writes the occlusion products and report without fitting a path.
+`-o` the tool checks the cloud and writes the occlusion products without fitting a path.
 A delivered moving-path CSV starts with `time,x,y,z`, optionally preceded by `#` metadata. It needs at least two
 positions, finite coordinates, and unique timestamps in the cloud's GPS clock and coordinate system.
 Resolve week seconds versus adjusted GPS time before running. Both modes require a moving sensor.
@@ -80,12 +85,12 @@ neighbourhood median is replaced by that median. The highest filled voxel caps e
 | `occlusion.tif` | North-up COG with one pixel per voxel column and one height band per voxel layer. The default bands are `occluded_0-0.5m`, `occluded_0.5-1m` and so on. Each value is the occluded voxel count divided by the sum of filled, empty and occluded voxels, with NaN when the sum is zero. The final `unobserved_column` band gives the unobserved share of all voxels from ground through canopy top. |
 
 With step `s`, zero-based band `k` covers `[k·s, (k+1)·s)` metres above ground. The pixel size and height-band
-step both follow `--voxel` and default to 0.5 m. The COG records the step in `OCCLUSION_BAND_M` and the JSON report
+step both follow `--voxel` and default to 0.5 m. The COG records the step in `OCCLUSION_BAND_M` and the debug report
 records it in `occlusion.cog_band_step_m`.
 
 If there are no qualifying voxels, the COPC is zero bytes and the COG is valid with NaN values. On an
-occlusion error both destinations are zero bytes and the report gives the reason. A combined job can
-still return its estimated trajectory. The report includes traversal counts, in-range class totals,
+occlusion error both destinations are zero bytes and stderr gives the reason. A combined job can
+still return its estimated trajectory. The debug report includes traversal counts, in-range class totals,
 and the pooled occluded share per height band.
 
 The first read builds the trajectory sample, indexes record ranges by GPS time and collects their column extrema.
@@ -102,10 +107,15 @@ The merge adds window counts blockwise before classifying voxels. Repeat the sam
 interrupted run. Keep the `.occlusion-*` checkpoint beside the COPC until both outputs are published.
 A merged COPC can supply the trajectory estimate. For occlusion, supply the standardized LAS/LAZ collection.
 
-The delivered path is used for every occlusion ray when supplied. The report and COG metadata flag a median
-perpendicular distance above 0.1 m from the delivered path to usable pulse lines. With only single returns there
-are no return lines for this check. OccPy traces single-return shots independently. An occlusion run from a
-scan-angle estimate is marked `rough` in both outputs.
+The delivered path is used for every occlusion ray when supplied. `OCCLUSION_DELIVERED_MISS_FLAG` records whether
+the median perpendicular distance from that path to usable pulse lines exceeds 0.1 m. Its values are `true`,
+`false`, and `unavailable` when there are no usable lines. A CSV produced in the same run records the result
+as `# delivered_path_miss_flag:`. OccPy traces single-return shots independently.
+
+Both occlusion products record the path source (`OCCLUSION_TRAJECTORY`), path method
+(`OCCLUSION_PATH_METHOD`), quality (`OCCLUSION_QUALITY`), any warnings (`OCCLUSION_WARNINGS`), and the
+delivered-path miss flag when applicable. A scan-angle estimate is marked `rough`. The COG stores these as
+dataset tags. The COPC stores the same keys in the `3dtrees` extended variable length record (record ID 1).
 
 COPC indexing and COG conversion use temporary files beside the product destinations. The job needs space for
 the uncompressed voxel LAS, intermediate TIFF and final outputs. Wide rasters use a band-interleaved
@@ -122,7 +132,7 @@ point format can contain an angle field filled with zero. Multi-return clouds ca
 when they have enough usable pulse lines. Preserve GPS time, ReturnNumber, NumberOfReturns, ScanAngle
 (or ScanAngleRank for legacy formats), PointSourceID and scanner channel wherever the input format provides
 them. The tool checks usable pulses, the multi-return share, return pairing,
-and static-scan evidence and records its refusal in JSON. The platform gate can route clearly unsuitable
+and static-scan evidence and prints its refusal to stderr. The platform gate can route clearly unsuitable
 datasets before scheduling a job.
 
 ## How it works
@@ -134,7 +144,7 @@ datasets before scheduling a job.
 | Usable scan angles and GPS time | `scan_angle` fits the angle off nadir, assuming a level line scanner. If pairing failed, the affected file goes to the single-return traversal. |
 | Missing path windows in a file with usable single returns | `lines_scan_angle` keeps reliable line fits and uses scan angles to fill missing time windows. The combined estimate is marked `rough`. |
 | A delivered path in the cloud's clock and CRS | Occlusion uses the delivered positions. An estimated trajectory is optional. |
-| Too little geometric information for either estimator | The report asks for the delivered trajectory. |
+| Too little geometric information for either estimator | The refusal message asks for the delivered trajectory. |
 
 Line fits that miss their pulse lines by more than ten times the median, with a threshold of at least 0.25 m, are
 dropped. The tool also drops positions over 1 m from the path described by nearby fits. The line quality labels are
@@ -158,7 +168,7 @@ the path tool's scope.
   single-return pulses for single-return acquisitions. `--full` keeps every pulse and uses memory proportional
   to input size.
 - GPS-window scratch contains durable compact counts at 12 bytes per stored voxel plus output intermediates.
-  Count arrays are sparse files until the walker touches those cells. The report records recovered and unpaired
+  Count arrays are sparse files until the walker touches those cells. The debug report records recovered and unpaired
   echoes, executed and reused windows, per-window RSS, sampled aggregate RSS and allocated scratch.
 - `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements.
   Cgroup memory includes file cache.
@@ -195,7 +205,7 @@ The raw 2585 replay reached its 190 GiB cap including file cache and used 34.5 G
 in traversal. The proposed 140 GiB class needs a full standardized 2585 run at that cap before deployment.
 
 The standardized 1788 collection has 24.7 M points and a 2,000 × 2,000 × 1,278 grid at 0.5 m.
-See the tool report for current window memory and scratch measurements. [Stage resources](docs/REPORT.md#3-stage-resources)
+Use `--debug` for current window memory and scratch measurements. [Stage resources](docs/REPORT.md#3-stage-resources)
 
 ## Archived trajectory-only replay
 
@@ -239,7 +249,8 @@ docker run --rm --name trajectory-local --user "$(id -u):$(id -g)" \
 ```
 
 The Galaxy wrapper should accept one collection of standardized LAS/LAZ files per dataset and pass all its
-members to one tool job. Pass `--threads "${GALAXY_SLOTS:-4}"` from the job allocation and collect the three fixed outputs.
+members to one tool job. Pass `--threads "${GALAXY_SLOTS:-4}"` from the job allocation and collect the requested
+CSV, GeoJSON and occlusion products.
 Keep sampling and platform diagnostics in the CLI. File metadata and geometry refusals are checked at runtime.
 A published release tag that matches the CLI and package versions publishes
 `ghcr.io/3dtrees-earth/3dtrees_trajectory:<version>` and a SIF built from the same Docker digest at

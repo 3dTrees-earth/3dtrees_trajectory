@@ -49,7 +49,8 @@ def _run(argv, output_locks) -> int:
     parser.add_argument("clouds", nargs="*", type=Path, help="standardized LAS/LAZ files from one dataset, in collection order")
     parser.add_argument("-o", "--output", type=Path, help="3Dtrees trajectory CSV")
     parser.add_argument("--debug", action="store_true", help="write a JSON quality and resource report")
-    parser.add_argument("--report", type=Path, help="debug report path (requires --debug, defaults next to the CSV)")
+    parser.add_argument("--report", type=Path,
+                        help="debug report path (requires --debug, defaults next to the CSV, required without a CSV)")
     parser.add_argument("--geojson", type=Path, help="map layer of the path (default next to the CSV)")
     parser.add_argument("--no-platform-check", action="store_true", help="skip static (TLS) cloud detection when estimating a path")
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
