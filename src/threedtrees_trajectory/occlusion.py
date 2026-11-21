@@ -9,8 +9,8 @@ Heights above ground come from the lowest filled voxel of each column, with
 columns more than 2 m above their 5 m neighbourhood median replaced by that median.
 
 Outputs: a COPC with one point per voxel between the ground and the canopy top that is not empty (class, counts,
-occluded fraction, height above ground), and a COG with the voxel columns as pixels and one band per metre above
-ground holding the occluded share of the observed voxels, plus a last band with the column's unobserved share.
+occluded fraction, height above ground), and a COG with the voxel columns as pixels and one band per voxel layer
+above ground holding the occluded share of the observed voxels, plus a last band with the column's unobserved share.
 """
 from __future__ import annotations
 
@@ -42,7 +42,6 @@ GIB = 2**30
 DEFAULT_BUDGET = 16 * GIB
 HARD_BUDGET = 64 * GIB
 WINDOW = 128  # XY block size for deriving and writing the products
-BAND_M = 1.0  # height band of the COG
 SPIKE_M = 2.0  # a lowest-hit ground this far above its neighbourhood is vegetation, not ground
 SPIKE_WINDOW_M = 5.0
 TIME_MARGIN = 1.0  # seconds a pulse may lie outside the trajectory's span
@@ -307,20 +306,21 @@ def _write_voxels(writer, grid: Grid, xy, centres, heights, classes, inside, cou
     writer.write_points(points)
 
 
-def _band_shares(classes: np.ndarray, heights: np.ndarray, inside: np.ndarray, n_bands: int) -> tuple:
+def _band_shares(classes: np.ndarray, first_layer: int, ground_layers: np.ndarray, inside: np.ndarray,
+                 n_bands: int) -> tuple:
     nx, ny, _ = classes.shape
     x, y, z = np.nonzero(inside & (classes != UNOBSERVED))
-    band = (heights[x, y, z] / BAND_M).astype(np.intp)
-    key = (band * nx + x) * ny + y
-    shape = (n_bands, nx, ny)
-    seen = np.bincount(key, minlength=math.prod(shape)).reshape(shape)
-    hidden = np.bincount(key[classes[x, y, z] == OCCLUDED], minlength=math.prod(shape)).reshape(shape)
+    band = first_layer + z - ground_layers[x, y]
+    occluded = classes[x, y, z] == OCCLUDED
     shares = np.full((n_bands + 1, nx, ny), np.nan, np.float32)
-    np.divide(hidden, seen, out=shares[:-1], where=seen > 0)
+    # Each band contains exactly one voxel layer per column.
+    shares[band, x, y] = occluded
     column = inside.sum(axis=2)
     unseen = (inside & (classes == UNOBSERVED)).sum(axis=2)
     np.divide(unseen, column, out=shares[-1], where=column > 0)
-    return shares.transpose(0, 2, 1)[:, ::-1, :], seen.sum(axis=(1, 2)), hidden.sum(axis=(1, 2))
+    seen = np.bincount(band, minlength=n_bands)
+    hidden = np.bincount(band[occluded], minlength=n_bands)
+    return shares.transpose(0, 2, 1)[:, ::-1, :], seen, hidden
 
 
 def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, resources, slots):
@@ -332,9 +332,13 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
     nx, ny, nz = grid.shape
     layers = np.arange(nz)
     centres = grid.origin[2] + (layers + 0.5) * grid.voxel
-    max_height = (centres[np.clip(top, 0, nz - 1)] - ground)[top >= 0].astype(np.float32).max(initial=0)
-    n_bands = math.floor(float(max_height) / BAND_M) + 1
-    names = [f"occluded_{b:g}-{b + BAND_M:g}m" for b in np.arange(n_bands) * BAND_M] + ["unobserved_column"]
+    # Ground is always on a voxel centre, including after nearest fill and median filtering.
+    # Layer indices keep centres on the correct side of a band boundary for fractional voxel sizes.
+    ground_layers = np.rint((ground - centres[0]) / grid.voxel).astype(np.int32)
+    covered = top >= 0
+    n_bands = int((top[covered] - ground_layers[covered]).max(initial=0)) + 1
+    names = [f"occluded_{i * grid.voxel:.12g}-{(i + 1) * grid.voxel:.12g}m" for i in range(n_bands)]
+    names.append("unobserved_column")
     north = grid.origin[1] + ny * grid.voxel
     profile = dict(driver="GTiff", width=nx, height=ny, count=len(names), dtype="float32", nodata=np.nan,
                    transform=from_origin(grid.origin[0], north, grid.voxel, grid.voxel), crs=crs_wkt,
@@ -354,20 +358,25 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
     with rasterio.Env(GDAL_CACHEMAX=cache_mib * 1024**2, CPL_TMPDIR=str(work)):
         with laspy.open(flat, "w", header=_copc_header(grid, crs_wkt)) as writer, rasterio.open(raster, "w", **profile) as out:
             out.descriptions = tuple(names)
-            out.update_tags(OCCLUSION_BAND_M=str(BAND_M), **tags, OCCLUSION_VALUE="occluded / (filled + empty + occluded)")
+            out.update_tags(OCCLUSION_BAND_M=str(grid.voxel), **tags,
+                            OCCLUSION_VALUE="occluded / (filled + empty + occluded)")
             with _stage(resources, "classify + ground", scratch=work.parent):
                 for (xs, ys), z, counts in blocks:
                     hits = counts[0] > 0
                     local_top = np.where(hits.any(axis=2), z.stop - 1 - hits[:, :, ::-1].argmax(axis=2), -1)
                     heights = (centres[z] - ground[xs, ys, None]).astype(np.float32)
                     threshold = np.minimum(top[xs, ys], local_top)
-                    inside = (heights >= 0) & (layers[z] <= threshold[:, :, None])
-                    if not inside.any():
+                    below_canopy = layers[z] <= threshold[:, :, None]
+                    # Preserve the COPC's float32 height test and point records.
+                    copc_inside = (heights >= 0) & below_canopy
+                    ground_block = ground_layers[xs, ys]
+                    inside = (layers[z] >= ground_block[:, :, None]) & below_canopy
+                    if not (inside.any() or copc_inside.any()):
                         continue
                     classes = classify(*counts)
                     classes_total += np.bincount(classes[inside], minlength=5)
-                    _write_voxels(writer, grid, (xs, ys), centres[z], heights, classes, inside, counts)
-                    shares, seen, hidden = _band_shares(classes, heights, inside, n_bands)
+                    _write_voxels(writer, grid, (xs, ys), centres[z], heights, classes, copc_inside, counts)
+                    shares, seen, hidden = _band_shares(classes, z.start, ground_block, inside, n_bands)
                     out.write(shares, window=Window(xs.start, ny - ys.stop, xs.stop - xs.start, ys.stop - ys.start))
                     seen_total += seen
                     hidden_total += hidden
@@ -388,6 +397,7 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
     return {
         "voxels_ground_to_canopy": stats,
         "occluded_share": round(stats["occluded"] / int(observed), 4) if observed else None,
+        "cog_band_step_m": grid.voxel,
         "cog_bands": names,
         "occluded_share_by_height_band": [int(hidden) / int(seen) if seen else None
                                           for seen, hidden in zip(seen_total, hidden_total)],

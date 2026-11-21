@@ -77,6 +77,7 @@ def test_estimated_path_gives_trajectory_2_report_copc_and_cog(tmp_path):
 
     section = report["occlusion"]
     assert section["trajectory"] == "estimated" and section["ground"] == "lowest_hit"
+    assert section["cog_band_step_m"] == 0.5
     with laspy.open(copc) as reader:
         assert reader.header.point_count == section["copc_points"] > 0
         assert any(type(vlr).__name__ == "CopcInfoVlr" for vlr in reader.header.vlrs)
@@ -89,27 +90,48 @@ def test_estimated_path_gives_trajectory_2_report_copc_and_cog(tmp_path):
     assert np.all(points["height_above_ground"] >= 0)
     with rasterio.open(cog) as raster:
         assert raster.tags(ns="IMAGE_STRUCTURE")["LAYOUT"] == "COG"
-        assert float(raster.tags()["OCCLUSION_BAND_M"]) == 1
+        assert float(raster.tags()["OCCLUSION_BAND_M"]) == section["cog_band_step_m"]
         assert raster.res == (0.5, 0.5)
-        names = [f"occluded_{band}-{band + 1}m" for band in range(raster.count - 1)] + ["unobserved_column"]
+        height_bands = int(np.max(points["height_above_ground"]) / 0.5) + 1
+        assert raster.count == height_bands + 1
+        names = [f"occluded_{i / 2:g}-{(i + 1) / 2:g}m" for i in range(height_bands)] + ["unobserved_column"]
         assert list(raster.descriptions) == section["cog_bands"] == names
+        assert len(section["occluded_share_by_height_band"]) == height_bands
         values = raster.read()
     finite = values[np.isfinite(values)]
     assert finite.size and finite.min() >= 0 and finite.max() <= 1
 
 
 @needs_untwine
-def test_delivered_path_is_used_without_estimating(tmp_path):
+@pytest.mark.parametrize("voxel", [1, 0.3])
+def test_delivered_path_is_used_without_estimating(tmp_path, voxel):
+    import rasterio
+
     time, sensor = flight(tmp_path / "f.laz")
     path = tmp_path / "delivered.csv"
     rows = "\n".join(f"{t:.6f},{x:.4f},{y:.4f},{z:.4f}" for t, (x, y, z) in zip(time[::400], sensor[::400]))
     path.write_text(f"# format: 3dtrees-trajectory/1\ntime,x,y,z\n{rows}\n")
     copc, cog, report = tmp_path / "o.copc.laz", tmp_path / "o.tif", tmp_path / "r.json"
     assert main([str(tmp_path / "f.laz"), "--trajectory", str(path), "--report", str(report),
-                 "--occlusion-copc", str(copc), "--occlusion-cog", str(cog), "--voxel", "1"]) == 0
+                 "--occlusion-copc", str(copc), "--occlusion-cog", str(cog), "--voxel", str(voxel)]) == 0
     data = json.loads(report.read_text())
     assert data["trajectory"] == "delivered" and data["occlusion"]["trajectory"] == "delivered"
     assert copc.stat().st_size > 0 and cog.stat().st_size > 0
+    assert data["occlusion"]["cog_band_step_m"] == voxel
+    with rasterio.open(cog) as raster:
+        assert float(raster.tags()["OCCLUSION_BAND_M"]) == voxel
+        assert raster.res == (voxel, voxel)
+        assert raster.descriptions[:2] == (f"occluded_0-{voxel:g}m", f"occluded_{voxel:g}-{2 * voxel:g}m")
+
+
+def test_band_shares_use_column_relative_layers():
+    classes = np.array([[[1, 3, 2, 4]], [[4, 1, 4, 3]]])
+    ground_layers = np.array([[2], [3]])
+    inside = np.arange(2, 6) >= ground_layers[:, :, None]
+    values, seen, hidden = occlusion._band_shares(classes, 2, ground_layers, inside, 4)
+    np.testing.assert_allclose(values[:, 0], [[0, 0], [1, np.nan], [0, 1], [np.nan, np.nan], [0.25, 1 / 3]])
+    np.testing.assert_array_equal(seen, [2, 1, 2, 0])
+    np.testing.assert_array_equal(hidden, [0, 1, 1, 0])
 
 
 @pytest.mark.parametrize("offset", [100, 400_000_000])
