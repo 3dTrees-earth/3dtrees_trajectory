@@ -88,7 +88,7 @@ def arrow(x1, y1, x2, y2, label=None):
         ax.text((x1 + x2) / 2 + 0.1, (y1 + y2) / 2 + 0.1, label, fontsize=8.5, color="#333")
 
 
-box(5, 29, "Input: one collection of standardized LAS/LAZ\n(+ optional delivered trajectory CSV, optional DTM)")
+box(5, 29, "Input: one collection of standardized LAS/LAZ\n(+ optional delivered trajectory CSV)")
 box(5, 26.6, "Argument + path checks\n(outputs ≠ inputs, voxel 0.05–10 m, ≥ 1 file)")
 stop(10.6, 26.6, "exit 2: invalid\narguments / unreadable input")
 box(5, 24.2, "Read scanner-order chunks and index bounds\nGPS time present, finite, varying?")
@@ -100,19 +100,19 @@ stop(10.6, 19.4, "exit 2: TLS refused\n(v1.1 on branch)")
 box(5, 16.8, "Path method per file\n1 pulse lines (multi-return)  2 scan angle (single)\n3 lines + scan-angle gap fill", w=5.4, h=1.9)
 stop(10.6, 16.8, "exit 4: single returns\nwithout scan angle,\nno delivered path")
 box(5, 13.9, "Quality: median line miss ≤ 0.1 m good · ≤ 0.5 m rough\n> 0.5 m unreliable → retry with scan angle", w=5.6, h=1.6)
-ok(1.9, 11.4, "Trajectory CSV\n(3dtrees-trajectory/2)\n+ GeoJSON + report")
+ok(2.3, 11.4, "Trajectory CSV\n(3dtrees-trajectory/2)\n+ GeoJSON + report")
 box(7.4, 11.4, "Occlusion requested?\npath = delivered (always, if given;\nflag if median miss > 0.1 m) else estimated", w=5.2, h=1.8)
-box(7.4, 8.6, "Merge first-read column bounds in path coverage\nGround from DTM or lowest hits", w=5.6, h=1.6)
+box(7.4, 8.6, "Merge first-read column bounds in path coverage\nGround from lowest hits", w=5.6, h=1.6)
 box(7.4, 6.0, "Stream disjoint GPS windows in parallel\nPair and trace each pulse once. Sum voxel counts.", w=5.6, h=1.6)
 box(7.4, 3.5, "Classify voxels: 1 filled · 2 empty · 3 occluded · 4 unobserved", w=5.8, h=1.2)
-ok(7.4, 1.2, "Occlusion COPC (classes 1, 3 and 4)\n+ COG (occluded share per 1 m band, 0.5 m px)")
+ok(7.4, 1.2, "Occlusion COPC (classes 1, 3 and 4)\n+ COG (one band per voxel layer, 0.5 m default)")
 box(11.65, 8.6, "occlusion error:\nreport section,\nempty products,\npath kept", color="#fde2e1", w=2.4, h=1.9)
 
 for y1, y2 in ((28.2, 27.4), (25.8, 25.0), (23.4, 22.6), (21.0, 20.2), (18.6, 17.8), (15.8, 14.7)):
     arrow(5, y1, 5, y2)
 for y in (26.6, 24.2, 21.8, 19.4, 16.8):
     arrow(7.3 if y != 16.8 else 7.7, y, 8.8, y, "no" if y in (24.2, 21.8) else ("yes" if y == 19.4 else None))
-arrow(4.2, 13.1, 2.3, 12.1)
+arrow(4.2, 13.1, 2.6, 12.1)
 arrow(5.8, 13.1, 7.0, 12.3)
 arrow(7.4, 10.5, 7.4, 9.4)
 arrow(7.4, 7.8, 7.4, 6.8)

@@ -1,14 +1,14 @@
 # 3dtrees_trajectory: what the tool does, when, and where the time goes
 
-Status 20 Nov 2026, `main` after round 5. Scope of 1.0.0: moving lidar (ULS and MLS). TLS is v1.1.
+Status 21 Nov 2026, `main` after round 6. Version 1.0.0 covers moving lidar (ULS and MLS). TLS is v1.1.
 
 ## 1. What the tool does
 
 The tool takes the point cloud of one ULS or MLS dataset and does two things.
 
 1. **Trajectory.** It estimates where the sensor was, every 0.5 s, from the points alone.
-2. **Occlusion.** It traces every laser pulse from the sensor through its returns. It then marks each 0.5 m voxel as
-   seen, empty, hidden behind vegetation, or never reached.
+2. **Occlusion.** It traces every laser pulse from the sensor through its returns. It then marks each voxel as
+   filled, empty, occluded, or unobserved. Voxel size defaults to 0.5 m.
 
 **Inputs**
 
@@ -24,9 +24,9 @@ A merged COPC is accepted for trajectory estimation. Occlusion requires the scan
 | Output | Content |
 | --- | --- |
 | Trajectory CSV (`3dtrees-trajectory/2`) | time, x, y, z per position, with method and quality in the header. Plus a GeoJSON line for the map. |
-| JSON report | Method, quality, warnings, refusal reason, exit code, and time, CPU, RAM and scratch for every stage. |
-| Occlusion COPC | One point per voxel. Class 1 filled, 2 empty, 3 occluded, 4 unobserved, plus hit, pass and hidden counts. |
-| Occlusion COG | Occluded share per 1 m height band above ground, 0.5 m pixels. |
+| JSON report | Method, quality, warnings, refusal reason, exit code, COG height-band step (`occlusion.cog_band_step_m`), and time, CPU, RAM and scratch for every stage. |
+| Occlusion COPC | One point per filled (1), occluded (3), or unobserved (4) voxel from ground through canopy top, with hit, pass and hidden counts. |
+| Occlusion COG | Occluded share per voxel layer above ground, followed by the unobserved share for the column. Pixels and height bands default to 0.5 m and follow `--voxel`. The `OCCLUSION_BAND_M` tag records the height step. |
 
 ## 2. What happens when
 
@@ -59,14 +59,16 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
    is still used. If the estimate fails but a delivered path exists, the job continues with the delivered path
    (`cli.py`).
 7. **Occlusion grid** (`window_input.py`, `occlusion.py`). During the first read, indexed record ranges store time
-   bounds and column extrema. Path coverage selects the summaries used to determine ground and canopy.
+   bounds and column extrema. Within path coverage, the lowest hits give ground and the highest hits give canopy.
+   Empty columns take their nearest ground estimate, and ground spikes take the local median.
    The final vertical grid spans ground minus 1 m through canopy top plus 1 m, within the point extent.
 8. **Traversal** (`time_windows.py`, `ray_walk.cpp`). Workers seek the relevant LAS/LAZ ranges, rebuild whole
    pulses and trace them in disjoint GPS windows. The window planner uses the available slots and splits
    further in time if needed. Finished count files can be reused after an interruption.
 9. **Classes and products** (`occlusion.py`). Sum hit, pass and hidden counts blockwise. A hit makes a filled
    voxel, a pass makes an empty voxel, and hidden-only makes an occluded voxel. Keep an unobserved class
-   for voxels with zero coverage. Then write COPC and COG.
+   for voxels with zero coverage. Write voxel records to COPC and an occluded share to each COG band.
+   With voxel size `s`, band `k` covers `[k·s, (k+1)·s)` metres above ground.
 10. **Occlusion failure** (`cli.py`). Report the error, publish zero-byte occlusion files and retain any
     successfully estimated trajectory.
 
@@ -85,21 +87,21 @@ Refusals include a reason in the JSON report. Exit 3, exit 4 and errors using a 
 
 ![Stage resources](figures/stages.png)
 
-The local replays use ten CPU slots and a 140 GiB cap. Datasets 1807, 1844 and 2014 use local scanner-order LAZ
-replays. Dataset 1788 uses its standardized MLS file. The before and after runs for each dataset use the same
-source records. The stage CSV includes the spatial-spool reference and the historical 2585 measurements.
+The round-6 local replays use ten CPU slots and a 140 GiB cap. Datasets 1807, 1844 and 2014 use local scanner-order
+LAZ replays. Dataset 1788 uses its standardized MLS file. Each round-6 run uses the same source records as its
+round-5 counterpart. The stage CSV includes the spatial-spool reference and the historical 2585 measurements.
 
 <!-- stages:start -->
 | Stage | 1807 ULS | 1844 ULS | 2014 ULS | 1788 MLS |
 | --- | ---: | ---: | ---: | ---: |
-| Read, reconstruct pulses and index source | 4.7 s / 6.5 cores | 38.5 s / 8.2 cores | 7.6 s / 5.1 cores | 4.6 s / 3.3 cores |
-| Path fitting | 1.0 s / 5.8 cores | 5.2 s / 3.4 cores | 1.0 s / 6.1 cores | 96.9 s / 2.4 cores |
-| Extent and crop | 0.2 s / 1.0 cores | 0.8 s / 1.0 cores | 1.6 s / 1.0 cores | 4.8 s / 1.0 cores |
+| Read, reconstruct pulses and index source | 4.7 s / 6.5 cores | 34.6 s / 9.4 cores | 7.2 s / 5.4 cores | 5.8 s / 3.0 cores |
+| Path fitting | 1.0 s / 5.7 cores | 5.2 s / 3.5 cores | 2.8 s / 3.0 cores | 101.9 s / 2.4 cores |
+| Extent and crop | 0.2 s / 1.0 cores | 0.8 s / 1.0 cores | 1.7 s / 1.0 cores | 4.8 s / 1.0 cores |
 | Plan GPS windows | 0.0 s / 1.0 cores | 0.2 s / 1.0 cores | 0.1 s / 1.0 cores | 0.1 s / 1.0 cores |
-| Rebuild and trace pulses | 10.7 s / 7.3 cores | 139.2 s / 7.5 cores | 24.6 s / 8.4 cores | 43.0 s / 8.0 cores |
-| Merge, classify and write intermediates | 1.1 s / 1.0 cores | 9.0 s / 1.0 cores | 9.1 s / 1.0 cores | 39.3 s / 1.0 cores |
-| Write voxel COPC | 3.5 s / 1.7 cores | 9.6 s / 4.0 cores | 7.7 s / 3.5 cores | 13.0 s / 5.9 cores |
-| Write height-band COG | 0.5 s / 1.0 cores | 4.0 s / 2.2 cores | 3.8 s / 2.3 cores | 18.0 s / 1.6 cores |
+| Rebuild and trace pulses | 10.6 s / 7.3 cores | 126.1 s / 8.2 cores | 25.8 s / 8.2 cores | 43.0 s / 8.0 cores |
+| Merge, classify and write intermediates | 1.4 s / 1.0 cores | 10.4 s / 1.0 cores | 11.4 s / 1.0 cores | 47.1 s / 1.0 cores |
+| Write voxel COPC | 3.6 s / 1.7 cores | 9.1 s / 4.1 cores | 7.9 s / 3.4 cores | 11.8 s / 6.5 cores |
+| Write height-band COG | 0.8 s / 1.0 cores | 9.7 s / 2.1 cores | 9.3 s / 2.1 cores | 28.4 s / 2.3 cores |
 <!-- stages:end -->
 
 CPU use is CPU seconds divided by wall seconds. Traversal includes source seeks, decoding, pulse grouping,
@@ -108,7 +110,26 @@ known, preparation decodes only indexed ranges that straddle the accepted time l
 separate preparation from the streaming traversal's own source reads. Extent preparation decoded one
 200,000-record boundary range on 1807 and zero records on 1844, 2014 and 1788.
 
+### COG height-band comparison
+
+Each row compares the round-5 1 m COG with the round-6 0.5 m COG. Band counts include the final
+`unobserved_column` band. Write time measures COG creation from the intermediate raster. The replays ran
+on separate days.
+
+| Dataset | COG bands | COG size (MiB) | COG write (s) |
+| --- | ---: | ---: | ---: |
+| 1807 | 37 → 72 | 0.63 → 0.96 | 0.46 → 0.84 |
+| 2014 | 45 → 89 | 6.69 → 10.17 | 4.03 → 9.30 |
+| 1844 | 49 → 97 | 4.37 → 6.73 | 4.05 → 9.72 |
+| 1788 | 71 → 140 | 30.31 → 46.80 | 18.05 → 28.43 |
+
+The decoded COPC records match for all four datasets when sorted by voxel centre. At base resolution,
+combining adjacent 0.5 m bands over observed voxels reproduces the 1 m raster values. The
+`unobserved_column` values match exactly.
+
 ## 4. Streaming evaluation and speed-up
+
+The comparisons in this section use the round-5 measurements.
 
 <!-- comparison:start -->
 | Dataset | Spatial spool wall / CPU | GPS windows wall / CPU | Peak RSS, GiB | Peak scratch, GiB | Peak RSS per window, GiB |

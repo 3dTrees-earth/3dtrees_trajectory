@@ -77,7 +77,11 @@ neighbourhood median is replaced by that median. The highest filled voxel caps e
 | File | Contents |
 | --- | --- |
 | `occlusion.copc.laz` | One point at each filled, occluded or unobserved voxel centre from ground through canopy top. Extra dimensions are `occlusion`, `nhit`, `nmiss`, `nocc`, `occluded_fraction` and `height_above_ground`. The fraction is `nocc / (nhit + nmiss + nocc)`, with NaN for unobserved voxels. |
-| `occlusion.tif` | North-up COG with one pixel per voxel column. The 1 m bands are named `occluded_0-1m`, `occluded_1-2m` and so on. Each value is the occluded voxel count divided by the sum of filled, empty and occluded voxels, with NaN when the sum is zero. The final `unobserved_column` band gives the unobserved share of all voxels from ground through canopy top. |
+| `occlusion.tif` | North-up COG with one pixel per voxel column and one height band per voxel layer. The default bands are `occluded_0-0.5m`, `occluded_0.5-1m` and so on. Each value is the occluded voxel count divided by the sum of filled, empty and occluded voxels, with NaN when the sum is zero. The final `unobserved_column` band gives the unobserved share of all voxels from ground through canopy top. |
+
+With step `s`, zero-based band `k` covers `[k·s, (k+1)·s)` metres above ground. The pixel size and height-band
+step both follow `--voxel` and default to 0.5 m. The COG records the step in `OCCLUSION_BAND_M` and the JSON report
+records it in `occlusion.cog_band_step_m`.
 
 If there are no qualifying voxels, the COPC is zero bytes and the COG is valid with NaN values. On an
 occlusion error both destinations are zero bytes and the report gives the reason. A combined job can

@@ -8,15 +8,15 @@ run,mode,stage,wall_s,cores,peak_ram_gib,sampled_scratch_gib
 1807 ULS,Spatial spool,classify + ground,0.85,1.0,0.49,
 1807 ULS,Spatial spool,COPC write,3.57,1.67,0.64,
 1807 ULS,Spatial spool,COG write,0.39,1.0,0.35,
-1807 ULS,GPS windows,read/time-sort,4.69,6.54,3.83,
-1807 ULS,GPS windows,platform check,0.17,1.0,0.69,
-1807 ULS,GPS windows,path estimation,1.02,5.76,0.75,
+1807 ULS,GPS windows,read/time-sort,4.67,6.53,3.63,
+1807 ULS,GPS windows,platform check,0.17,1.0,0.68,
+1807 ULS,GPS windows,path estimation,1.02,5.72,0.75,
 1807 ULS,GPS windows,finalize extent/crop,0.22,1.0,0.24,
 1807 ULS,GPS windows,plan GPS-time windows,0.01,1.0,0.24,
-1807 ULS,GPS windows,traversal,10.65,7.26,1.31,0.15
-1807 ULS,GPS windows,classify + ground,1.08,1.0,0.64,0.23
-1807 ULS,GPS windows,COPC write,3.49,1.67,0.61,0.49
-1807 ULS,GPS windows,COG write,0.46,1.01,0.44,0.49
+1807 ULS,GPS windows,traversal,10.63,7.26,1.34,0.15
+1807 ULS,GPS windows,classify + ground,1.36,1.0,0.64,0.23
+1807 ULS,GPS windows,COPC write,3.6,1.67,0.62,0.49
+1807 ULS,GPS windows,COG write,0.84,1.01,0.56,0.49
 2014 ULS,Spatial spool,read/time-sort,11.08,2.51,1.43,
 2014 ULS,Spatial spool,platform check,0.22,1.0,0.89,
 2014 ULS,Spatial spool,path estimation,5.68,1.0,0.83,
@@ -26,15 +26,15 @@ run,mode,stage,wall_s,cores,peak_ram_gib,sampled_scratch_gib
 2014 ULS,Spatial spool,classify + ground,6.65,1.0,1.26,
 2014 ULS,Spatial spool,COPC write,7.86,3.38,1.13,
 2014 ULS,Spatial spool,COG write,3.7,2.3,1.14,
-2014 ULS,GPS windows,read/time-sort,7.59,5.06,3.65,
-2014 ULS,GPS windows,platform check,0.27,1.0,0.84,
-2014 ULS,GPS windows,path estimation,1.02,6.1,0.88,
-2014 ULS,GPS windows,finalize extent/crop,1.62,1.0,0.43,
+2014 ULS,GPS windows,read/time-sort,7.17,5.41,4.29,
+2014 ULS,GPS windows,platform check,0.38,0.98,0.84,
+2014 ULS,GPS windows,path estimation,2.77,3.04,0.88,
+2014 ULS,GPS windows,finalize extent/crop,1.69,1.0,0.43,
 2014 ULS,GPS windows,plan GPS-time windows,0.05,1.0,0.46,
-2014 ULS,GPS windows,traversal,24.61,8.42,4.66,0.96
-2014 ULS,GPS windows,classify + ground,9.11,1.0,3.15,1.35
-2014 ULS,GPS windows,COPC write,7.66,3.47,1.28,2.36
-2014 ULS,GPS windows,COG write,3.84,2.33,1.35,2.36
+2014 ULS,GPS windows,traversal,25.77,8.15,4.69,0.96
+2014 ULS,GPS windows,classify + ground,11.37,1.0,3.17,1.36
+2014 ULS,GPS windows,COPC write,7.89,3.4,1.3,2.36
+2014 ULS,GPS windows,COG write,9.3,2.13,1.89,2.36
 1844 ULS,Spatial spool,read/time-sort,102.34,2.53,1.43,
 1844 ULS,Spatial spool,platform check,0.21,1.0,1.71,
 1844 ULS,Spatial spool,path estimation,9.53,1.0,1.82,
@@ -44,15 +44,15 @@ run,mode,stage,wall_s,cores,peak_ram_gib,sampled_scratch_gib
 1844 ULS,Spatial spool,classify + ground,5.41,1.0,1.84,
 1844 ULS,Spatial spool,COPC write,9.38,3.97,1.56,
 1844 ULS,Spatial spool,COG write,3.61,2.2,1.27,
-1844 ULS,GPS windows,read/time-sort,38.53,8.22,3.91,
-1844 ULS,GPS windows,platform check,0.22,1.0,1.85,
-1844 ULS,GPS windows,path estimation,5.15,3.41,1.93,
+1844 ULS,GPS windows,read/time-sort,34.63,9.37,4.29,
+1844 ULS,GPS windows,platform check,0.22,1.0,1.84,
+1844 ULS,GPS windows,path estimation,5.15,3.48,1.93,
 1844 ULS,GPS windows,finalize extent/crop,0.83,1.0,0.97,
 1844 ULS,GPS windows,plan GPS-time windows,0.16,1.0,1.0,
-1844 ULS,GPS windows,traversal,139.22,7.46,3.45,1.16
-1844 ULS,GPS windows,classify + ground,9.03,1.0,5.84,1.67
-1844 ULS,GPS windows,COPC write,9.57,4.02,1.93,3.25
-1844 ULS,GPS windows,COG write,4.05,2.24,1.97,3.25
+1844 ULS,GPS windows,traversal,126.13,8.17,3.49,1.16
+1844 ULS,GPS windows,classify + ground,10.41,1.0,5.86,1.67
+1844 ULS,GPS windows,COPC write,9.12,4.09,2.41,3.26
+1844 ULS,GPS windows,COG write,9.72,2.09,2.54,3.26
 1788 MLS,Spatial spool,read/time-sort,4.59,2.22,1.12,0.55
 1788 MLS,Spatial spool,platform check,0.18,1.0,0.79,
 1788 MLS,Spatial spool,path estimation,88.15,1.0,0.85,
@@ -62,15 +62,15 @@ run,mode,stage,wall_s,cores,peak_ram_gib,sampled_scratch_gib
 1788 MLS,Spatial spool,classify + ground,38.97,1.02,1.8,24.92
 1788 MLS,Spatial spool,COPC write,12.21,6.37,1.58,27.84
 1788 MLS,Spatial spool,COG write,14.28,2.38,1.59,27.87
-1788 MLS,GPS windows,read/time-sort,4.65,3.34,2.11,
-1788 MLS,GPS windows,platform check,0.23,1.0,1.01,
-1788 MLS,GPS windows,path estimation,96.91,2.38,1.33,
-1788 MLS,GPS windows,finalize extent/crop,4.78,1.0,0.79,
+1788 MLS,GPS windows,read/time-sort,5.81,3.02,2.26,
+1788 MLS,GPS windows,platform check,0.32,1.0,0.99,
+1788 MLS,GPS windows,path estimation,101.95,2.39,1.34,
+1788 MLS,GPS windows,finalize extent/crop,4.77,1.0,0.79,
 1788 MLS,GPS windows,plan GPS-time windows,0.09,1.0,0.85,
-1788 MLS,GPS windows,traversal,43.03,7.99,4.22,2.24
-1788 MLS,GPS windows,classify + ground,39.3,1.0,8.87,3.4
-1788 MLS,GPS windows,COPC write,12.97,5.9,1.67,6.31
-1788 MLS,GPS windows,COG write,18.05,1.64,2.03,6.32
+1788 MLS,GPS windows,traversal,42.98,8.0,4.19,2.24
+1788 MLS,GPS windows,classify + ground,47.13,1.0,8.88,3.43
+1788 MLS,GPS windows,COPC write,11.78,6.55,2.0,6.34
+1788 MLS,GPS windows,COG write,28.43,2.31,2.78,6.34
 2585 ULS,Historical spool,read/time-sort,1238.8,2.9,2.1,157.5
 2585 ULS,Historical spool,platform check,0.4,1.0,1.7,157.5
 2585 ULS,Historical spool,path estimation,10.9,1.0,1.7,157.5
