@@ -16,6 +16,12 @@ def _delivered(path, time, xyz):
     np.savetxt(path, np.column_stack((time, xyz)), delimiter=",", header="time,x,y,z", comments="")
 
 
+def _copc_tags(path):
+    with laspy.open(path) as reader:
+        record, = (item for item in reader.evlrs if (item.user_id, item.record_id) == ("3dtrees", 1))
+        return json.loads(record.record_data_bytes())
+
+
 @needs_untwine
 def test_spatial_copc_rebuilds_pulses_across_small_sort_runs(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -139,7 +145,8 @@ def test_window_plan_splits_on_memory():
 
 
 @needs_untwine
-def test_delivered_miss_flag_is_written_without_replacing_path(tmp_path):
+@pytest.mark.parametrize(("debug", "combined"), [(True, False), (False, False), (False, True)])
+def test_delivered_miss_flag_is_written_without_replacing_path(tmp_path, debug, combined):
     import rasterio
 
     cloud = tmp_path / "flight.las"
@@ -147,18 +154,36 @@ def test_delivered_miss_flag_is_written_without_replacing_path(tmp_path):
     delivered, cog, copc, report = [tmp_path / name for name in
                                    ("path.csv", "out.tif", "out.copc.laz", "report.json")]
     _delivered(delivered, time[::50], xyz[::50] + [0.5, 0, 0])
-    assert main([str(cloud), "--trajectory", str(delivered), "--occlusion-cog", str(cog), "--occlusion-copc", str(copc),
-                 "--debug", "--report", str(report)]) == 0
-    data = json.loads(report.read_text())
-    assert data["occlusion"]["trajectory"] == "delivered"
-    check = data["occlusion"]["delivered_path_check"]
-    assert check["threshold_exceeded"] and check["median_m"] > 0.1
-    assert {s["name"] for s in data["stages"]} >= {"read/time-sort", "platform check", "delivered-path check",
-                                                  "finalize extent/crop", "traversal", "classify + ground",
-                                                  "COPC write", "COG write"}
+    original = delivered.read_bytes()
+    output = tmp_path / "estimated.csv"
+    args = [str(cloud), "--trajectory", str(delivered), "--occlusion-cog", str(cog), "--occlusion-copc", str(copc)]
+    if combined:
+        args += ["-o", str(output)]
+    if debug:
+        args += ["--debug", "--report", str(report)]
+
+    assert main(args) == 0
+    assert delivered.read_bytes() == original
+    if combined:
+        assert "# delivered_path_miss_flag: true" in output.read_text().splitlines()
+    if debug:
+        data = json.loads(report.read_text())
+        assert data["occlusion"]["trajectory"] == "delivered"
+        check = data["occlusion"]["delivered_path_check"]
+        assert check["threshold_exceeded"] and check["median_m"] > 0.1
+        assert {s["name"] for s in data["stages"]} >= {"read/time-sort", "platform check", "delivered-path check",
+                                                      "finalize extent/crop", "traversal", "classify + ground",
+                                                      "COPC write", "COG write"}
+    else:
+        assert not list(tmp_path.rglob("*.json"))
     with rasterio.open(cog) as raster:
-        assert raster.tags()["OCCLUSION_DELIVERED_MISS_FLAG"] == "true"
-        assert raster.tags()["OCCLUSION_TRAJECTORY"] == "delivered"
+        tags = raster.tags()
+    for metadata in (tags, _copc_tags(copc)):
+        assert metadata["OCCLUSION_DELIVERED_MISS_FLAG"] == "true"
+        assert metadata["OCCLUSION_TRAJECTORY"] == "delivered"
+        assert metadata["OCCLUSION_PATH_METHOD"] == "delivered"
+    with laspy.CopcReader.open(copc) as reader:
+        assert len(reader.query()) == reader.header.point_count
 
 
 @needs_untwine
@@ -172,8 +197,16 @@ def test_single_return_scan_angle_occlusion_is_rough(tmp_path):
     data = json.loads(trajectory.with_suffix(".report.json").read_text())
     assert data["method"] == "scan_angle" and data["occlusion"]["quality"] == "rough"
     assert data["occlusion"]["traversed_pulses"] > 0
+    csv_lines = trajectory.read_text().splitlines()
+    assert data["warnings"]
+    assert [line.removeprefix("# warning: ") for line in csv_lines if line.startswith("# warning: ")] == data["warnings"]
     with rasterio.open(cog) as raster:
-        assert raster.tags()["OCCLUSION_QUALITY"] == "rough"
+        tags = raster.tags()
+    for metadata in (tags, _copc_tags(copc)):
+        assert metadata["OCCLUSION_QUALITY"] == "rough"
+        assert metadata["OCCLUSION_PATH_METHOD"] == "scan_angle"
+        assert metadata["OCCLUSION_TRAJECTORY"] == "estimated"
+        assert json.loads(metadata["OCCLUSION_WARNINGS"]) == data["warnings"]
 
 
 @needs_untwine

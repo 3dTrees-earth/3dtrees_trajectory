@@ -37,6 +37,70 @@ def _assert_refusal(output, reason):
     return report
 
 
+def test_debug_report_is_opt_in(tmp_path):
+    cloud = tmp_path / "flight.laz"
+    flight(cloud, seconds=6, rate=400)
+    output = tmp_path / "path.csv"
+    layer = output.with_suffix(".geojson")
+    default_report = output.with_suffix(".report.json")
+    explicit_report = tmp_path / "diagnostics" / "report.json"
+    args = [str(cloud), "-o", str(output)]
+
+    assert main(args) == 0
+    assert set(tmp_path.iterdir()) == {cloud, output, layer}
+    products = (output.read_bytes(), layer.read_bytes())
+
+    reports = []
+    for options, path in [([], default_report), (["--report", str(explicit_report)], explicit_report)]:
+        assert main([*args, "--debug", *options]) == 0
+        assert (output.read_bytes(), layer.read_bytes()) == products
+        report = json.loads(path.read_text())
+        assert report["exit_code"] == 0
+        assert report["method"] == "lines" and report["quality"] == "good"
+        assert report["resources"]["points_read"] == report["points"]
+        assert {stage["name"] for stage in report["stages"]} >= {"read/time-sort", "platform check", "path estimation"}
+        for stage in report["stages"]:
+            assert {"wall_seconds", "cpu_seconds", "peak_rss_bytes"} <= stage.keys()
+        reports.append({key: value for key, value in report.items() if key not in ("resources", "stages")})
+        path.unlink()
+    assert reports[0] == reports[1]
+
+
+def test_report_path_requires_debug(tmp_path, capsys):
+    output = tmp_path / "path.csv"
+    output.write_text("existing output")
+    report = tmp_path / "standalone.json"
+    with pytest.raises(SystemExit) as exit:
+        main(["unused.las", "-o", str(output), "--report", str(report)])
+    assert exit.value.code == 2
+    assert "--report requires --debug" in capsys.readouterr().err
+    assert output.read_text() == "existing output"
+    assert not list(tmp_path.rglob("*.json"))
+
+
+@pytest.mark.parametrize(("constant_clock", "code", "reason"), [
+    (True, 3, "GPS time must vary"),
+    (False, 4, "No reliable position could be fitted"),
+])
+def test_refusal_on_stderr_and_empty_products_without_debug(tmp_path, capsys, constant_clock, code, reason):
+    cloud = tmp_path / "flight.las"
+    flight(cloud, seconds=1, rate=100, single_return=not constant_clock)
+    if constant_clock:
+        points = laspy.read(cloud)
+        points.gps_time[:] = 0
+        points.write(cloud)
+    output, geojson, copc, cog = [tmp_path / name for name in ("path.csv", "path.geojson", "out.copc.laz", "out.tif")]
+    for path in (output, geojson, copc, cog):
+        path.write_text("stale product")
+
+    assert main([str(cloud), "-o", str(output), "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == code
+    stderr = capsys.readouterr().err
+    assert reason in stderr
+    assert "Keep the delivered path as supplementary data on the dataset" in stderr
+    assert all(path.read_bytes() == b"" for path in (output, geojson, copc, cog))
+    assert not list(tmp_path.rglob("*.json"))
+
+
 @pytest.mark.parametrize(("point_format", "version"), POINT_FORMATS)
 def test_las_point_formats(tmp_path, point_format, version):
     # Cover both readers, all LAS point formats and all supported file versions.

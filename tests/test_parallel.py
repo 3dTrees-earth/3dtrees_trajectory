@@ -116,6 +116,7 @@ def test_copc_occlusion_refuses_and_preserves_estimated_path(tmp_path):
                  "--occlusion-cog", str(tmp_path / "out.tif")]) == 0
     assert (tmp_path / "path.csv").stat().st_size
     assert "Supply the standardized files instead of COPC" in (tmp_path / "path.report.json").read_text()
+    assert "# warning: Occlusion: Occlusion requires scanner-order LAS/LAZ." in (tmp_path / "path.csv").read_text()
     assert not (tmp_path / "out.tif").stat().st_size
 
 
