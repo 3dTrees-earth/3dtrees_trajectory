@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+from bisect import bisect_right
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -17,7 +18,9 @@ from .window_jobs import atomic_json, window_files
 
 GIB = 2**30
 WORKING_BYTES = 2 * GIB
-FRAGMENT_BYTES = 112
+# Concatenation briefly holds two 24-byte copies per echo. The indirect
+# sort needs an index and workspace, while grouping only expands one batch.
+FRAGMENT_BYTES = 64
 COUNT_BYTES = 12
 COLUMN_BYTES = 24
 MAX_WINDOWS = 10_000
@@ -170,17 +173,17 @@ def trace_window(number, window):
         if fragments:
             records = np.concatenate(fragments)
             fragments.clear()
-            order = np.lexsort((records["returns"] & 15, records["channel"], records["source"], records["time"]))
-            records = records[order]
-            del order
-            sizes, complete = group_multi(records, acquisition_order=False)
-            paired = np.repeat(complete, sizes)
-            if paired.any():
-                _trace_recovered(tracer, records[paired], sizes[complete], scales, offsets, grid.voxel, time, xyz)
-            joined = int(paired.sum())
+            joined = 0
+            for batch in _sorted_fragments(records):
+                sizes, complete = group_multi(batch, acquisition_order=False)
+                if complete.any():
+                    paired = np.repeat(complete, sizes)
+                    _trace_multi(tracer, batch[paired], sizes[complete], scales, offsets, grid.voxel, time, xyz)
+                    joined += int(paired.sum())
             recovered += joined
             unpaired += len(records) - joined
             traced += joined
+            del records
     traversed, missing = map(int, tracer.stats)
     del tracer
     counts.flush()
@@ -198,13 +201,29 @@ def trace_window(number, window):
     return data
 
 
-def _trace_recovered(tracer, records, sizes, scales, offsets, voxel, time, xyz):
-    offsets_in_file = np.r_[0, np.cumsum(sizes)]
+def _sorted_fragments(records):
+    order = np.lexsort((records["returns"] & 15, records["channel"], records["source"], records["time"]))
+
+    def key(index):
+        point = records[index]
+        return point["time"], point["source"], point["channel"]
+
     start = 0
-    while start < len(sizes):
-        stop = np.searchsorted(offsets_in_file, offsets_in_file[start] + TRACE_BATCH, side="right") - 1
-        _trace_multi(tracer, records[offsets_in_file[start]:offsets_in_file[stop]], sizes[start:stop],
-                     scales, offsets, voxel, time, xyz)
+    while start < len(order):
+        stop = min(start + TRACE_BATCH, len(order))
+        batch = records[order[start:stop]]
+        if stop < len(order) and (last := key(order[stop - 1])) == key(order[stop]):
+            # Preserve a complete time/source/channel group across batch edges.
+            different = np.flatnonzero((batch["time"] != last[0]) | (batch["source"] != last[1])
+                                       | (batch["channel"] != last[2]))
+            if not len(different):
+                # A group of this size cannot describe a LAS pulse. Its echoes
+                # still count toward the original fragment total.
+                start = bisect_right(order, last, lo=stop, key=key)
+                continue
+            batch = batch[:different[-1] + 1]
+            stop = start + len(batch)
+        yield batch
         start = stop
 
 

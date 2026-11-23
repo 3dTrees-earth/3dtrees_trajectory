@@ -68,8 +68,11 @@ def available_memory() -> int:
             maximum, current = (_limit(_read(path / name)) for name in ("memory.max", "memory.current"))
             if maximum is None or current is None:
                 continue
-            reclaimable = sum(int(line.split()[1]) for line in _read(path / "memory.stat").splitlines()
-                              if line.startswith(("inactive_file ", "active_file ")))
+            cache = dict(line.split() for line in _read(path / "memory.stat").splitlines())
+            clean_file = ("inactive_file", "active_file")
+            pending_io = ("file_dirty", "file_writeback")
+            reclaimable = max(0, sum(int(cache.get(key, 0)) for key in clean_file)
+                              - sum(int(cache.get(key, 0)) for key in pending_io))
             limits.append(maximum - max(0, current - reclaimable))
     if not limits:
         return 16 * 2**30
