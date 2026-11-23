@@ -119,7 +119,7 @@ class RunResources:
         self.stages = []
 
     @contextmanager
-    def stage(self, name: str, *, children: bool = False, scratch: Path | None = None):
+    def stage(self, name: str, *, children: bool = False, worker_details: bool = True, scratch: Path | None = None):
         start_wall, start_cpu = perf_counter(), _cpu_seconds()
         self.peak = max(self.peak, _rss())
         try:
@@ -168,9 +168,11 @@ class RunResources:
             stage.update(wall_seconds=round(perf_counter() - start_wall, 6),
                          cpu_seconds=round(_cpu_seconds() - start_cpu, 6),
                          peak_rss_bytes=max(peak, child_peak), rss_scope="stage" if reset else "process-lifetime")
-            if children:
+            if children and worker_details:
                 stage["child_peak_rss_bytes"] = child_peak
                 stage["sampled_aggregate_rss_bytes"] = max(aggregate_peak, peak, child_peak)
+            elif children:
+                stage["peak_rss_bytes"] = max(aggregate_peak, peak, child_peak)
             if scratch is not None:
                 stage["sampled_peak_scratch_bytes"] = max(scratch_peak, _allocated_bytes(scratch))
             self.stages.append(stage)
