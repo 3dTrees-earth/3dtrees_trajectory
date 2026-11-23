@@ -12,8 +12,12 @@ recognise a static (TLS) cloud, which 1.0.0 refuses.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
+from itertools import islice
 
 import numpy as np
 from scipy import ndimage
@@ -157,23 +161,47 @@ def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200
     time = p.time[order]
     window = np.floor(time / interval).astype(np.int64)
     starts = np.flatnonzero(np.r_[True, window[1:] != window[:-1]])
-    def fit_window(window):
-        lo, hi = window
+    def arguments(lo, hi):
         selected = order[lo:hi]
-        x, y, z = (p.first[selected].astype(np.float64) - centre).T
-        tn = np.tan(np.radians(np.abs(p.scan_angle[selected].astype(float))))
-        dt = time[lo:hi] - time[lo:hi].mean()
+        return p.first[selected], p.scan_angle[selected], time[lo:hi], centre
 
-        def residual(q, x=x, y=y, z=z, tn=tn, dt=dt):
-            return np.hypot(x - q[0] - q[3] * dt, y - q[1] - q[4] * dt) - (q[2] - z) * tn
+    windows = [(lo, hi) for lo, hi in zip(starts, np.r_[starts[1:], len(time)]) if hi - lo >= min_pulses]
+    tasks = (arguments(lo, hi) for lo, hi in windows)
+    if workers == 1 or len(windows) <= 1:
+        return [fit for args in tasks if (fit := _fit_scan_angle(*args)) is not None]
+    workers = min(workers, len(windows))
+    fits = []
+    # Spawn clean workers so native libraries and the caller's threads aren't inherited.
+    # Keep only a bounded number of windows in flight, including the serialized inputs.
+    try:
+        with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            pending = deque(pool.submit(_fit_scan_angle, *args) for args in islice(tasks, workers))
+            while pending:
+                fit = pending.popleft().result()
+                if fit is not None:
+                    fits.append(fit)
+                if (args := next(tasks, None)) is not None:
+                    pending.append(pool.submit(_fit_scan_angle, *args))
+    except BrokenProcessPool as error:
+        raise ValueError("A scan-angle path worker stopped before completing its fit.") from error
+    return fits
 
-        start = [np.median(x), np.median(y), np.percentile(z, 95) + 50, 0.0, 0.0]
-        result = least_squares(residual, start, loss="soft_l1", f_scale=0.5)
-        if not result.success or result.x[2] <= np.percentile(z, 95):
-            return None
-        return Fit(float(time[lo:hi].mean()), result.x[:3] + centre, int(hi - lo), float(np.median(np.abs(result.fun))))
 
-    return _fit_windows(fit_window, starts, len(time), min_pulses, workers)
+def _fit_scan_angle(points, angles, time, centre):
+    x, y, z = (points.astype(np.float64) - centre).T
+    tn = np.tan(np.radians(np.abs(angles.astype(float))))
+    t0 = time.mean()
+    dt = time - t0
+
+    def residual(q):
+        return np.hypot(x - q[0] - q[3] * dt, y - q[1] - q[4] * dt) - (q[2] - z) * tn
+
+    high = np.percentile(z, 95)
+    start = [np.median(x), np.median(y), high + 50, 0.0, 0.0]
+    result = least_squares(residual, start, loss="soft_l1", f_scale=0.5)
+    if not result.success or result.x[2] <= high:
+        return None
+    return Fit(float(t0), result.x[:3] + centre, len(time), float(np.median(np.abs(result.fun))))
 
 
 def _peak(points: np.ndarray, cell: float, smooth: float, extent_max: float) -> tuple[float, float]:

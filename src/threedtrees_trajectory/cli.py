@@ -189,7 +189,7 @@ def _run(argv, output_locks) -> int:
                         raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
             data = {"tool": f"3dtrees_trajectory {__version__}", "files": info.files, "trajectory": "delivered"}
             if args.output is not None:
-                with resources.stage("path estimation"):
+                with resources.stage("path estimation", children=True):
                     try:
                         if any(mode["mode"] == "single" and not mode["has_scan_angle"]
                                for mode in info.return_modes):
