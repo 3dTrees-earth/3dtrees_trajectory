@@ -191,7 +191,7 @@ def _surface_indices(nhit: np.ndarray, grid: Grid) -> tuple[np.ndarray, np.ndarr
     return low, high
 
 
-def _ground_from_lowest(lowest: np.ndarray, grid: Grid) -> tuple[np.ndarray, int]:
+def _ground_from_lowest(lowest: np.ndarray, grid: Grid, raster_columns=None) -> tuple[np.ndarray, int]:
     """Ground from the lowest filled voxel per column with neighbourhood spike correction."""
     from scipy import ndimage
 
@@ -201,6 +201,8 @@ def _ground_from_lowest(lowest: np.ndarray, grid: Grid) -> tuple[np.ndarray, int
     size = max(3, int(round(SPIKE_WINDOW_M / grid.voxel)) | 1)
     median = ndimage.median_filter(ground, size=size, mode="nearest")
     spikes = has & (ground > median + SPIKE_M)
+    if raster_columns is not None:
+        spikes &= ~raster_columns
     ground[spikes] = median[spikes]
     return ground, int(spikes.sum())
 
@@ -278,7 +280,7 @@ def _crop(grid, low, high, terrain=None, raster_columns=None):
     if raster_columns is not None and raster_columns.all():
         ground, spikes = terrain, 0
     else:
-        ground, spikes = _ground_from_lowest(low, grid)
+        ground, spikes = _ground_from_lowest(low, grid, raster_columns)
         if raster_columns is not None:
             np.copyto(ground, terrain, where=raster_columns)
     top_z = grid.origin[2] + (int(high.max()) + 0.5) * grid.voxel
@@ -507,6 +509,14 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         del terrain
         del low, high
         extent.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape))
+    ground_source = "lowest_hit"
+    ground_shares = None
+    if raster_columns is not None:
+        raster_count = int(np.count_nonzero(raster_columns))
+        total_columns = raster_columns.size
+        ground_shares = {"dtm": raster_count / total_columns, "lowest_hit": (total_columns - raster_count) / total_columns}
+        if raster_count:
+            ground_source = "dtm" if raster_count == total_columns else "dtm+lowest_hit"
     layer_ranges = ray_walk.layers(grid, top, ground)
     with _stage(resources, "plan GPS-time windows") as planning:
         layout = time_windows.plan(index, grid, time, xyz, time_bounds, slots, min(budget, available_memory()), layer_ranges)
@@ -520,8 +530,11 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         for orphan in work.glob("merge-*"):
             if orphan.is_dir():
                 shutil.rmtree(orphan)
-        tags = dict(OCCLUSION_GROUND="lowest_hit", OCCLUSION_TRAJECTORY=source,
+        tags = dict(OCCLUSION_GROUND=ground_source, OCCLUSION_TRAJECTORY=source,
                     OCCLUSION_PATH_METHOD=path_method or source, OCCLUSION_QUALITY=quality or path_quality or "unavailable")
+        if ground_source == "dtm+lowest_hit":
+            tags["OCCLUSION_GROUND_DTM_SHARE"] = str(ground_shares["dtm"])
+            tags["OCCLUSION_GROUND_LOWEST_HIT_SHARE"] = str(ground_shares["lowest_hit"])
         if path_warnings:
             tags["OCCLUSION_WARNINGS"] = json.dumps(path_warnings, ensure_ascii=False, separators=(",", ":"))
         if delivered_check is not None:
@@ -560,7 +573,8 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         "time_windows": {"windows": len(layout), "budget_bytes": budget,
                          "peak_concurrent_workers": stage["peak_concurrent_workers"],
                          "reused_windows": stage["reused_windows"]},
-        "ground": "lowest_hit",
+        "ground": ground_source,
+        **({"ground_column_shares": ground_shares} if ground_shares is not None else {}),
         "ground_spikes_replaced": spikes,
         **{key: extent[key] for key in ("echoes_read", "echoes_outside_path")},
         **{key: sum(w[key] for w in windows.values()) for key in
