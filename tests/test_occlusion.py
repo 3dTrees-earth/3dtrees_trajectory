@@ -134,6 +134,106 @@ def test_band_shares_use_column_relative_layers():
     np.testing.assert_array_equal(hidden, [0, 1, 1, 0])
 
 
+def _terrain_fixture(tmp_path, coverage):
+    import rasterio
+    from pyproj import CRS
+    from rasterio.transform import from_origin
+
+    cloud = tmp_path / "flight.laz"
+    flight(cloud, seconds=6, rate=500)
+    points = laspy.read(cloud)
+    points.header.add_crs(CRS.from_epsg(32632))
+    points.write(cloud)
+    grid, _ = occlusion._grid([cloud], 0.5)
+    x, y = grid.origin[:2]
+    nx, ny = grid.shape[:2]
+    width, height = (nx + 1) // 2, (ny + 1) // 2
+    if coverage == "partial":
+        width -= 1
+    transform = from_origin(x, y + height, 1, 1)
+    terrain = np.full((height, width), 0.375, np.float32)
+    if coverage == "partial":
+        terrain[:, width // 2] = -9999
+    elif coverage == "missing":
+        terrain[:] = -9999
+    path = tmp_path / "ground.tif"
+    crs = "EPSG:32633" if coverage == "mismatch" else "EPSG:32632"
+    with rasterio.open(path, "w", driver="GTiff", width=width, height=height, count=1, dtype=terrain.dtype,
+                       crs=crs, transform=transform, nodata=-9999) as raster:
+        raster.write(terrain, 1)
+    return cloud, path, grid, width
+
+
+@needs_untwine
+@pytest.mark.parametrize(("coverage", "source"), [
+    ("full", "dtm"), ("partial", "dtm+lowest_hit"), ("missing", "lowest_hit"),
+])
+def test_terrain_ground_in_both_products(tmp_path, coverage, source):
+    import csv
+
+    import rasterio
+    from rasterio.transform import rowcol
+
+    cloud, terrain, grid, width = _terrain_fixture(tmp_path, coverage)
+    out, copc, cog = tmp_path / "p.csv", tmp_path / "occlusion.copc.laz", tmp_path / "occlusion.tif"
+    assert main([str(cloud), "-o", str(out), "--debug", "--dtm", str(terrain),
+                 "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 0
+    plot = laspy.read(copc)
+    record = next(vlr for vlr in plot.evlrs if vlr.user_id == "3dtrees" and vlr.record_id == 1)
+    tags = json.loads(record.record_data)
+    report = json.loads(out.with_suffix(".report.json").read_text())["occlusion"]
+    column = np.floor(np.asarray(plot.x) - grid.origin[0]).astype(int)
+    covered = np.ones(len(plot.points), bool)
+    if coverage == "partial":
+        covered = (column < width) & (column != width // 2)
+        assert np.any(column >= width) and np.any(column == width // 2)
+    elif coverage == "missing":
+        covered[:] = False
+    assert covered.any() == (coverage != "missing")
+    assert (~covered).any() == (coverage != "full")
+    ground = plot.z - plot["height_above_ground"]
+    np.testing.assert_allclose(ground[covered], 0.375)
+    if (~covered).any():
+        control_copc = tmp_path / "control.copc.laz"
+        assert main([str(cloud), "-o", str(tmp_path / "control.csv"), "--occlusion-copc", str(control_copc),
+                     "--occlusion-cog", str(tmp_path / "control.tif")]) == 0
+        control = laspy.read(control_copc)
+        lowest_ground = np.full(grid.shape[:2], np.nan)
+        x, y = np.floor((control.xyz[:, :2] - grid.origin[:2]) / grid.voxel).astype(int).T
+        lowest_ground[x, y] = control.z - control["height_above_ground"]
+        x, y = np.floor((plot.xyz[~covered, :2] - grid.origin[:2]) / grid.voxel).astype(int).T
+        np.testing.assert_array_equal(ground[~covered], lowest_ground[x, y])
+    assert tags["OCCLUSION_GROUND"] == report["ground"] == source
+    csv_lines = (line for line in out.read_text().splitlines() if not line.startswith("#"))
+    assert next(csv.reader(csv_lines)) == ["time", "x", "y", "z", "roll", "pitch", "yaw", "name"]
+    with rasterio.open(cog) as raster:
+        assert raster.tags()["OCCLUSION_GROUND"] == source
+        if coverage == "partial":
+            share = (min(grid.shape[0], 2 * width) - 2) / grid.shape[0]
+            assert report["ground_column_shares"] == pytest.approx({"dtm": share, "lowest_hit": 1 - share})
+            for tag_name, key in (("OCCLUSION_GROUND_DTM_SHARE", "dtm"),
+                                  ("OCCLUSION_GROUND_LOWEST_HIT_SHARE", "lowest_hit")):
+                assert raster.tags()[tag_name] == tags[tag_name]
+                assert float(tags[tag_name]) == pytest.approx(report["ground_column_shares"][key])
+        observed = np.isin(plot["occlusion"], [occlusion.FILLED, occlusion.OCCLUDED])
+        rows, cols = rowcol(raster.transform, plot.x[observed], plot.y[observed])
+        bands = (plot["height_above_ground"][observed] / 0.5).astype(int)
+        np.testing.assert_array_equal(raster.read()[bands, rows, cols],
+                                      plot["occlusion"][observed] == occlusion.OCCLUDED)
+
+
+def test_terrain_crs_mismatch_exits_two_in_combined_run(tmp_path, capsys):
+    cloud, terrain, _, _ = _terrain_fixture(tmp_path, "mismatch")
+    out, copc, cog = tmp_path / "p.csv", tmp_path / "occlusion.copc.laz", tmp_path / "occlusion.tif"
+    assert main([str(cloud), "-o", str(out), "--debug", "--dtm", str(terrain),
+                 "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 2
+    reason = "must use the same coordinate reference system"
+    assert reason in capsys.readouterr().err
+    report = json.loads(out.with_suffix(".report.json").read_text())
+    assert report["exit_code"] == 2 and reason in report["occlusion"]["error"]
+    assert out.stat().st_size == copc.stat().st_size == cog.stat().st_size == 0
+
+
 @pytest.mark.parametrize("offset", [100, 400_000_000])
 def test_rejects_path_without_clock_overlap(tmp_path, offset):
     cloud = tmp_path / "flight.las"

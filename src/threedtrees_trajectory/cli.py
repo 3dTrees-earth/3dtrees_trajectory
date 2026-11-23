@@ -143,6 +143,7 @@ def _run(argv, output_locks) -> int:
     from pyproj.exceptions import ProjError
 
     from .estimate import STATIC_REFUSAL, detect_platform, estimate
+    from .occlusion import TerrainError, open_dtm, prepare_index
     from .output import estimate_quality, geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
     from .pulses import CloudInfo, read_pulses
     from .window_jobs import JobBusy, lock_output
@@ -162,13 +163,15 @@ def _run(argv, output_locks) -> int:
                 work = (report_path or args.output or args.occlusion_copc).resolve().parent
                 if occlusion_paths:
                     output_locks.enter_context(lock_output(args.occlusion_copc.resolve()))
-                    from .occlusion import prepare_index
 
                     try:
                         indexed_clouds = prepare_index(args.clouds, voxel)
                     except (OSError, ValueError, LaspyException, StructError, EOFError) as error:
                         # Let the trajectory reader retain its own refusal codes and messages.
                         indexed_clouds = {"error": str(error)}
+                    if args.dtm is not None and isinstance(indexed_clouds, tuple) and not indexed_clouds[0].copc:
+                        with open_dtm(args.dtm, indexed_clouds[1]):
+                            pass
                 pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
                                         scratch=work, resources=resources,
                                         scan_index=indexed_clouds[0] if isinstance(indexed_clouds, tuple) else None,
@@ -244,11 +247,12 @@ def _run(argv, output_locks) -> int:
         except JobBusy as error:
             safe_products = safe_report = False
             error_message = str(error)
+        except TerrainError as error:
+            error_message = str(error)
+            data = {"occlusion": {"error": error_message}}
         except (OSError, ValueError, MemoryError, LaspyException, LazrsError, StructError, EOFError) as error:
             error_message = str(error) or "The job could not read its input or ran out of memory."
     if error_message is None and occlusion_paths:
-        from .occlusion import TerrainError
-
         pulses = None
         path_quality = estimate_quality(result) if result is not None and args.trajectory is None else None
         try:

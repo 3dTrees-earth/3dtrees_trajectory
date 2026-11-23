@@ -21,7 +21,7 @@ import math
 import os
 import shutil
 import subprocess
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from struct import pack
@@ -207,36 +207,44 @@ def _ground_from_lowest(lowest: np.ndarray, grid: Grid, raster_columns=None) -> 
     return ground, int(spikes.sum())
 
 
-def _sample_dtm(path: Path, grid: Grid, crs_wkt: str | None) -> np.ndarray:
-    """Sample the raster cell containing each voxel column centre."""
+@contextmanager
+def open_dtm(path: Path, crs_wkt: str | None):
+    """Open a terrain raster whose CRS can be matched to the point cloud."""
     import rasterio
     from rasterio.errors import RasterioError
-    from rasterio.transform import rowcol
-    from rasterio.windows import Window
 
     try:
         with rasterio.open(path) as raster:
             if not crs_wkt or raster.crs != rasterio.crs.CRS.from_wkt(crs_wkt):
                 raise TerrainError(f"{path.name} and the point cloud must use the same coordinate reference system.")
-            nx, ny = grid.shape[:2]
-            cx = grid.origin[0] + (np.arange(nx) + 0.5) * grid.voxel
-            cy = grid.origin[1] + (np.arange(ny) + 0.5) * grid.voxel
-            ground = np.full((nx, ny), np.nan)
-            for xy in _xy_windows(grid):
-                x, y = np.meshgrid(cx[xy[0]], cy[xy[1]], indexing="ij")
-                rows, cols = rowcol(raster.transform, x, y)
-                rows, cols = rows.reshape(x.shape), cols.reshape(x.shape)
-                inside = (rows >= 0) & (rows < raster.height) & (cols >= 0) & (cols < raster.width)
-                if not inside.any():
-                    continue
-                rows, cols = rows[inside], cols[inside]
-                row, col = int(rows.min()), int(cols.min())
-                window = Window(col, row, int(cols.max()) - col + 1, int(rows.max()) - row + 1)
-                values = raster.read(1, window=window, masked=True)[rows - row, cols - col]
-                elevations = values.astype(np.float64).filled(np.nan) * raster.scales[0] + raster.offsets[0]
-                ground[xy][inside] = np.where(np.isfinite(elevations), elevations, np.nan)
+            yield raster
     except (OSError, RasterioError) as error:
         raise TerrainError(f"Could not sample terrain raster {path.name}: {error}") from error
+
+
+def _sample_dtm(path: Path, grid: Grid, crs_wkt: str | None) -> np.ndarray:
+    """Sample the raster cell containing each voxel column centre."""
+    from rasterio.transform import rowcol
+    from rasterio.windows import Window
+
+    nx, ny = grid.shape[:2]
+    cx = grid.origin[0] + (np.arange(nx) + 0.5) * grid.voxel
+    cy = grid.origin[1] + (np.arange(ny) + 0.5) * grid.voxel
+    ground = np.full((nx, ny), np.nan)
+    with open_dtm(path, crs_wkt) as raster:
+        for xy in _xy_windows(grid):
+            x, y = np.meshgrid(cx[xy[0]], cy[xy[1]], indexing="ij")
+            rows, cols = rowcol(raster.transform, x, y)
+            rows, cols = rows.reshape(x.shape), cols.reshape(x.shape)
+            inside = (rows >= 0) & (rows < raster.height) & (cols >= 0) & (cols < raster.width)
+            if not inside.any():
+                continue
+            rows, cols = rows[inside], cols[inside]
+            row, col = int(rows.min()), int(cols.min())
+            window = Window(col, row, int(cols.max()) - col + 1, int(rows.max()) - row + 1)
+            values = raster.read(1, window=window, masked=True)[rows - row, cols - col]
+            elevations = values.astype(np.float64).filled(np.nan) * raster.scales[0] + raster.offsets[0]
+            ground[xy][inside] = np.where(np.isfinite(elevations), elevations, np.nan)
     return ground
 
 
