@@ -154,6 +154,7 @@ def test_multifile_with_matched_crs_and_different_las_versions(tmp_path, monkeyp
     ("missing", "existing regular file"),
     ("invalid_header", "unable to read the LAS/LAZ header"),
     ("truncated", "Truncated point data"),
+    ("truncated_laz", "failed to fill whole buffer"),
     ("constant_time", "GPS time must vary"),
     ("nonfinite_time", "GPS times must be finite"),
     ("mixed_clocks", "same GPS time system"),
@@ -175,6 +176,12 @@ def test_bad_input_has_refusal_and_clears_stale_outputs(tmp_path, scenario, reas
             flight(input_path, seconds=2, rate=400)
             data = input_path.read_bytes()
             input_path.write_bytes(data[:-30])
+        case "truncated_laz":
+            input_path = input_path.with_suffix(".laz")
+            paths = [str(input_path)]
+            flight(input_path, seconds=2, rate=400)
+            data = input_path.read_bytes()
+            input_path.write_bytes(data[:len(data) // 2])
         case "constant_time" | "nonfinite_time":
             flight(input_path, seconds=2, rate=400)
             cloud = laspy.read(input_path)

@@ -1,6 +1,7 @@
 """Lock a job's checkpoints and admit window workers within its CPU and memory budgets."""
 from __future__ import annotations
 
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -8,6 +9,7 @@ import json
 import multiprocessing
 import os
 import signal
+import sys
 from collections import deque
 from multiprocessing.connection import wait
 from contextlib import contextmanager
@@ -22,6 +24,10 @@ SCHEMA = 4
 
 class JobBusy(ValueError):
     """Another process holds this output's checkpoint lock."""
+
+
+class CheckpointStorageError(OSError):
+    """A worker could not store its mmap-backed checkpoint."""
 
 
 def identify(paths, parameters, time, xyz):
@@ -107,9 +113,18 @@ class WorkerMemory:
         return self.overhead + int(1.25 * self.scale * planned) if self.scale else planned
 
 
-def _run_window(sender, worker, init, initargs, index, args):
+def _run_window(sender, worker, init, initargs, index, args, parent_pid):
     with sender:
         try:
+            if sys.platform == "linux":
+                # Linux can deliver a signal if the parent dies, including an
+                # uncatchable interruption that bypasses the scheduler's cleanup.
+                libc = ctypes.CDLL(None, use_errno=True)
+                if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+                    code = ctypes.get_errno()
+                    raise OSError(code, os.strerror(code))
+                if os.getppid() != parent_pid:
+                    return
             if init is not None:
                 init(*initargs)
             result = worker(index, *args)
@@ -142,7 +157,7 @@ def execute(work, specs, slots, worker, init, initargs, stage):
         nonlocal reserved
         index, _, _, args = job
         receiver, sender = context.Pipe(duplex=False)
-        process = context.Process(target=_run_window, args=(sender, worker, init, initargs, index, args))
+        process = context.Process(target=_run_window, args=(sender, worker, init, initargs, index, args, os.getpid()))
         try:
             process.start()
         except BaseException:
@@ -205,6 +220,9 @@ def execute(work, specs, slots, worker, init, initargs, stage):
                     if isolated:
                         raise stopped(index) from error
                     retry.append((job, amount))
+                elif exit_code == -signal.SIGBUS:
+                    raise CheckpointStorageError(f"Occlusion window {index + 1} could not access its mapped "
+                                                 f"checkpoint (SIGBUS). Check free scratch space and retry.")
                 elif error is not None:
                     raise error
                 else:
@@ -213,6 +231,9 @@ def execute(work, specs, slots, worker, init, initargs, stage):
         for receiver, (process, _, _, _) in running.items():
             if process.is_alive():
                 process.terminate()
+                process.join(timeout=2)
+                if process.is_alive():
+                    process.kill()
             process.join()
             process.close()
             receiver.close()

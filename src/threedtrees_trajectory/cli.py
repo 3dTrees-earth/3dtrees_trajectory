@@ -3,6 +3,7 @@ see (occlusion) along that path or along a delivered one."""
 from __future__ import annotations
 
 import argparse
+import errno
 import math
 import os
 import sys
@@ -147,7 +148,7 @@ def _run(argv, output_locks) -> int:
     from .occlusion import TerrainError, open_dtm, prepare_index
     from .output import estimate_quality, geojson, refusal, report, write_csv, write_empty, write_geojson, write_report
     from .pulses import CloudInfo, read_pulses
-    from .window_jobs import JobBusy, lock_output
+    from .window_jobs import CheckpointStorageError, JobBusy, lock_output
 
     info = CloudInfo.from_paths(args.clouds)
     pulses = None
@@ -259,7 +260,7 @@ def _run(argv, output_locks) -> int:
         try:
             data["occlusion"] = _occlusion(args, path_inputs, resources, info, requested, indexed_clouds,
                                            path_quality, path_warnings)
-        except TerrainError as error:
+        except (TerrainError, CheckpointStorageError) as error:
             error_message = str(error)
             data["occlusion"] = {"error": error_message}
         if error_message is None and "error" in data["occlusion"]:
@@ -334,6 +335,7 @@ def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds, path
     from lazrs import LazrsError
 
     from . import occlusion
+    from .window_jobs import CheckpointStorageError
 
     if isinstance(path_inputs, dict):
         return path_inputs
@@ -349,9 +351,11 @@ def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds, path
             delivered_check=check, threads=threads, prepared=indexed_clouds, single_files=info.single_return_files,
             budget=int(args.grid_memory_gib * 2**30), resources=resources,
         )
-    except occlusion.TerrainError:
+    except (occlusion.TerrainError, CheckpointStorageError):
         raise
     except (OSError, ValueError, MemoryError, ImportError, LaspyException, LazrsError) as error:
+        if isinstance(error, OSError) and error.errno in (errno.ENOSPC, errno.EDQUOT):
+            raise CheckpointStorageError(f"Occlusion scratch or output storage is full: {error}") from error
         reason = str(error) or "The occlusion step ran out of memory."
         if check is not None and isinstance(error, occlusion.PathCoverageError):
             reason = _supplementary(reason)

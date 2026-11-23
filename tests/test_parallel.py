@@ -1,5 +1,6 @@
 import os
 import signal
+from errno import ENOSPC
 
 import laspy
 import numpy as np
@@ -13,7 +14,7 @@ from threedtrees_trajectory.cli import main
 from threedtrees_trajectory.cloud import TimeSortedCopc
 from threedtrees_trajectory.pulses import read_pulses
 from threedtrees_trajectory.resources import RunResources
-from threedtrees_trajectory.window_input import ScanIndex
+from threedtrees_trajectory.window_input import ECHO, ScanIndex, group_multi
 
 
 def _worker_checkpoint_test(index, work, failure, peak):
@@ -23,6 +24,10 @@ def _worker_checkpoint_test(index, work, failure, peak):
         os.kill(os.getpid(), signal.SIGKILL)
     if failure == "invalid":
         raise ValueError("invalid input")
+    if failure == "full":
+        raise OSError(ENOSPC, "No space left on device")
+    if failure == "sigbus":
+        os.kill(os.getpid(), signal.SIGBUS)
     counts, marker = window_jobs.window_files(work, index)
     np.save(counts, np.full((8, 3), index, np.uint32))
     data = {"window": index + 1, "peak_rss_bytes": peak}
@@ -75,6 +80,72 @@ def test_invalid_input_is_not_retried(tmp_path):
     with pytest.raises(ValueError, match="invalid input"):
         window_jobs.execute(tmp_path, [_spec(0, tmp_path, "invalid")], 1, _worker_checkpoint_test, None, (), stage)
     assert stage["memory_retries"] == 0
+
+
+def test_memory_pressure_admits_one_worker_at_a_time(tmp_path, monkeypatch):
+    gib = 2**30
+    memory = iter((8 * gib, gib, gib))
+    monkeypatch.setattr(window_jobs, "available_memory", lambda: next(memory))
+    stage = {}
+    windows = window_jobs.execute(tmp_path, [_spec(0, tmp_path), _spec(1, tmp_path)], 2,
+                                  _worker_checkpoint_test, None, (), stage)
+    assert list(windows) == [0, 1]
+    assert stage["peak_concurrent_workers"] == 1
+    assert stage["memory_retries"] == 0
+
+
+@pytest.mark.parametrize(("failure", "message"), [("full", "No space left"), ("sigbus", "Check free scratch space")])
+def test_checkpoint_write_failure_is_clear(tmp_path, failure, message):
+    stage = {}
+    with pytest.raises(OSError, match=message):
+        window_jobs.execute(tmp_path, [_spec(0, tmp_path, failure)], 1, _worker_checkpoint_test, None, (), stage)
+    assert stage["memory_retries"] == 0
+    assert window_jobs.finished(tmp_path, 0, (8, 3)) is None
+
+
+def test_fragment_batches_keep_group_boundaries(monkeypatch):
+    monkeypatch.setattr(time_windows, "TRACE_BATCH", 17)
+    sizes = [2] * 10 + [45] + [3] * 10
+    original = np.zeros(sum(sizes), dtype=ECHO)
+    original["time"] = np.repeat(np.arange(len(sizes)), sizes)
+    original["returns"] = np.concatenate([
+        np.arange(1, size + 1) | (size << 4) if size <= 15 else np.full(size, 0x21)
+        for size in sizes
+    ])
+    shuffled = original[np.random.default_rng(0).permutation(len(original))]
+    recovered = []
+    for batch in time_windows._sorted_fragments(shuffled):
+        counts, valid = group_multi(batch, acquisition_order=False)
+        recovered.append(batch[np.repeat(valid, counts)])
+    np.testing.assert_array_equal(np.concatenate(recovered), original[original["time"] != 10])
+
+
+def _kill_second_window(index, window):
+    if index == 1:
+        os.kill(os.getpid(), signal.SIGKILL)
+    return time_windows.trace_window(index, window)
+
+
+@needs_untwine
+def test_interrupted_occlusion_resumes_with_identical_products(tmp_path, monkeypatch):
+    cloud = tmp_path / "flight.laz"
+    time, xyz = flight(cloud, seconds=2, rate=300)
+    copc, cog = tmp_path / "resumed.copc.laz", tmp_path / "resumed.tif"
+
+    def interrupt(work, specs, slots, worker, init, initargs, stage):
+        return window_jobs.execute(work, specs, slots, _kill_second_window, init, initargs, stage)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(occlusion, "execute", interrupt)
+        with pytest.raises(ValueError, match="Occlusion window 2 stopped"):
+            occlusion.run([cloud], time, xyz, copc, cog, voxel=1, threads=2)
+
+    resumed = occlusion.run([cloud], time, xyz, copc, cog, voxel=1, threads=2)
+    clean_copc, clean_cog = tmp_path / "clean.copc.laz", tmp_path / "clean.tif"
+    occlusion.run([cloud], time, xyz, clean_copc, clean_cog, voxel=1, threads=2)
+    assert resumed["time_windows"]["reused_windows"] == 1
+    assert copc.read_bytes() == clean_copc.read_bytes()
+    assert cog.read_bytes() == clean_cog.read_bytes()
 
 
 def test_concurrent_cli_run_preserves_shared_outputs(tmp_path):
