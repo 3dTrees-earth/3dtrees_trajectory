@@ -409,7 +409,8 @@ def _ordered_blocks(blocks, classify_block, workers):
             yield product
 
 
-def _write_products(grid, read_counts, top, ground, copc, cog, crs_wkt, tags, work, resources, slots, raster_columns):
+def _write_products(grid, layout, layer_ranges, top, ground, copc, cog, crs_wkt, tags, work, resources, slots,
+                    raster_columns):
     import rasterio
     from rasterio.shutil import copy as copy_raster
     from rasterio.transform import from_origin
@@ -481,13 +482,14 @@ def _write_products(grid, read_counts, top, ground, copc, cog, crs_wkt, tags, wo
     blocks = _product_blocks(grid, top, ground)
     header = _copc_header(grid, crs_wkt)
     bytes_per_worker = WINDOW**2 * (72 * nz + 4 * len(names))
-    workers = min(max(1, slots - 1), max(1, available_memory() // bytes_per_worker))
     with rasterio.Env(GDAL_CACHEMAX=cache_mib * 1024**2, CPL_TMPDIR=str(work)):
         with laspy.open(flat, "w", header=header) as writer, rasterio.open(raster, "w", **profile) as out:
             out.descriptions = tuple(names)
             out.update_tags(OCCLUSION_BAND_M=str(grid.voxel), **tags,
                             OCCLUSION_VALUE="occluded / (filled + empty + occluded)")
             with _stage(resources, "classify voxels + write products", scratch=work.parent):
+                read_counts = time_windows.count_blocks(work.parent, layout, layer_ranges)
+                workers = min(max(1, slots - 1), max(1, available_memory() // bytes_per_worker))
                 for product in _ordered_blocks(blocks, classify_block, workers):
                     if product is None:
                         continue
@@ -498,6 +500,7 @@ def _write_products(grid, read_counts, top, ground, copc, cog, crs_wkt, tags, wo
                     classes_total += totals
                     seen_total += seen
                     hidden_total += hidden
+                del read_counts
             size = writer.header.point_count
         with _stage(resources, "COPC write", children=True, scratch=work.parent) as stage:
             stage["bytes_read"] = flat.stat().st_size
@@ -601,8 +604,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
              TemporaryDirectory(prefix=".occlusion-", dir=cog.parent) as cog_folder:
             merge, staged_cog = Path(folder), Path(cog_folder) / "occlusion.tif"
             staged_copc = merge / "voxels.copc.laz"
-            read_counts = time_windows.count_blocks(work, layout, layer_ranges)
-            products = _write_products(grid, read_counts, top, ground, staged_copc, staged_cog,
+            products = _write_products(grid, layout, layer_ranges, top, ground, staged_copc, staged_cog,
                                        crs_wkt, tags, merge, resources, slots, raster_columns)
             _validate_source(index)
             os.replace(staged_copc, copc)

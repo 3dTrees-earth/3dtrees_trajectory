@@ -1,6 +1,7 @@
 import os
 import signal
 from errno import ENOSPC
+from types import SimpleNamespace
 
 import laspy
 import numpy as np
@@ -118,6 +119,29 @@ def test_fragment_batches_keep_group_boundaries(monkeypatch):
         counts, valid = group_multi(batch, acquisition_order=False)
         recovered.append(batch[np.repeat(valid, counts)])
     np.testing.assert_array_equal(np.concatenate(recovered), original[original["time"] != 10])
+
+
+def test_product_blocks_reuse_column_offsets_for_many_overlapping_windows(tmp_path, monkeypatch):
+    block = (slice(0, 1),) * 3
+    windows = [SimpleNamespace(bounds=block, shape=(1, 1, 1))] * 40
+    for index in range(len(windows)):
+        counts, _ = window_jobs.window_files(tmp_path, index)
+        np.save(counts, np.ones((1, 3), np.uint32))
+    ranges = np.zeros((1, 1), np.int32), np.ones((1, 1), np.int32)
+    from_bounds = time_windows.Columns.from_bounds
+    calls = 0
+
+    def count_calls(*args):
+        nonlocal calls
+        calls += 1
+        return from_bounds(*args)
+
+    monkeypatch.setattr(time_windows.Columns, "from_bounds", count_calls)
+    monkeypatch.setattr(time_windows, "available_memory", lambda: 2**30)
+    read = time_windows.count_blocks(tmp_path, windows, ranges)
+    np.testing.assert_array_equal(read(block), np.full((3, 1, 1, 1), 40, np.uint32))
+    np.testing.assert_array_equal(read(block), np.full((3, 1, 1, 1), 40, np.uint32))
+    assert calls == len(windows)
 
 
 def _kill_second_window(index, window):

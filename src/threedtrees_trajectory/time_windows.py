@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+import resource
 from bisect import bisect_right
 from dataclasses import dataclass
 from functools import lru_cache
@@ -12,7 +13,7 @@ from time import perf_counter, process_time
 import numpy as np
 
 from .ray_walk import Columns, Walker, sum_block
-from .resources import _proc_rss, _rss
+from .resources import _proc_rss, _rss, available_memory
 from .window_input import TRACE_BATCH, TRACE_LIMIT, group_multi, pack_echoes
 from .window_jobs import atomic_json, window_files
 
@@ -241,10 +242,21 @@ def _trace_multi(tracer, records, sizes, scales, offsets, voxel, time, xyz):
 
 def count_blocks(work, windows, layer_ranges):
     """Build a reader for individual product blocks with shared, read-only count maps."""
-    @lru_cache(maxsize=32)
-    def stored(number):
+    def open_window(number):
         values = np.load(window_files(work, number)[0], mmap_mode="r", allow_pickle=False)
         return Columns.from_bounds(windows[number].bounds, *layer_ranges), values
+
+    # An XY tile can overlap every time window. A small LRU then rebuilds
+    # whole-window column offsets on nearly every lookup. Retain all the
+    # offsets and virtual maps when the job has room for them.
+    sizes = [12 * math.prod(window.shape[:2]) + 8 for window in windows]
+    cache_bytes = available_memory() // 2
+    fd_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    map_limit = len(windows) if fd_limit == resource.RLIM_INFINITY else max(1, fd_limit - 64)
+    if len(windows) <= map_limit and sum(sizes) <= cache_bytes:
+        stored = tuple(open_window(number) for number in range(len(windows))).__getitem__
+    else:
+        stored = lru_cache(maxsize=max(1, min(32, map_limit, cache_bytes // max(sizes))))(open_window)
 
     def read(block):
         start = np.array([part.start for part in block], dtype=np.int32)
