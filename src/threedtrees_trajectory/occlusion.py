@@ -356,13 +356,13 @@ def _index_copc(flat: Path, copc: Path, size: int, work: Path, *, tags: dict[str
             stream.write(pack("<I", header.number_of_evlrs + 1))
 
 
-def _write_voxels(writer, grid: Grid, xy, centres, heights, classes, inside, counts) -> None:
+def _voxel_records(header, grid: Grid, xy, centres, heights, classes, inside, counts):
     keep = inside & (classes != EMPTY)
     ix, iy, iz = np.nonzero(keep)
     if not len(ix):
         return
     xy0 = grid.origin[:2] + np.array([part.start for part in xy]) * grid.voxel
-    points = laspy.ScaleAwarePointRecord.zeros(len(ix), header=writer.header)
+    points = laspy.ScaleAwarePointRecord.zeros(len(ix), header=header)
     points.x = xy0[0] + (ix + 0.5) * grid.voxel
     points.y = xy0[1] + (iy + 0.5) * grid.voxel
     points.z = centres[iz]
@@ -372,7 +372,7 @@ def _write_voxels(writer, grid: Grid, xy, centres, heights, classes, inside, cou
     points["nhit"], points["nmiss"], points["nocc"] = hit, miss, occ
     total = hit.astype(np.float64) + miss + occ
     points["occluded_fraction"] = np.divide(occ, total, out=np.full(len(ix), np.nan, np.float32), where=total > 0)
-    writer.write_points(points)
+    return points
 
 
 def _band_shares(classes: np.ndarray, first_layer: int, ground_layers: np.ndarray, inside: np.ndarray,
@@ -392,7 +392,24 @@ def _band_shares(classes: np.ndarray, first_layer: int, ground_layers: np.ndarra
     return shares.transpose(0, 2, 1)[:, ::-1, :], seen, hidden
 
 
-def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, resources, slots, raster_columns):
+def _ordered_blocks(blocks, classify_block, workers):
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+    from itertools import islice
+
+    if workers == 1:
+        yield from map(classify_block, blocks)
+        return
+    with ThreadPoolExecutor(workers) as pool:
+        pending = deque(pool.submit(classify_block, block) for block in islice(blocks, workers))
+        while pending:
+            product = pending.popleft().result()
+            if (block := next(blocks, None)) is not None:
+                pending.append(pool.submit(classify_block, block))
+            yield product
+
+
+def _write_products(grid, read_counts, top, ground, copc, cog, crs_wkt, tags, work, resources, slots, raster_columns):
     import rasterio
     from rasterio.shutil import copy as copy_raster
     from rasterio.transform import from_origin
@@ -427,35 +444,58 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
         # GDAL builds overviews band by band. Keep each read from decoding
         # the other bands of the same intermediate tile.
         profile["interleave"] = "band"
+        # The COG writer compresses the final tiles. Skip the intermediate
+        # compression pass when the uncompressed raster fits on scratch.
+        if nx * ny * len(names) * 4 < shutil.disk_usage(work).free // 2:
+            profile.update(compress="NONE", predictor=1)
     cache_mib = 512 if wide_raster else 128
     cog_threads = min(slots, 4) if wide_raster else 1
     flat = work / "voxels.las"
     raster = work / "voxel_shares.tif"
     classes_total = np.zeros(5, np.int64)
     seen_total, hidden_total = np.zeros(n_bands, np.int64), np.zeros(n_bands, np.int64)
+
+    def classify_block(block):
+        xs, ys, z = block
+        counts = read_counts(block)
+        hits = counts[0] > 0
+        local_top = np.where(hits.any(axis=2), z.stop - 1 - hits[:, :, ::-1].argmax(axis=2), -1)
+        heights = (centres[z] - ground[xs, ys, None]).astype(np.float32)
+        threshold = np.minimum(top[xs, ys], local_top)
+        below_canopy = layers[z] <= threshold[:, :, None]
+        # COPC uses float32 heights while the COG uses integer height bands.
+        copc_inside = (heights >= 0) & below_canopy
+        ground_block = ground_layers[xs, ys]
+        inside = (layers[z] >= ground_block[:, :, None]) & below_canopy
+        if not (inside.any() or copc_inside.any()):
+            return None
+        classes = classify(*counts)
+        totals = np.bincount(classes[inside], minlength=5)
+        points = _voxel_records(header, grid, (xs, ys), centres[z], heights, classes, copc_inside, counts)
+        shares, seen, hidden = _band_shares(classes, z.start, ground_block, inside, n_bands)
+        window = Window(xs.start, ny - ys.stop, xs.stop - xs.start, ys.stop - ys.start)
+        return window, points, shares, totals, seen, hidden
+
+    # Count sums, classification, and record construction share read-only buffers.
+    # Keep memory bounded and commit windows to both output streams in grid order.
+    blocks = _product_blocks(grid, top, ground)
+    header = _copc_header(grid, crs_wkt)
+    bytes_per_worker = WINDOW**2 * (72 * nz + 4 * len(names))
+    workers = min(max(1, slots - 1), max(1, available_memory() // bytes_per_worker))
     with rasterio.Env(GDAL_CACHEMAX=cache_mib * 1024**2, CPL_TMPDIR=str(work)):
-        with laspy.open(flat, "w", header=_copc_header(grid, crs_wkt)) as writer, rasterio.open(raster, "w", **profile) as out:
+        with laspy.open(flat, "w", header=header) as writer, rasterio.open(raster, "w", **profile) as out:
             out.descriptions = tuple(names)
             out.update_tags(OCCLUSION_BAND_M=str(grid.voxel), **tags,
                             OCCLUSION_VALUE="occluded / (filled + empty + occluded)")
             with _stage(resources, "classify voxels + write products", scratch=work.parent):
-                for (xs, ys), z, counts in blocks:
-                    hits = counts[0] > 0
-                    local_top = np.where(hits.any(axis=2), z.stop - 1 - hits[:, :, ::-1].argmax(axis=2), -1)
-                    heights = (centres[z] - ground[xs, ys, None]).astype(np.float32)
-                    threshold = np.minimum(top[xs, ys], local_top)
-                    below_canopy = layers[z] <= threshold[:, :, None]
-                    # Preserve the COPC's float32 height test and point records.
-                    copc_inside = (heights >= 0) & below_canopy
-                    ground_block = ground_layers[xs, ys]
-                    inside = (layers[z] >= ground_block[:, :, None]) & below_canopy
-                    if not (inside.any() or copc_inside.any()):
+                for product in _ordered_blocks(blocks, classify_block, workers):
+                    if product is None:
                         continue
-                    classes = classify(*counts)
-                    classes_total += np.bincount(classes[inside], minlength=5)
-                    _write_voxels(writer, grid, (xs, ys), centres[z], heights, classes, copc_inside, counts)
-                    shares, seen, hidden = _band_shares(classes, z.start, ground_block, inside, n_bands)
-                    out.write(shares, window=Window(xs.start, ny - ys.stop, xs.stop - xs.start, ys.stop - ys.start))
+                    window, points, shares, totals, seen, hidden = product
+                    if points is not None:
+                        writer.write_points(points)
+                    out.write(shares, window=window)
+                    classes_total += totals
                     seen_total += seen
                     hidden_total += hidden
             size = writer.header.point_count
@@ -561,8 +601,8 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
              TemporaryDirectory(prefix=".occlusion-", dir=cog.parent) as cog_folder:
             merge, staged_cog = Path(folder), Path(cog_folder) / "occlusion.tif"
             staged_copc = merge / "voxels.copc.laz"
-            blocks = time_windows.summed_counts(work, layout, _product_blocks(grid, top, ground), layer_ranges)
-            products = _write_products(grid, blocks, top, ground, staged_copc, staged_cog,
+            read_counts = time_windows.count_blocks(work, layout, layer_ranges)
+            products = _write_products(grid, read_counts, top, ground, staged_copc, staged_cog,
                                        crs_wkt, tags, merge, resources, slots, raster_columns)
             _validate_source(index)
             os.replace(staged_copc, copc)

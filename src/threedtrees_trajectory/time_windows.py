@@ -239,14 +239,14 @@ def _trace_multi(tracer, records, sizes, scales, offsets, voxel, time, xyz):
     tracer.add(points, _positions(records["time"][pulses[:-1]], time, xyz), rn, pulses)
 
 
-def summed_counts(work, windows, blocks, layer_ranges):
-    """Sum only one product block in memory, using uint64 to detect overflow."""
+def count_blocks(work, windows, layer_ranges):
+    """Build a reader for individual product blocks with shared, read-only count maps."""
     @lru_cache(maxsize=32)
     def stored(number):
         values = np.load(window_files(work, number)[0], mmap_mode="r", allow_pickle=False)
         return Columns.from_bounds(windows[number].bounds, *layer_ranges), values
 
-    for block in blocks:
+    def read(block):
         start = np.array([part.start for part in block], dtype=np.int32)
         stop = np.array([part.stop for part in block], dtype=np.int32)
         counts = np.zeros((*tuple(stop - start), 3), np.uint64)
@@ -257,4 +257,12 @@ def summed_counts(work, windows, blocks, layer_ranges):
             sum_block(columns, values, start, stop, counts)
         if counts.max(initial=0) > np.iinfo(np.uint32).max:
             raise ValueError("Too many pulses traversed a voxel for the 32-bit output count.")
-        yield block[:2], block[2], np.moveaxis(counts.astype(np.uint32), -1, 0)
+        return np.moveaxis(counts.astype(np.uint32), -1, 0)
+
+    return read
+
+
+def summed_counts(work, windows, blocks, layer_ranges):
+    read = count_blocks(work, windows, layer_ranges)
+    for block in blocks:
+        yield block[:2], block[2], read(block)
