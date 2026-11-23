@@ -158,6 +158,37 @@ The complete CSV, GeoJSON and COG files match byte for byte, including every COG
 comparison hashes the complete decoded records in voxel order and checks scales, offsets and product
 metadata. Untwine can place the same records differently in the compressed file.
 
+### Round 9 terrain raster validation
+
+The two 1 m DTMs came from the local raster 1.0.0 image at `069903f`. Its preflight required an
+instance dimension on these acquisitions, so its input copies carried a zero-filled `PredInstance`.
+The trajectory replays used the original scanner-order inputs and a 0.5 m voxel size.
+
+| Dataset | CSV | GeoJSON | COG | COPC file | Decoded COPC records | Baseline vs repeat COPC file |
+| --- | --- | --- | --- | --- | ---: | --- |
+| 1807 | Exact | Exact | Exact | Different | 1,657,932 exact | Different |
+| 2014 | Exact | Exact | Exact | Different | 7,977,880 exact | Different |
+
+Independent runs of `bac53e7` also produced different compressed COPC bytes. The input LAS
+bytes passed to Untwine, the decoded voxel records in coordinate order, the CRS and the product
+tags matched in all three no-DTM runs for each dataset.
+
+| Dataset | DTM XY coverage | Median absolute ground difference (m) | Filled | Empty | Occluded | Unobserved |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1807 | 93.28% | 0.219 | 1,445,111 → 1,392,804 | 2,526,490 → 2,572,952 | 212,799 → 561,489 | 22 → 35 |
+| 2014 | 64.92% | 0.315 | 6,951,441 → 6,381,625 | 11,182,745 → 11,515,558 | 1,001,850 → 2,298,990 | 24,589 → 38,841 |
+
+Ground differences compare a raster sample with the lowest-hit estimate in every column with a
+valid raster sample, including columns where the lowest-hit estimate used a neighbour.
+Counts and COG shares are shown as lowest hits → DTM with fallback.
+
+| Dataset | Pooled occluded share | 0–0.5 m | 0.5–1 m | 1–1.5 m | Mean unobserved-column band |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1807 | 5.09% → 12.40% | 7.46% → 38.69% | 9.92% → 42.23% | 12.93% → 39.97% | 0.0003% → 0.0006% |
+| 2014 | 5.24% → 11.38% | 5.31% → 20.23% | 5.92% → 20.37% | 8.08% → 19.73% | 0.0746% → 0.1159% |
+
+Both runs with a DTM retained byte-identical trajectory CSV and GeoJSON.
+
 ### Selective LAZ decoding
 
 The table compares all layers with selective decoding on local LAS 1.4 copies. Each value is the
