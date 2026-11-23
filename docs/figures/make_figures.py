@@ -22,7 +22,7 @@ stages = [
     ("Read + path", ("read/time-sort", "platform check", "path estimation")),
     ("Extent + routing", ("grid extent/crop pass", "route tile spools", "finalize extent/crop", "plan GPS-time windows")),
     ("Traverse", ("traversal",)),
-    ("Merge + write", ("classify + ground", "COPC write", "COG write")),
+    ("Merge + write", ("classify + ground", "classify voxels + write products", "COPC write", "COG write")),
 ]
 colors = ["#4878a8", "#d9822b", "#34846d", "#8256a2"]
 runs = list(dict.fromkeys((r["run"], r["mode"]) for r in table if r["mode"] in ("Round 7", "Round 8")))
@@ -88,7 +88,7 @@ def arrow(x1, y1, x2, y2, label=None):
         ax.text((x1 + x2) / 2 + 0.1, (y1 + y2) / 2 + 0.1, label, fontsize=8.5, color="#333")
 
 
-box(5, 29, "Input: one collection of standardized LAS/LAZ\n(+ optional delivered trajectory CSV)")
+box(5, 29, "Input: one collection of standardized LAS/LAZ\n(+ optional delivered trajectory CSV and terrain raster)")
 box(5, 26.6, "Argument + path checks\n(outputs ≠ inputs, voxel 0.05–10 m, ≥ 1 file)")
 stop(10.6, 26.6, "exit 2: invalid\narguments / unreadable input")
 box(5, 24.2, "Read scanner-order chunks and index bounds\nGPS time present, finite, varying?")
@@ -102,7 +102,7 @@ stop(10.6, 16.8, "exit 4: single returns\nwithout scan angle,\nno delivered path
 box(5, 13.9, "Quality: median line miss ≤ 0.1 m good · ≤ 0.5 m rough\n> 0.5 m unreliable → retry with scan angle", w=5.6, h=1.6)
 ok(2.3, 11.4, "Trajectory CSV and GeoJSON\nJSON report with --debug")
 box(7.4, 11.4, "Occlusion requested?\npath = delivered (always, if given;\nflag if median miss > 0.1 m) else estimated", w=5.2, h=1.8)
-box(7.4, 8.6, "Merge first-read column bounds in path coverage\nGround from lowest hits", w=5.6, h=1.6)
+box(7.4, 8.6, "Merge first-read column bounds in path coverage\nSample terrain raster with lowest-hit fallback", w=5.6, h=1.6)
 box(7.4, 6.0, "Stream disjoint GPS windows in parallel\nAdmit workers by estimated memory and measured RSS.", w=5.6, h=1.6)
 box(7.4, 3.5, "Classify voxels: 1 filled · 2 empty · 3 occluded · 4 unobserved", w=5.8, h=1.2)
 ok(7.4, 1.2, "Occlusion COPC (classes 1, 3 and 4)\n+ COG (one band per voxel layer, 0.5 m default)")

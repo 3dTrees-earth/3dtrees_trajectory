@@ -1,6 +1,6 @@
 # 3dtrees_trajectory: what the tool does, when, and where the time goes
 
-Status 21 Nov 2026, `main` after round 7. Version 1.0.0 covers moving lidar (ULS and MLS). TLS is v1.1.
+Status 23 Nov 2026, `main` after round 9. Version 1.0.0 covers moving lidar (ULS and MLS). TLS is v1.1.
 
 ## 1. What the tool does
 
@@ -16,6 +16,7 @@ The tool takes the point cloud of one ULS or MLS dataset and does two things.
 | --- | --- | --- |
 | One collection of standardized LAS/LAZ files per dataset | yes | The output of the standardization tool. One job takes the whole collection. Files are read in parallel chunks, in scanner order. |
 | Delivered trajectory (3Dtrees trajectory CSV) | no | If given, it is always used for occlusion instead of the estimate. |
+| Terrain raster (`--dtm PATH`) | no | Supports the raster tool's 1 m `<prefix>_dtm.tif`. The cloud and raster must declare the same CRS. |
 
 A merged COPC is accepted for trajectory estimation. Occlusion requires the scanner-order LAS/LAZ collection.
 
@@ -34,10 +35,16 @@ The COG dataset tags and the COPC's `3dtrees` extended variable length record (r
 corresponds to `# delivered_path_miss_flag:` in an accompanying CSV. CSV warnings use repeatable
 `# warning:` lines.
 
+The COG and COPC also carry `OCCLUSION_GROUND` (`dtm`, `lowest_hit`, or `dtm+lowest_hit`). Mixed
+runs carry the DTM and fallback fractions of the XY grid as `OCCLUSION_GROUND_DTM_SHARE` and
+`OCCLUSION_GROUND_LOWEST_HIT_SHARE`.
+
 ### Debug report
 
 `--debug` writes a JSON report with method, quality, warnings, flags, refusal reason, exit code,
 COG height-band step (`occlusion.cog_band_step_m`), and time, CPU, RAM and scratch for every stage.
+It records the ground source in `occlusion.ground` and the XY column fractions in
+`occlusion.ground_column_shares` when given a DTM.
 The default path is `<csv-stem>.report.json` beside the CSV. Set `--debug --report PATH` to choose
 another path or to request a report for an occlusion-only run. `--report PATH` alone exits 2.
 The Galaxy wrapper lives outside this repository and must collect a JSON output only when debug is enabled.
@@ -49,8 +56,8 @@ The Galaxy wrapper lives outside this repository and must collect a JSON output 
 The steps below follow `src/threedtrees_trajectory/cli.py:main`.
 
 1. **Argument checks** (`cli.py`). Outputs must not overwrite inputs. The voxel size must be 0.05 to 10 m.
-   At least one file is needed. A delivered trajectory is only accepted together with occlusion outputs. Any failure
-   gives **exit 2**.
+   At least one file is needed. A delivered trajectory or DTM requires both occlusion outputs. An unreadable
+   DTM or missing or mismatched CRS gives **exit 2**.
 2. **Read and time-sort** (`cli.py`, `pulses.py`). Large files use independently decoded, ordered record ranges.
    For compressed LAS 1.4 point formats 6–10, this pass asks lazrs for the XY/returns/scanner-channel base
    layer, Z, GPS time, point source ID and scan angle. Formats 0–5 use full decoding. GPS time must
@@ -74,8 +81,10 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
    The tool measures how far the pulse lines miss it and flags a median above 0.1 m in the products and optional
    debug report. Occlusion uses the delivered path even when the estimate fails (`cli.py`).
 7. **Occlusion grid** (`window_input.py`, `occlusion.py`). During the first read, indexed record ranges store time
-   bounds and column extrema. Within path coverage, the lowest hits give ground and the highest hits give canopy.
-   Empty columns take their nearest ground estimate, and ground spikes take the local median.
+   bounds and column extrema. The ground surface takes the raster cell containing each voxel column centre
+   (nearest neighbour). Without a valid raster sample, ground comes from the lowest hit in that column.
+   For this estimate, empty columns take their nearest ground estimate and ground spikes take the local median.
+   The highest hits within path coverage give canopy height.
    The final vertical grid spans ground minus 1 m through canopy top plus 1 m, within the point extent.
 8. **Traversal** (`time_windows.py`, `ray_walk.cpp`). Workers seek the relevant LAS/LAZ ranges, rebuild whole
    pulses and trace them in disjoint GPS windows. The window planner uses the available slots and splits
@@ -86,12 +95,12 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
    with a larger reservation. Completed count files can be reused after an interruption.
    The reread needs point source ID for pulse grouping and clock repair, so it skips scan angle.
    Unrepaired path-boundary rereads need just the base layer, Z and GPS time.
-9. **Classes and products** (`occlusion.py`). Sum hit, pass and hidden counts blockwise. A hit makes a filled
+9. **Classify voxels + write products** (`occlusion.py`). Sum hit, pass and hidden counts blockwise. A hit makes a filled
    voxel, a pass makes an empty voxel, and hidden-only makes an occluded voxel. Keep an unobserved class
    for voxels with zero coverage. Write voxel records to COPC and an occluded share to each COG band.
    With voxel size `s`, band `k` covers `[k·s, (k+1)·s)` metres above ground.
-10. **Occlusion failure** (`cli.py`). Print the error to stderr, publish zero-byte occlusion files and retain any
-    successfully estimated trajectory with the warning in its CSV header.
+10. **Occlusion failure** (`cli.py`). Print the error to stderr and publish zero-byte occlusion files.
+    Traversal errors after a successful trajectory estimate retain it with a warning in its CSV header.
 
 ### Exit codes
 
@@ -134,7 +143,7 @@ Peak RSS is the larger of the sampled worker-inclusive aggregate and the highest
 | Extent and crop | 0.2 s / 1.0 cores | 0.8 s / 1.0 cores | 1.6 s / 1.0 cores | 4.8 s / 1.0 cores |
 | Plan GPS windows | 0.0 s / 1.0 cores | 0.2 s / 1.0 cores | 0.1 s / 1.0 cores | 0.1 s / 1.0 cores |
 | Rebuild and trace pulses | 11.9 s / 6.5 cores | 125.9 s / 8.1 cores | 26.2 s / 8.0 cores | 45.6 s / 7.6 cores |
-| Merge, classify and write intermediates | 1.4 s / 1.0 cores | 10.5 s / 1.0 cores | 11.2 s / 1.0 cores | 47.4 s / 1.0 cores |
+| Classify voxels + write products | 1.4 s / 1.0 cores | 10.5 s / 1.0 cores | 11.2 s / 1.0 cores | 47.4 s / 1.0 cores |
 | Write voxel COPC | 3.6 s / 1.7 cores | 9.8 s / 3.8 cores | 8.0 s / 3.3 cores | 12.0 s / 6.4 cores |
 | Write height-band COG | 0.9 s / 1.0 cores | 9.6 s / 2.1 cores | 9.2 s / 2.1 cores | 28.6 s / 2.3 cores |
 <!-- stages:end -->
@@ -304,7 +313,7 @@ single-process RSS. The scratch values measure allocated blocks.
 | Extent and crop | 0:16 | 1.00 | 11.86 | — |
 | Plan GPS windows | 0:15 | 1.00 | 11.93 | — |
 | Rebuild and trace pulses | 2:59:48 | 5.71 | 30.46 | 26.24 |
-| Merge, classify and write intermediates | 20:40 | 1.00 | 16.17 | 30.05 |
+| Classify voxels + write products | 20:40 | 1.00 | 16.17 | 30.05 |
 | Write voxel COPC | 0:33 | 8.39 | 14.03 | 41.69 |
 | Write height-band COG | 2:57 | 1.65 | 13.65 | 41.69 |
 | Whole job | 3:33:44 | 5.31 | 30.46 | 41.69 |

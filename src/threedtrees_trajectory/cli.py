@@ -61,7 +61,8 @@ def _run(argv, output_locks) -> int:
     parser.add_argument("--occlusion-copc", type=Path, help="occlusion voxels as COPC (with --occlusion-cog)")
     parser.add_argument("--occlusion-cog", type=Path,
                         help="occluded share above ground as a COG, with one height band per voxel layer (default 0.5 m)")
-    parser.add_argument("--dtm", type=Path, help="occlusion terrain raster in the cloud CRS; gaps use lowest hits")
+    parser.add_argument("--dtm", type=Path,
+                        help="terrain raster in the cloud CRS for occlusion (nearest cell, lowest hits in gaps)")
     parser.add_argument("--voxel", default="0.5", help="occlusion voxel size and COG height-band step in metres (default 0.5)")
     parser.add_argument("--grid-memory-gib", type=float, default=16,
                         help="soft occlusion worker budget in GiB before further GPS-time splitting (default 16, maximum 64)")

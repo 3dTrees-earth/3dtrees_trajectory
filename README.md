@@ -61,7 +61,7 @@ the cloud's GPS times to fit into a signed 64-bit window index. `--threads` take
   --occlusion-copc occlusion.copc.laz --occlusion-cog occlusion.tif
 
 3dtrees-trajectory standardized/strip1.las standardized/strip2.laz --trajectory delivered.csv \
-  --occlusion-copc occlusion.copc.laz --occlusion-cog occlusion.tif
+  --dtm raster/dataset_dtm.tif --occlusion-copc occlusion.copc.laz --occlusion-cog occlusion.tif
 ```
 
 Supply both occlusion destinations. When `--trajectory` is supplied, occlusion uses that path. With no
@@ -75,9 +75,13 @@ to one second outside the path take the nearest endpoint. More distant echoes ar
 The tool refuses disjoint time ranges. A voxel is filled (1) if there is a registered return, empty (2)
 if seen clear, occluded (3) if only traversed behind returns, or unobserved (4) in the absence of traversal.
 
-Voxel size defaults to 0.5 m. `--voxel` accepts 0.05–10 m. Ground is the centre of the lowest filled voxel
-per column. Gaps take the nearest available ground estimate. Ground more than 2 m above its 5 m
-neighbourhood median is replaced by that median. The highest filled voxel caps each column.
+Voxel size defaults to 0.5 m. `--voxel` accepts 0.05–10 m. With `--dtm PATH`, the tool uses the terrain
+raster cell containing each voxel column centre (nearest-neighbour sampling). The raster tool's 1 m
+`<prefix>_dtm.tif` is a supported input. The raster and cloud must declare the same CRS. A missing or
+mismatched CRS exits 2. Nodata and columns outside the raster use the same lowest-hit estimate as a run
+without `--dtm`. That estimate starts at the centre of the lowest filled voxel per column, fills empty
+columns from the nearest estimate and replaces heights more than 2 m above the local 5 m median.
+The highest filled voxel caps each column.
 
 | File | Contents |
 | --- | --- |
@@ -88,10 +92,15 @@ With step `s`, zero-based band `k` covers `[k·s, (k+1)·s)` metres above ground
 step both follow `--voxel` and default to 0.5 m. The COG records the step in `OCCLUSION_BAND_M` and the debug report
 records it in `occlusion.cog_band_step_m`.
 
+The COG and COPC carry `OCCLUSION_GROUND` with the value `dtm`, `lowest_hit`, or `dtm+lowest_hit`. Mixed
+runs include `OCCLUSION_GROUND_DTM_SHARE` and `OCCLUSION_GROUND_LOWEST_HIT_SHARE`, measured over all
+columns in the XY grid. The debug report records `occlusion.ground` and, when a DTM is supplied,
+`occlusion.ground_column_shares`.
+
 If there are no qualifying voxels, the COPC is zero bytes and the COG is valid with NaN values. On an
 occlusion error both destinations are zero bytes and stderr gives the reason. A combined job can
-still return its estimated trajectory. The debug report includes traversal counts, in-range class totals,
-and the pooled occluded share per height band.
+still return its estimated trajectory after a traversal error. An invalid terrain input exits 2.
+The debug report includes traversal counts, in-range class totals and the pooled occluded share per height band.
 
 The first read builds the trajectory sample, indexes record ranges by GPS time and collects their column extrema.
 The path selects which echoes overlap the occlusion run. Blocks that intersect a path boundary are decoded to
