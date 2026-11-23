@@ -438,7 +438,7 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
             out.descriptions = tuple(names)
             out.update_tags(OCCLUSION_BAND_M=str(grid.voxel), **tags,
                             OCCLUSION_VALUE="occluded / (filled + empty + occluded)")
-            with _stage(resources, "classify + ground", scratch=work.parent):
+            with _stage(resources, "classify voxels + write products", scratch=work.parent):
                 for (xs, ys), z, counts in blocks:
                     hits = counts[0] > 0
                     local_top = np.where(hits.any(axis=2), z.stop - 1 - hits[:, :, ::-1].argmax(axis=2), -1)

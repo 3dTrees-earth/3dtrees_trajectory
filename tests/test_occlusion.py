@@ -69,7 +69,7 @@ def test_estimated_path_gives_trajectory_2_report_copc_and_cog(tmp_path):
     assert report["resources"]["points_read"] == report["points"]
     stages = {stage["name"] for stage in report["stages"]}
     assert stages >= {"read/time-sort", "platform check", "path estimation", "finalize extent/crop",
-                      "plan GPS-time windows", "traversal", "classify + ground", "COPC write", "COG write"}
+                      "plan GPS-time windows", "traversal", "classify voxels + write products", "COPC write", "COG write"}
     for stage in report["stages"]:
         assert stage["start_seconds"] >= 0
         assert stage["wall_seconds"] >= 0 and stage["cpu_seconds"] >= 0

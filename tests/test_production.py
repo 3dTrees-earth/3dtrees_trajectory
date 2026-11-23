@@ -172,8 +172,8 @@ def test_delivered_miss_flag_is_written_without_replacing_path(tmp_path, debug, 
         check = data["occlusion"]["delivered_path_check"]
         assert check["threshold_exceeded"] and check["median_m"] > 0.1
         assert {s["name"] for s in data["stages"]} >= {"read/time-sort", "platform check", "delivered-path check",
-                                                      "finalize extent/crop", "traversal", "classify + ground",
-                                                      "COPC write", "COG write"}
+                                                      "finalize extent/crop", "traversal",
+                                                      "classify voxels + write products", "COPC write", "COG write"}
     else:
         assert not list(tmp_path.rglob("*.json"))
     with rasterio.open(cog) as raster:
