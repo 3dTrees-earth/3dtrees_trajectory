@@ -61,18 +61,25 @@ struct Counts {
     const int64_t* offsets;
     uint32_t* values;
 
-    uint32_t* at(const Cell& point) const {
-        const auto x = point[0], y = point[1];
+    struct Column {
+        uint32_t* base;
+        int32_t first;
+        int32_t stop;
+
+        uint32_t* at(int32_t z) const {
+            return z >= first && z < stop ? base + 3LL * (z - first) : nullptr;
+        }
+    };
+
+    Column column_at(int32_t x, int32_t y) const {
         if (x < rectangle[0] || y < rectangle[1] || x >= rectangle[2] || y >= rectangle[3]) {
-            return nullptr;
+            return {nullptr, 0, 0};
         }
         const int64_t column = int64_t(x - rectangle[0]) * (rectangle[3] - rectangle[1]) + y - rectangle[1];
-        const int64_t depth = point[2] - first_layer[column];
+        const int32_t first = first_layer[column];
         const int64_t start = offsets[column];
-        if (depth < 0 || depth >= offsets[column + 1] - start) {
-            return nullptr;
-        }
-        return values + 3 * (start + depth);
+        const auto stop = static_cast<int32_t>(first + offsets[column + 1] - start);
+        return {values + 3 * start, first, stop};
     }
 };
 
@@ -85,11 +92,12 @@ double distance_squared(const XYZ& point, const double* origin) {
     return result;
 }
 
+template<bool Multi>
 void trace_pulse(const Grid& grid, const Counts& counts, const double* coords, const double* sensor,
                  const uint8_t* returns, int n, int64_t* stats) {
     std::array<XYZ, 15> echoes;
     for (int i = 0; i < n; ++i) {
-        auto& echo = echoes[returns ? returns[i] - 1 : 0];
+        auto& echo = echoes[Multi ? returns[i] - 1 : 0];
         std::copy_n(coords + 3 * i, 3, echo.begin());
     }
     XYZ direction;
@@ -115,11 +123,15 @@ void trace_pulse(const Grid& grid, const Counts& counts, const double* coords, c
     std::array<Cell, 15> targets;
     int outside = 0;
     int hit = 0;
-    const auto entry_distance = std::sqrt(distance_squared(start, sensor));
+    const auto entry_distance = enter > 0.0 ? std::sqrt(distance_squared(start, sensor)) : 0.0;
     for (int i = 0; i < n; ++i) {
         targets[i] = grid.cell(echoes[i]);
-        outside += !grid.contains(targets[i]);
-        hit += std::sqrt(distance_squared(echoes[i], sensor)) < entry_distance;
+        if constexpr (Multi) {
+            outside += !grid.contains(targets[i]);
+        }
+        if (entry_distance > 0.0) {
+            hit += std::sqrt(distance_squared(echoes[i], sensor)) < entry_distance;
+        }
     }
     Cell position = grid.cell(start);
     Cell step;
@@ -137,8 +149,9 @@ void trace_pulse(const Grid& grid, const Counts& counts, const double* coords, c
         delta[axis] = (size / grid.shape[axis]) / std::abs(direction[axis]);
     }
 
+    auto column = counts.column_at(position[0], position[1]);
     while (grid.contains(position)) {
-        auto* cell = counts.at(position);
+        auto* cell = column.at(position[2]);
         if (hit < n && targets[hit] == position) {
             do {
                 if (cell) {
@@ -150,15 +163,28 @@ void trace_pulse(const Grid& grid, const Counts& counts, const double* coords, c
             ++cell[hit < n ? 1 : 2];
         }
         const auto next = std::min({face[0], face[1], face[2]});
-        for (int axis = 0; axis < 3; ++axis) {
-            if (face[axis] == next) {
-                position[axis] += step[axis];
-                face[axis] += delta[axis];
-            }
+        const bool x = face[0] == next;
+        const bool y = face[1] == next;
+        if (x) {
+            position[0] += step[0];
+            face[0] += delta[0];
+        }
+        if (y) {
+            position[1] += step[1];
+            face[1] += delta[1];
+        }
+        if (face[2] == next) {
+            position[2] += step[2];
+            face[2] += delta[2];
+        }
+        if (x || y) {
+            column = counts.column_at(position[0], position[1]);
         }
     }
-    if (returns && hit < n - outside) {
-        stats[1] += n - hit;
+    if constexpr (Multi) {
+        if (hit < n - outside) {
+            stats[1] += n - hit;
+        }
     }
 }
 }  // namespace
@@ -169,11 +195,16 @@ extern "C" void trace_rays(const double* lower, const double* upper, const int32
                            const uint8_t* returns, const int32_t* pulses, int32_t n, int64_t* stats) {
     const Grid grid{lower, upper, shape};
     const Counts counts{rectangle, first_layer, offsets, values};
-    for (int32_t i = 0; i < n; ++i) {
-        const int32_t first = pulses ? pulses[i] : i;
-        const int32_t size = pulses ? pulses[i + 1] - first : 1;
-        trace_pulse(grid, counts, coords + 3LL * first, sensors + 3LL * i,
-                    returns ? returns + first : nullptr, size, stats);
+    if (pulses) {
+        for (int32_t i = 0; i < n; ++i) {
+            const int32_t first = pulses[i];
+            trace_pulse<true>(grid, counts, coords + 3LL * first, sensors + 3LL * i,
+                              returns + first, pulses[i + 1] - first, stats);
+        }
+    } else {
+        for (int32_t i = 0; i < n; ++i) {
+            trace_pulse<false>(grid, counts, coords + 3LL * i, sensors + 3LL * i, nullptr, 1, stats);
+        }
     }
 }
 
