@@ -25,42 +25,59 @@ stages = [
     ("Merge + write", ("classify + ground", "classify voxels + write products", "COPC write", "COG write")),
 ]
 colors = ["#4878a8", "#d9822b", "#34846d", "#8256a2"]
-runs = list(dict.fromkeys((r["run"], r["mode"]) for r in table if r["mode"] in ("Round 7", "Round 8")))
 rows = {(r["run"], r["mode"], r["stage"]): r for r in table}
-labels = [f"{name} · {mode}" for name, mode in runs]
-fig, axes = plt.subplots(1, 3, figsize=(14, 6), gridspec_kw={"width_ratios": [1.8, 1, 1]})
-positions = range(len(runs))
 
-for position, run in enumerate(runs):
-    offset = 0.0
-    for (name, members), color in zip(stages, colors):
-        seconds = sum(float(rows[(*run, member)]["wall_s"]) for member in members if (*run, member) in rows)
-        axes[0].barh(position, seconds, left=offset, color=color, label=name if position == 0 else None)
-        offset += seconds
-    axes[0].text(offset + 8, position, f"{offset:.0f} s", va="center", fontsize=8)
-    read = rows.get((*run, "read/time-sort"), {})
-    trace = rows.get((*run, "traversal"), {})
-    axes[1].barh(position - 0.15, float(read.get("cores", 0)), height=0.3, color=colors[0],
-                 label="Read" if position == 0 else None)
-    axes[1].barh(position + 0.15, float(trace.get("cores", 0)), height=0.3, color=colors[2],
-                 label="Traversal" if position == 0 else None)
-    peak = max(float(r["peak_ram_gib"]) for r in table if (r["run"], r["mode"]) == run)
-    axes[2].barh(position, peak, color="#748399")
 
-axes[0].set(title="Wall time by stage", xlabel="Seconds", yticks=list(positions), yticklabels=labels)
-axes[0].legend(loc="lower center", bbox_to_anchor=(0.5, -0.36), ncol=2, frameon=False)
-axes[0].set_xlim(0, axes[0].get_xlim()[1] * 1.12)
-axes[1].set(title="Read and traversal CPU", xlabel="CPU seconds / wall second", xlim=(0, 10.5), yticks=[])
-axes[1].axvline(10, color="#555", linestyle="--", linewidth=0.8)
-axes[1].legend(loc="lower center", bbox_to_anchor=(0.5, -0.27), ncol=2, frameon=False)
-axes[2].set(title="Peak stage RSS", xlabel="GiB, process or sampled worker sum", yticks=[])
-for ax in axes:
-    ax.set_ylim(len(runs) - 0.5, -0.5)
-    ax.spines[["top", "right"]].set_visible(False)
-fig.suptitle("Trajectory rounds 7 and 8 · 10 CPU slots", y=0.98)
-fig.tight_layout()
-fig.savefig(OUT / "stages.png", dpi=160)
-plt.close(fig)
+def plot_stages(modes, title, filename, *, minutes=False):
+    runs = list(dict.fromkeys((r["run"], r["mode"]) for r in table if r["mode"] in modes))
+    if not runs:
+        return
+    labels = [f"{name} · {mode}" for name, mode in runs]
+    fig, axes = plt.subplots(1, 3, figsize=(14, max(3.5, 0.65 * len(runs) + 1.5)),
+                             gridspec_kw={"width_ratios": [1.8, 1, 1]})
+    positions = range(len(runs))
+    divisor = 60 if minutes else 1
+    totals = []
+    for position, run in enumerate(runs):
+        offset = 0.0
+        for (name, members), color in zip(stages, colors):
+            seconds = sum(float(rows[(*run, member)]["wall_s"]) for member in members if (*run, member) in rows)
+            duration = seconds / divisor
+            axes[0].barh(position, duration, left=offset, color=color, label=name if position == 0 else None)
+            offset += duration
+        totals.append(offset)
+        read = rows.get((*run, "read/time-sort"), {})
+        trace = rows.get((*run, "traversal"), {})
+        axes[1].barh(position - 0.15, float(read.get("cores", 0)), height=0.3, color=colors[0],
+                     label="Read" if position == 0 else None)
+        axes[1].barh(position + 0.15, float(trace.get("cores", 0)), height=0.3, color=colors[2],
+                     label="Traversal" if position == 0 else None)
+        peak = max(float(r["peak_ram_gib"]) for r in table if (r["run"], r["mode"]) == run)
+        axes[2].barh(position, peak, color="#748399")
+
+    width = max(totals)
+    legend_y = -0.25 if minutes else -0.16
+    for position, duration in enumerate(totals):
+        axes[0].text(duration + width * 0.02, position, f"{duration:.0f}", va="center", fontsize=8)
+    axes[0].set(title="Wall time by stage", xlabel="Minutes" if minutes else "Seconds",
+                yticks=list(positions), yticklabels=labels, xlim=(0, width * 1.16))
+    axes[0].legend(loc="upper center", bbox_to_anchor=(0.5, legend_y), ncol=2, frameon=False)
+    axes[1].set(title="Read and traversal CPU", xlabel="CPU seconds / wall second", xlim=(0, 10.5), yticks=[])
+    axes[1].axvline(10, color="#555", linestyle="--", linewidth=0.8)
+    axes[1].legend(loc="upper center", bbox_to_anchor=(0.5, legend_y), ncol=2, frameon=False)
+    axes[2].set(title="Peak stage RSS", xlabel="GiB, process or sampled worker sum", yticks=[])
+    for ax in axes:
+        ax.set_ylim(len(runs) - 0.5, -0.5)
+        ax.spines[["top", "right"]].set_visible(False)
+    fig.suptitle(title, y=0.98)
+    fig.tight_layout()
+    fig.savefig(OUT / filename, dpi=160)
+    plt.close(fig)
+
+
+plot_stages(("Round 9 control", "Round 10"), "Trajectory controls · 10 CPU slots", "stages.png")
+plot_stages(("Round 8 50 GiB", "Round 10 50 GiB"), "Dataset 2585 full replays · 10 CPU slots and 50 GiB",
+            "stages-2585.png", minutes=True)
 
 # ---------- flow.png: decision flow ----------
 fig, ax = plt.subplots(figsize=(13, 15))
@@ -103,10 +120,10 @@ box(5, 13.9, "Quality: median line miss ≤ 0.1 m good · ≤ 0.5 m rough\n> 0.5
 ok(2.3, 11.4, "Trajectory CSV and GeoJSON\nJSON report with --debug")
 box(7.4, 11.4, "Occlusion requested?\npath = delivered (always, if given;\nflag if median miss > 0.1 m) else estimated", w=5.2, h=1.8)
 box(7.4, 8.6, "Merge first-read column bounds in path coverage\nSample terrain raster with lowest-hit fallback", w=5.6, h=1.6)
-box(7.4, 6.0, "Stream disjoint GPS windows in parallel\nAdmit workers by estimated memory and measured RSS.", w=5.6, h=1.6)
-box(7.4, 3.5, "Classify voxels: 1 filled · 2 empty · 3 occluded · 4 unobserved", w=5.8, h=1.2)
+box(7.4, 6.0, "Stream disjoint GPS windows in parallel\nAdjust admission using observed worker peak RSS.", w=5.6, h=1.6)
+box(7.4, 3.5, "Classify blocks in parallel, then write in grid order", w=5.8, h=1.2)
 ok(7.4, 1.2, "Occlusion COPC (classes 1, 3 and 4)\n+ COG (one band per voxel layer, 0.5 m default)")
-box(11.65, 8.6, "Occlusion error\nstderr, empty products,\npath kept", color="#fde2e1", w=2.4, h=1.9)
+box(11.65, 8.6, "Occlusion error\nstderr, empty products,\nexit 2 if scratch is full", color="#fde2e1", w=2.4, h=1.9)
 
 for y1, y2 in ((28.2, 27.4), (25.8, 25.0), (23.4, 22.6), (21.0, 20.2), (18.6, 17.8), (15.8, 14.7)):
     arrow(5, y1, 5, y2)

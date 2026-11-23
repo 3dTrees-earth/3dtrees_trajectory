@@ -111,12 +111,15 @@ Occlusion uses independent workers over disjoint GPS-time windows. Workers seek 
 trace each complete pulse once. They use the same voxel lattice and store compact counts between the ground
 and canopy. The planner splits a window further in time when its working memory or echo count exceeds the
 budget. Set the planning ceiling with `--grid-memory-gib` (16 GiB by default). At runtime the scheduler reserves
-the estimated memory of each window within the available cgroup memory and `--threads` limit. It adjusts
-subsequent reservations using measured window peak RSS. A worker that runs out of memory is retried once
+the estimated memory of each window within the available cgroup memory and `--threads` limit. Clean file
+cache is reclaimable. Dirty and writeback pages count toward the working budget. The scheduler adjusts
+subsequent reservations using each completed window's peak RSS. A worker that runs out of memory is retried once
 on its own if a larger reservation is available.
 
-The merge adds window counts blockwise before classifying voxels. Repeat the same command to resume an
-interrupted run. Keep the `.occlusion-*` checkpoint beside the COPC until both outputs are published.
+Workers merge counts and classify independent voxel blocks. The writer publishes COPC records and raster windows
+in grid order. Repeat the same command to resume an interrupted run and reuse finished windows. Keep the
+`.occlusion-*` checkpoint beside the COPC until both outputs are published. A checkpoint write failure
+from exhausted storage reports exit code 2.
 A merged COPC can supply the trajectory estimate. For occlusion, supply the standardized LAS/LAZ collection.
 
 The delivered path is used for every occlusion ray when supplied. `OCCLUSION_DELIVERED_MISS_FLAG` records whether
@@ -131,9 +134,13 @@ dataset tags. The COPC stores the same keys in the `3dtrees` extended variable l
 
 COPC indexing and COG conversion use temporary files beside the product destinations. The job needs space for
 the uncompressed voxel LAS, intermediate TIFF and final outputs. Wide rasters use a band-interleaved
-intermediate and up to four job slots for the COG conversion. The image includes Untwine 1.5.1. For local
+intermediate and up to four job slots for the COG conversion. They skip intermediate compression when scratch
+has room for the uncompressed raster. The image includes Untwine 1.5.1. For local
 runs, install the package with `python -m pip install .` using a C++17 compiler and set
 `TRAJECTORY_UNTWINE` to an executable Untwine 1.5.1 installation.
+
+Untwine randomizes COPC overview sampling. For regression checks, compare decoded records in voxel-centre order.
+[Untwine 1.5.1 sampling implementation](https://github.com/hobuinc/untwine/blob/1.5.1/bu/Processor.cpp#L99-L126)
 
 ## Platform pre-gate
 
@@ -174,8 +181,9 @@ the path tool's scope.
 
 - The reader decodes up to five million points per batch. The job caps decoding, path fitting and window workers
   at the configured `GALAXY_SLOTS` or `--threads`, CPU affinity and cgroup quota. The default is ten slots.
-  Large files decode independent record ranges and merge them in scanner order. The path solver runs independent
-  fits concurrently and merges them in order. Compressed LAS 1.4 point formats 6–10 decode only
+  Large files decode independent record ranges and merge them in scanner order. The path solver uses threads
+  for pulse-line fits and separate processes for scan-angle fits. It merges both in time-window order.
+  Compressed LAS 1.4 point formats 6–10 decode only
   coordinates, GPS time, return numbers, scanner channel, point source ID and scan angle during path
   estimation. Window tracing skips scan angle, and ordinary extent rereads use only positions and GPS time
   plus the LAZ base layer. Point formats 0–5 use full decoding.
@@ -202,7 +210,7 @@ check count cells in the ground-to-canopy envelope, the extent of the merge bloc
 | Up to 75 million | 32 | 16 | 1 h |
 | >75 million to 750 million | 64 | 96 | 2 h |
 | >750 million to 2.1 billion | 96 | 256 | 5 h |
-| >2.1 billion to 7.1 billion | 140 | 750 | 10 h |
+| >2.1 billion to 7.1 billion | 96 | 256 | 6 h |
 
 The standardized LAZ replay for 2027 (29.7 M points) took 78 s and peaked at 3.0 GiB of cgroup memory.
 Historical scanner-order LAZ benchmarks provide headroom estimates for the larger classes:
@@ -217,8 +225,10 @@ Historical scanner-order LAZ benchmarks provide headroom estimates for the large
 
 The 2014 single-return replay reached 24.01 GiB, so the smallest class allows 32 GiB. The 1844 replay
 fits the 64 GiB class with room for the parent process and file cache. The 750 M–2.1 B class is interpolated.
-The round-2 raw 2585 replay reached its 190 GiB cap including file cache. Round 8 replayed the raw acquisition
-in 3 h 34 min with ten CPU slots and a 50 GiB cap. The proposed 140 GiB Galaxy class still needs a full standardized 2585 run.
+The round-10 raw 2585 replay took 2 h 11 min with ten CPU slots, a 50 GiB cap and about 50 GiB of
+allocated scratch. A replay from completed checkpoints measured 1 min 13 s for the final merge.
+The resource class is an estimate for acquisitions with a comparable ground-to-canopy footprint.
+A standardized 2585 replay is still required for Galaxy validation.
 
 The standardized 1788 collection has 24.7 M points and a 2,000 × 2,000 × 1,278 grid at 0.5 m.
 Use `--debug` for current window memory and scratch measurements. [Stage resources](docs/REPORT.md#3-stage-resources)

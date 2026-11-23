@@ -87,27 +87,31 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
    The highest hits within path coverage give canopy height.
    The final vertical grid spans ground minus 1 m through canopy top plus 1 m, within the point extent.
 8. **Traversal** (`time_windows.py`, `ray_walk.cpp`). Workers seek the relevant LAS/LAZ ranges, rebuild whole
-   pulses and trace them in disjoint GPS windows. The window planner uses the available slots and splits
+   pulses and trace them in disjoint GPS windows. Separated returns are sorted by index and paired in bounded
+   batches that keep equal time, point source and channel together. The window planner uses the available slots and splits
    further in time if needed. The scheduler starts each worker with a reservation based on the window's echo
    count, count voxels and columns. It scales the planning estimate for later workers by the highest observed
    RSS-to-estimate ratio, adds 25% and 256 MiB, and checks cgroup headroom before admitting workers.
+   Clean file pages can be reclaimed. Dirty and writeback pages count against headroom.
    On suspected memory failure, it drains active workers before retrying the affected window alone
    with a larger reservation. Completed count files can be reused after an interruption.
    The reread needs point source ID for pulse grouping and clock repair, so it skips scan angle.
    Unrepaired path-boundary rereads need just the base layer, Z and GPS time.
-9. **Classify voxels + write products** (`occlusion.py`). Sum hit, pass and hidden counts blockwise. A hit makes a filled
+9. **Classify voxels + write products** (`occlusion.py`). Workers sum hit, pass and hidden counts and classify each
+   block independently. The writer consumes completed blocks in grid order. A hit makes a filled
    voxel, a pass makes an empty voxel, and hidden-only makes an occluded voxel. Keep an unobserved class
    for voxels with zero coverage. Write voxel records to COPC and an occluded share to each COG band.
    With voxel size `s`, band `k` covers `[k·s, (k+1)·s)` metres above ground.
 10. **Occlusion failure** (`cli.py`). Print the error to stderr and publish zero-byte occlusion files.
-    Traversal errors after a successful trajectory estimate retain it with a warning in its CSV header.
+    Ordinary traversal errors after a successful trajectory estimate retain it with a warning in its CSV header.
+    Exhausted checkpoint storage is a job error with exit code 2.
 
 ### Exit codes
 
 | Code | Meaning | Where |
 | --- | --- | --- |
 | 0 | Done | `cli.py` |
-| 2 | Invalid arguments, unreadable input, out of memory, TLS refused, requested debug report not writable | `cli.py` |
+| 2 | Invalid arguments, unreadable input, out of memory, checkpoint storage exhausted, TLS refused, requested debug report not writable | `cli.py` |
 | 3 | GPS time missing, constant or not finite | `coverage.py`, `pulses.py`, `estimate.py` |
 | 4 | No path can be estimated (no pulses, single returns without scan angle, too few reliable positions) | `coverage.py`, `estimate.py`, `cli.py` |
 
@@ -118,6 +122,23 @@ path as supplementary data.
 ## 3. Stage resources
 
 ![Stage resources](figures/stages.png)
+
+Round 10 control replays used the pinned image, ten CPU slots, and a 50 GiB cap. Each pair compares wall
+times from one run at `38ff410` and one at round 10 with lowest-hit ground.
+
+| Dataset | Whole job (s) | Path (s) | Traversal (s) | Classify and write (s) | COG (s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1807 | 28.7 → 24.6 | 1.0 → 1.1 | 15.9 → 12.6 | 1.3 → 0.3 | 0.8 → 0.7 |
+| 1844 | 311.3 → 228.0 | 5.6 → 5.1 | 215.7 → 167.5 | 10.6 → 1.8 | 10.1 → 6.6 |
+| 2014 | 67.4 → 50.2 | 1.0 → 1.0 | 27.6 → 22.0 | 11.0 → 2.1 | 9.4 → 6.4 |
+| 1788 | 236.9 → 93.7 | 89.3 → 17.9 | 48.9 → 23.2 | 45.5 → 8.0 | 28.3 → 19.3 |
+
+The 1788 scan-angle fits use separate processes and merge in time order. The optimized ray walker reuses
+the active column and specializes single-return pulses. In a one-core benchmark of 1.8 million synthetic
+rays it ran in 4.03 s, down from 5.13 s, with identical counts.
+
+Terrain controls use the round-9 reference rasters for 1807 and 2014 and locally generated 1 m
+lowest-return fixtures for 1844 and 1788. Each comparison uses the same raster for both tool versions.
 
 The round-7 baseline (`6e2410a`) and round 8 used the same local scanner-order LAZ inputs and ten
 CPU slots per job within a shared 140 GiB scope. Datasets 1807, 1844 and 2014 are ULS and 1788
@@ -302,28 +323,52 @@ on 1844 and 5.1 on 2014 with ten workers.
 
 ### Dataset 2585 at 50 GiB
 
-The 50 GiB replay used 25 local scanner-order LAS 1.2 PF 3 files (7,044,924,732 input points) and ten CPU slots. Peak RSS takes the larger of the sampled worker-inclusive aggregate and the highest
-single-process RSS. The scratch values measure allocated blocks.
+The 50 GiB replays used the same 25 local scanner-order LAS 1.2 PF 3 files (7,044,924,732 input points),
+ten CPU slots, and no swap. Round 10 used `--grid-memory-gib 8`. Mean cores, peak RSS and scratch each
+read from round 8 to round 10. RSS uses the greater of the sampled worker-inclusive sum and the largest
+process. Scratch uses allocated blocks.
 
-| Stage | Wall (h:mm:ss or m:ss) | Mean cores | Peak RSS (GiB) | Sampled scratch (GiB) |
-| --- | ---: | ---: | ---: | ---: |
-| Read, reconstruct pulses and index source | 8:39 | 9.01 | 16.08 | — |
-| Platform check | 0:00 | 1.00 | 12.38 | — |
-| Path fitting | 0:24 | 1.62 | 12.39 | — |
-| Extent and crop | 0:16 | 1.00 | 11.86 | — |
-| Plan GPS windows | 0:15 | 1.00 | 11.93 | — |
-| Rebuild and trace pulses | 2:59:48 | 5.71 | 30.46 | 26.24 |
-| Classify voxels + write products | 20:40 | 1.00 | 16.17 | 30.05 |
-| Write voxel COPC | 0:33 | 8.39 | 14.03 | 41.69 |
-| Write height-band COG | 2:57 | 1.65 | 13.65 | 41.69 |
-| Whole job | 3:33:44 | 5.31 | 30.46 | 41.69 |
+![2585 stage resources at 50 GiB](figures/stages-2585.png)
 
-Traversal completed 99 GPS windows with 7 workers at peak. Peak reservations were 34.51 GiB, with 0 isolated retries. Median and maximum window RSS were 1.86 GiB and 5.02 GiB. Cgroup memory peaked at 50.00 GiB including file cache, with 0 OOM kills. The products contain 78,708,640 COPC records and a 4,520 × 2,426 COG with 127 bands.
+| Stage | Round 8 wall | Round 10 wall | Mean cores | Peak RSS (GiB) | Allocated scratch (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Read, reconstruct pulses and index source | 8:39 | 8:23 | 9.01 → 8.89 | 16.08 → 15.29 | — → — |
+| Platform check | 0:00 | 0:00 | 1.00 → 1.00 | 12.38 → 12.36 | — → — |
+| Path fitting | 0:24 | 0:16 | 1.62 → 1.62 | 12.39 → 12.37 | — → — |
+| Extent and crop | 0:16 | 0:16 | 1.00 → 1.00 | 11.86 → 11.80 | — → — |
+| Plan GPS windows | 0:15 | 0:26 | 1.00 → 1.00 | 11.93 → 11.94 | — → — |
+| Rebuild and trace pulses | 2:59:48 | 1:38:40 | 5.71 → 8.26 | 30.46 → 32.11 | 26.24 → 32.78 |
+| Classify voxels and write intermediates | 20:40 | 20:48 | 1.00 → 2.16 | 16.17 → 21.77 | 30.05 → 38.54 |
+| Write voxel COPC | 0:33 | 0:32 | 8.39 → 8.55 | 14.03 → 33.19 | 41.69 → 50.18 |
+| Write height-band COG | 2:57 | 1:37 | 1.65 → 2.03 | 13.65 → 18.39 | 41.69 → 50.19 |
+| Whole job | 3:33:44 | 2:11:02 | 5.31 → 7.20 | 30.46 → 33.19 | 41.69 → 50.19 |
 
-Read, pulse reconstruction and path fitting took 9.1 min, compared with 8.4 min in the stopped 50 GiB run. That run stopped after 33 windows and 3 h 15 min of traversal, averaging about 2.4 cores over the job. Round 8 passed its 2.68 billion traced echoes after 1:35:17 of total wall time, compared with 3 h 24 min in the stopped run. The full round-8 run averaged 5.31 cores and completed in 3:33:44. The round-2 spatial-tile replay took 7 h 46 min under a 190 GiB cap. Round 8 used 46% of that wall time.
+Round 10 completed 143 GPS windows. Peak concurrency rose from seven to ten workers. Mean traversal CPU
+rose from 5.71 to 8.26 cores. Peak reservations were 34.35 GiB in round 10 and 34.51 GiB in round 8.
+Median and maximum worker RSS were 1.36 and 3.08 GiB in round 10. Cgroup memory peaked at 50.00 GiB
+including file cache. The run recorded zero OOM kills and zero isolated retries.
 
-The verified input was the local raw acquisition. The standardized 2585 collection is still needed
-to validate the proposed Galaxy resource class.
+Round 8 reserved substantially more than the measured RSS for the largest windows. About 1.5% of its
+reads repeated records at window boundaries. Round 10 reduces retained fragment arrays, accounts for dirty
+file pages, and uses a lower per-window planning ceiling to improve admission.
+
+The CSV and GeoJSON matched round 8 byte for byte. COG pixels and stored tags matched, as did all
+decoded COPC records sorted by voxel centre. Untwine randomly samples COPC overview levels during
+packaging, so equivalent records can produce different compressed bytes.
+[Untwine 1.5.1 sampling implementation](https://github.com/hobuinc/untwine/blob/1.5.1/bu/Processor.cpp#L99-L126)
+
+The first merge took 20:48. A tile can overlap more windows than the 32-entry cache can hold, causing the
+same column offsets to be rebuilt for successive tiles. The new cache retains the layouts and virtual
+mappings when cgroup headroom and the file-descriptor limit allow it. The checkpoint replay reused
+143 completed windows under the same 50 GiB cap. It classified and wrote the intermediates in 1:13.
+Substituting that measured stage into the full run gives an estimated 1:51:27 from scratch. The resumed
+merge's process RSS peaked at 62.13 GiB including mapped count files. The resumed cgroup reached 50 GiB
+with zero OOM kills.
+
+The stopped 50 GiB run processed 2.68 billion echoes in 3 h 24 min, compared with 1 h 35 min in round 8
+and under 44 min in round 10. The round-2 spatial-tile replay took 7 h 46 min under a 190 GiB cap. The
+full 50 GiB replays used the raw acquisition. A standardized 2585 replay is required to validate the
+Galaxy estimate for that acquisition.
 
 **Resource request for Galaxy (proposal, 10 cores)**
 
@@ -332,7 +377,7 @@ to validate the proposed Galaxy resource class.
 | ≤ 75 M | 32 GiB | 16 GiB | 1 h |
 | 75–750 M | 64 GiB | 96 GiB | 2 h |
 | 750 M–2.1 B | 96 GiB | 256 GiB | 5 h, estimated |
-| 2.1–7.1 B | 140 GiB | 750 GiB | 10 h, estimated |
+| 2.1–7.1 B | 96 GiB | 256 GiB | 6 h, estimated |
 
 For wide grids, also size for the ground-to-canopy count cells, merge block depth and raster band count.
 
