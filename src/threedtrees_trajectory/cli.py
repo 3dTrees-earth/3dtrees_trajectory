@@ -61,6 +61,7 @@ def _run(argv, output_locks) -> int:
     parser.add_argument("--occlusion-copc", type=Path, help="occlusion voxels as COPC (with --occlusion-cog)")
     parser.add_argument("--occlusion-cog", type=Path,
                         help="occluded share above ground as a COG, with one height band per voxel layer (default 0.5 m)")
+    parser.add_argument("--dtm", type=Path, help="occlusion terrain raster in the cloud CRS; gaps use lowest hits")
     parser.add_argument("--voxel", default="0.5", help="occlusion voxel size and COG height-band step in metres (default 0.5)")
     parser.add_argument("--grid-memory-gib", type=float, default=16,
                         help="soft occlusion worker budget in GiB before further GPS-time splitting (default 16, maximum 64)")
@@ -84,7 +85,7 @@ def _run(argv, output_locks) -> int:
     safe_report = False
     try:
         clouds = [path.resolve() for path in args.clouds]
-        inputs = clouds + ([args.trajectory.resolve()] if args.trajectory is not None else [])
+        inputs = clouds + [path.resolve() for path in (args.trajectory, args.dtm) if path is not None]
         resolved_products = tuple(path.resolve() for path in products)
         destinations = resolved_products
         if report_path is not None:
@@ -102,6 +103,8 @@ def _run(argv, output_locks) -> int:
             raise ValueError("Occlusion writes both products: give --occlusion-copc and --occlusion-cog.")
         if args.trajectory is not None and not occlusion_paths:
             raise ValueError("A delivered --trajectory is only used for occlusion: add --occlusion-copc and --occlusion-cog.")
+        if args.dtm is not None and not occlusion_paths:
+            raise ValueError("--dtm requires --occlusion-copc and --occlusion-cog.")
         try:
             voxel = float(args.voxel)
         except ValueError:
@@ -244,11 +247,17 @@ def _run(argv, output_locks) -> int:
         except (OSError, ValueError, MemoryError, LaspyException, LazrsError, StructError, EOFError) as error:
             error_message = str(error) or "The job could not read its input or ran out of memory."
     if error_message is None and occlusion_paths:
+        from .occlusion import TerrainError
+
         pulses = None
         path_quality = estimate_quality(result) if result is not None and args.trajectory is None else None
-        data["occlusion"] = _occlusion(args, path_inputs, resources, info, requested, indexed_clouds,
-                                       path_quality, path_warnings)
-        if "error" in data["occlusion"]:
+        try:
+            data["occlusion"] = _occlusion(args, path_inputs, resources, info, requested, indexed_clouds,
+                                           path_quality, path_warnings)
+        except TerrainError as error:
+            error_message = str(error)
+            data["occlusion"] = {"error": error_message}
+        if error_message is None and "error" in data["occlusion"]:
             if result is None:
                 error_message = data["occlusion"]["error"]
             else:
@@ -329,12 +338,14 @@ def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds, path
     try:
         return occlusion.run(
             args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=float(args.voxel),
-            scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
+            dtm=args.dtm, scratch=args.occlusion_copc.resolve().parent, source="delivered" if check else "estimated",
             quality="rough" if method in ("scan_angle", "lines_scan_angle") or info.single_return_files else None,
             path_method=method, path_quality=path_quality, path_warnings=path_warnings,
             delivered_check=check, threads=threads, prepared=indexed_clouds, single_files=info.single_return_files,
             budget=int(args.grid_memory_gib * 2**30), resources=resources,
         )
+    except occlusion.TerrainError:
+        raise
     except (OSError, ValueError, MemoryError, ImportError, LaspyException, LazrsError) as error:
         reason = str(error) or "The occlusion step ran out of memory."
         if check is not None and isinstance(error, occlusion.PathCoverageError):

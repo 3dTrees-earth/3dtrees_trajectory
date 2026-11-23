@@ -5,8 +5,8 @@ grid edge with OccPy's voxel traversal (Kuekenbrink et al. 2017, the compiled ``
 Each voxel collects hits, passes (miss) and passes behind the last return (occluded); OccPy's rule turns the counts
 into a class: filled (any hit), empty (passed, no hit), occluded (only behind returns), unobserved (no pulse).
 
-Heights above ground come from the lowest filled voxel of each column, with
-columns more than 2 m above their 5 m neighbourhood median replaced by that median.
+Heights above ground use the supplied terrain raster where it has data. The fallback is the lowest filled voxel
+of each column, with columns more than 2 m above their 5 m neighbourhood median replaced by that median.
 
 Outputs: a COPC with one point per voxel between the ground and the canopy top that is not empty (class, counts,
 occluded fraction, height above ground), and a COG with the voxel columns as pixels and one band per voxel layer
@@ -15,6 +15,7 @@ above ground holding the occluded share of the observed voxels, plus a last band
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
@@ -62,6 +63,10 @@ class Grid:
 
 class PathCoverageError(ValueError):
     """The path and cloud clocks do not overlap."""
+
+
+class TerrainError(ValueError):
+    """The supplied terrain raster cannot be used."""
 
 
 def read_trajectory(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -200,6 +205,39 @@ def _ground_from_lowest(lowest: np.ndarray, grid: Grid) -> tuple[np.ndarray, int
     return ground, int(spikes.sum())
 
 
+def _sample_dtm(path: Path, grid: Grid, crs_wkt: str | None) -> np.ndarray:
+    """Sample the raster cell containing each voxel column centre."""
+    import rasterio
+    from rasterio.errors import RasterioError
+    from rasterio.transform import rowcol
+    from rasterio.windows import Window
+
+    try:
+        with rasterio.open(path) as raster:
+            if not crs_wkt or raster.crs != rasterio.crs.CRS.from_wkt(crs_wkt):
+                raise TerrainError(f"{path.name} and the point cloud must use the same coordinate reference system.")
+            nx, ny = grid.shape[:2]
+            cx = grid.origin[0] + (np.arange(nx) + 0.5) * grid.voxel
+            cy = grid.origin[1] + (np.arange(ny) + 0.5) * grid.voxel
+            ground = np.full((nx, ny), np.nan)
+            for xy in _xy_windows(grid):
+                x, y = np.meshgrid(cx[xy[0]], cy[xy[1]], indexing="ij")
+                rows, cols = rowcol(raster.transform, x, y)
+                rows, cols = rows.reshape(x.shape), cols.reshape(x.shape)
+                inside = (rows >= 0) & (rows < raster.height) & (cols >= 0) & (cols < raster.width)
+                if not inside.any():
+                    continue
+                rows, cols = rows[inside], cols[inside]
+                row, col = int(rows.min()), int(cols.min())
+                window = Window(col, row, int(cols.max()) - col + 1, int(rows.max()) - row + 1)
+                values = raster.read(1, window=window, masked=True)[rows - row, cols - col]
+                elevations = values.astype(np.float64).filled(np.nan) * raster.scales[0] + raster.offsets[0]
+                ground[xy][inside] = np.where(np.isfinite(elevations), elevations, np.nan)
+    except (OSError, RasterioError) as error:
+        raise TerrainError(f"Could not sample terrain raster {path.name}: {error}") from error
+    return ground
+
+
 def _stage(resources, name, **kwargs):
     return resources.stage(name, **kwargs) if resources is not None else nullcontext({})
 
@@ -231,13 +269,18 @@ def _validate_source(index):
         raise ValueError("The LAS/LAZ collection changed during the run. Retry with stable source files.")
 
 
-def _crop(grid, low, high):
+def _crop(grid, low, high, terrain=None, raster_columns=None):
     nx, ny, nz = grid.shape
     if (high < 0).all():
         raise PathCoverageError("The point cloud and path have no overlapping GPS times. "
                          "Check GPS week seconds versus adjusted GPS time.")
     low[low == nz] = -1
-    ground, spikes = _ground_from_lowest(low, grid)
+    if raster_columns is not None and raster_columns.all():
+        ground, spikes = terrain, 0
+    else:
+        ground, spikes = _ground_from_lowest(low, grid)
+        if raster_columns is not None:
+            np.copyto(ground, terrain, where=raster_columns)
     top_z = grid.origin[2] + (int(high.max()) + 0.5) * grid.voxel
     offset = max(0, math.floor((float(ground.min()) - 1 - grid.origin[2]) / grid.voxel))
     offset = min(offset, nz - 1)
@@ -339,7 +382,7 @@ def _band_shares(classes: np.ndarray, first_layer: int, ground_layers: np.ndarra
     return shares.transpose(0, 2, 1)[:, ::-1, :], seen, hidden
 
 
-def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, resources, slots):
+def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, resources, slots, raster_columns):
     import rasterio
     from rasterio.shutil import copy as copy_raster
     from rasterio.transform import from_origin
@@ -348,11 +391,20 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
     nx, ny, nz = grid.shape
     layers = np.arange(nz)
     centres = grid.origin[2] + (layers + 0.5) * grid.voxel
-    # Ground is always on a voxel centre, including after nearest fill and median filtering.
-    # Layer indices keep centres on the correct side of a band boundary for fractional voxel sizes.
-    ground_layers = np.rint((ground - centres[0]) / grid.voxel).astype(np.int32)
+    # Lowest-hit estimates lie on voxel centres. Rounding preserves their band boundaries.
+    ground_layers = np.rint((ground - centres[0]) / grid.voxel)
+    if raster_columns is not None:
+        # For an off-centre DTM, the first centre at or above ground belongs to band zero.
+        nearest_centres = grid.origin[2] + (ground_layers + 0.5) * grid.voxel
+        ground_layers += raster_columns & (nearest_centres < ground)
+        ground_layers = np.minimum(ground_layers, nz)
+        if np.any(ground_layers < -65_533):
+            raise TerrainError("Terrain elevations are too far below the voxel grid for the COG height bands.")
+    ground_layers = ground_layers.astype(np.int32)
     covered = top >= 0
     n_bands = int((top[covered] - ground_layers[covered]).max(initial=0)) + 1
+    if raster_columns is not None and n_bands >= 65_535:
+        raise TerrainError("Terrain elevations require too many COG height bands; increase --voxel.")
     names = [f"occluded_{i * grid.voxel:.12g}-{(i + 1) * grid.voxel:.12g}m" for i in range(n_bands)]
     names.append("unobserved_column")
     north = grid.origin[1] + ny * grid.voxel
@@ -423,7 +475,7 @@ def _write_products(grid, blocks, top, ground, copc, cog, crs_wkt, tags, work, r
 
 def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: Path, voxel: float = 0.5,
         scratch: Path | None = None, source: str = "estimated", *,
-        quality: str | None = None, delivered_check: dict | None = None,
+        dtm: Path | None = None, quality: str | None = None, delivered_check: dict | None = None,
         path_method: str | None = None, path_quality: str | None = None, path_warnings=(),
         budget: int = DEFAULT_BUDGET, resources: RunResources | None = None,
         threads: int | None = None, prepared=None, single_files=()) -> dict:
@@ -448,7 +500,11 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
     with _stage(resources, "finalize extent/crop") as extent:
         low, high = index.surfaces(*time_bounds, extent)
         index.release_surfaces()
-        grid, top, ground, spikes = _crop(full_grid, low, high)
+        terrain = _sample_dtm(dtm, full_grid, crs_wkt) if dtm is not None else None
+        raster_columns = np.isfinite(terrain) if terrain is not None else None
+        terrain_digest = hashlib.sha256(terrain).hexdigest() if terrain is not None else None
+        grid, top, ground, spikes = _crop(full_grid, low, high, terrain, raster_columns)
+        del terrain
         del low, high
         extent.update(grid_shape=list(grid.shape), grid_voxels=math.prod(grid.shape))
     layer_ranges = ray_walk.layers(grid, top, ground)
@@ -457,7 +513,8 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         planning.update(windows=len(layout), estimated_checkpoint_bytes=sum(12 * w.count_cells for w in layout))
     identity = identify(paths,
                         [str(copc.resolve()), str(cog.resolve()), voxel, source, quality, list(single_files),
-                         [(w.lower, w.upper, [(s.start, s.stop) for s in w.bounds]) for w in layout]], time, xyz)
+                         [(w.lower, w.upper, [(s.start, s.stop) for s in w.bounds]) for w in layout],
+                         *([terrain_digest] if terrain_digest is not None else [])], time, xyz)
     work = scratch / f".occlusion-{identity}"
     with lock_job(work):
         for orphan in work.glob("merge-*"):
@@ -485,7 +542,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             staged_copc = merge / "voxels.copc.laz"
             blocks = time_windows.summed_counts(work, layout, _product_blocks(grid, top, ground), layer_ranges)
             products = _write_products(grid, blocks, top, ground, staged_copc, staged_cog,
-                                       crs_wkt, tags, merge, resources, slots)
+                                       crs_wkt, tags, merge, resources, slots, raster_columns)
             _validate_source(index)
             os.replace(staged_copc, copc)
             os.replace(staged_cog, cog)

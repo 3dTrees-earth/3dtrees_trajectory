@@ -217,7 +217,7 @@ def test_bad_input_has_refusal_and_clears_stale_outputs(tmp_path, scenario, reas
     ("--interval=abc", "positive finite"),
     ("--threads=0", "positive integer"),
     ("--threads=2.5", "positive integer"),
-    ("--dtm=terrain.tif", "Unrecognized arguments: --dtm"),
+    ("--dtm=terrain.tif", "--dtm requires --occlusion-copc and --occlusion-cog"),
 ])
 def test_invalid_arguments_have_a_refusal(tmp_path, option, reason):
     output = tmp_path / "output.csv"
