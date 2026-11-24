@@ -66,6 +66,29 @@ def test_debug_report_is_opt_in(tmp_path):
     assert reports[0] == reports[1]
 
 
+@pytest.mark.parametrize("ecef", [False, True])
+def test_geocentric_crs_near_origin_is_a_local_placeholder(tmp_path, ecef):
+    cloud = tmp_path / "flight.las"
+    flight(cloud, seconds=6, rate=400)
+    points = laspy.read(cloud)
+    points.header.offsets += [(6_370_000 if ecef else 0) - 500, -1500, 10]
+    points.points.offsets = points.header.offsets.copy()
+    points.header.add_crs(CRS.from_epsg(4978))
+    points.write(cloud)
+    output = tmp_path / "path.csv"
+
+    assert main([str(cloud), "-o", str(output), "--debug"]) == (2 if ecef else 0)
+    if ecef:
+        _assert_refusal(output, "Earth-centred coordinates: reproject to a projected CRS in metres")
+    else:
+        assert "# crs: unknown\n" in output.read_text()
+        layer = json.loads(output.with_suffix(".geojson").read_text())["features"][0]
+        assert layer["properties"]["source_crs"] == "unknown"
+        x, y, _ = layer["geometry"]["coordinates"][0][0]
+        assert x == pytest.approx(500, abs=0.02)
+        assert 500 <= y < 503
+
+
 def test_report_path_requires_debug(tmp_path, capsys):
     output = tmp_path / "path.csv"
     output.write_text("existing output")

@@ -14,6 +14,7 @@ keeps every pulse.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import hypot
 from pathlib import Path
 from struct import error as StructError
 from tempfile import TemporaryDirectory
@@ -90,6 +91,19 @@ def _crs(header: laspy.LasHeader) -> CRS | None:
         return header.parse_crs()
     except (CRSError, ValueError):
         return None  # a malformed CRS record leaves the CRS unknown
+
+
+def is_local_geocentric(crs: CRS, centre) -> bool:
+    """Recognise Standardization's CRS placeholder using Raster's distance cutoff."""
+    return crs.is_geocentric and hypot(*centre) < 1e6
+
+
+def cloud_crs(crs: CRS | None, lower: np.ndarray, upper: np.ndarray) -> CRS | None:
+    if crs is not None and crs.is_geocentric:
+        if is_local_geocentric(crs, 0.5 * lower + 0.5 * upper):
+            return None
+        raise ValueError("Earth-centred coordinates: reproject to a projected CRS in metres")
+    return crs
 
 
 def _time_system(header: laspy.LasHeader, names: set[str]) -> str:
@@ -394,6 +408,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
     if len(paths) > np.iinfo(np.uint16).max + 1:
         raise ValueError("At most 65,536 input files can be combined.")
     origins = []
+    maxima = []
     copc_paths = []
     for path in paths:
         try:
@@ -402,6 +417,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
             with open_cloud(path, read_evlrs=False) as reader:
                 if reader.header.point_count:
                     origins.append(reader.header.mins)
+                    maxima.append(reader.header.maxs)
                 info.points += reader.header.point_count
                 if is_copc(reader.header):
                     copc_paths.append(path)
@@ -439,7 +455,8 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                                scratch=scratch, resources=resources, _selection=selection,
                                scan_index=scan_index, threads=threads)
 
-    origin = np.floor(np.min(origins, axis=0) / 1000) * 1000
+    lower, upper = np.min(origins, axis=0), np.max(maxima, axis=0)
+    origin = np.floor(lower / 1000) * 1000
     crs = None
     first_chunk = True
     counts = np.zeros(2, np.int64)
@@ -466,7 +483,8 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                     if crs is not None and not crs.equals(file_crs, ignore_axis_order=True):
                         raise ValueError("Input clouds must use the same coordinate reference system.")
                     crs = file_crs
-                    epsg = crs.to_epsg()
+                    reference = cloud_crs(crs, lower, upper)
+                    epsg = reference.to_epsg() if reference is not None else None
                     info.crs = f"EPSG:{epsg}" if epsg else "unknown"
 
                 if not np.isfinite(header.offsets).all() or not np.isfinite(header.scales).all() or np.any(header.scales <= 0):

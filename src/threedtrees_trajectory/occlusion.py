@@ -33,7 +33,7 @@ from laspy.vlrs.vlrlist import VLRList
 
 from .cloud import is_copc, open_cloud
 from .output import delivered_miss_flag
-from .pulses import Pulses, _crs, _time_system
+from .pulses import Pulses, _crs, _time_system, cloud_crs
 from .resources import RunResources, available_memory, decoding_threads
 from . import ray_walk, time_windows
 from .window_input import ScanIndex
@@ -111,6 +111,7 @@ def _grid(paths: list[Path], voxel: float) -> tuple[Grid, str | None]:
             hi = np.maximum(hi, header.maxs)
     if not point_count:
         raise ValueError("The cloud has no points.")
+    crs = cloud_crs(crs, lo, hi)
     lo = np.floor(lo / voxel) * voxel
     # Include returns at the maximum, even when it falls on a voxel face.
     shape = tuple(math.floor(float(n)) + 1 for n in np.round((hi - lo) / voxel, 9))
