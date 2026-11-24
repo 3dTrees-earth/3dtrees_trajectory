@@ -193,18 +193,28 @@ def _clock_share(time: np.ndarray, cloud_span: tuple[float, float]) -> float:
     return max(0.0, overlap) / max(high - low, TIME_MARGIN)
 
 
+def _inside_share(time: np.ndarray, cloud_span: tuple[float, float]) -> float:
+    """Share of the path's own time span inside the cloud's (a path for part of the cloud lies wholly inside)."""
+    low, high = cloud_span
+    overlap = min(high + TIME_MARGIN, time[-1]) - max(low - TIME_MARGIN, time[0])
+    return max(0.0, overlap) / max(time[-1] - time[0], TIME_MARGIN)
+
+
 def align_path_clock(time: np.ndarray, system: str, week: int | None, cloud_system: str,
-                     cloud_span: tuple[float, float]) -> tuple[np.ndarray, dict | None]:
+                     cloud_span: tuple[float, float], partial: bool = False) -> tuple[np.ndarray, dict | None]:
     """Use the path's times as they are; if they cover less than half the cloud's time span, try the path's
-    declared clock converted to the cloud's. Returns the times and, when converted, what was converted."""
-    raw = _clock_share(time, cloud_span)
+    declared clock converted to the cloud's. With ``partial`` (one of several paths, each for part of the cloud)
+    the test is instead the share of the path's own span inside the cloud's. Returns the times and, when
+    converted, what was converted."""
+    share = _inside_share if partial else _clock_share
+    raw = share(time, cloud_span)
     if raw >= PATH_CLOCK_MIN_SHARE:
         return time, None
     converted = path_to_cloud_clock(time, system, week, cloud_system)
-    if converted is None or _clock_share(converted, cloud_span) < PATH_CLOCK_MIN_SHARE:
+    if converted is None or share(converted, cloud_span) < PATH_CLOCK_MIN_SHARE:
         return time, None
     return converted, {"from": system, "to": cloud_system, "raw_share": round(raw, 4),
-                       "converted_share": round(_clock_share(converted, cloud_span), 4)}
+                       "converted_share": round(share(converted, cloud_span), 4)}
 
 
 def _grid(paths: list[Path], voxel: float) -> tuple[Grid, str | None]:

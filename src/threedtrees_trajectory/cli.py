@@ -384,8 +384,9 @@ def _occlusion_path(args, result, pulses, resources, cloud_time_system="none", c
     if args.trajectory is not None:
         with resources.stage("delivered-path check") as stats:
             try:
-                delivered = [_delivered_file(occlusion, path, pulses, cloud_time_system, cloud_crs, cloud_vertical)
-                             for path in args.trajectory]
+                partial = len(args.trajectory) > 1
+                delivered = [_delivered_file(occlusion, path, pulses, cloud_time_system, cloud_crs, cloud_vertical,
+                                             partial) for path in args.trajectory]
                 stats["bytes_read"] = sum(path.stat().st_size for path in args.trajectory)
                 if len(delivered) == 1 and _covers_all(delivered[0], pulses):
                     # One path over the whole cloud: traced exactly as before multi-path support.
@@ -402,7 +403,7 @@ def _occlusion_path(args, result, pulses, resources, cloud_time_system="none", c
     return time, xyz, result.method, None
 
 
-def _delivered_file(occlusion, path, pulses, cloud_time_system, cloud_crs, cloud_vertical):
+def _delivered_file(occlusion, path, pulses, cloud_time_system, cloud_crs, cloud_vertical, partial=False):
     """One delivered path read, checked, and aligned to the cloud's CRS and clock, with what was converted."""
     time, xyz = occlusion.read_trajectory(path)
     occlusion.validate_trajectory(time, xyz)
@@ -413,7 +414,7 @@ def _delivered_file(occlusion, path, pulses, cloud_time_system, cloud_crs, cloud
         # Fallback when the clocks don't align: the path's declared clock, converted to the cloud's.
         system, week = occlusion.read_trajectory_clock(path)
         time, clock = occlusion.align_path_clock(time, system, week, cloud_time_system,
-                                                 (float(pulses.time.min()), float(pulses.time.max())))
+                                                 (float(pulses.time.min()), float(pulses.time.max())), partial)
     check = {}
     if clock is not None:
         check["clock_converted"] = clock

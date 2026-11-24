@@ -153,3 +153,24 @@ def test_uncovered_pulses_are_skipped_or_refused(tmp_path, share, refused):
         assert 0.6 < check["coverage"] < 0.8
         assert "of pulses had no delivered path covering their time" in text
         assert (tmp_path / "o.tif").stat().st_size > 0
+
+
+@needs_untwine
+def test_partial_paths_on_another_clock_are_each_converted(tmp_path):
+    """Several Unix-time paths, each for part of a GPS-week-seconds cloud (2585-like): each converts on its own."""
+    cloud = tmp_path / "f.laz"
+    time, sensor = flight(cloud, seconds=12, rate=400)  # GPS week seconds from 300000
+    unix = time + 2389 * 604_800 + 315_964_800 - 18
+    third = len(time) // 3
+    paths = []
+    for k in range(3):
+        part = slice(k * third, (k + 1) * third if k < 2 else len(time))
+        path = tmp_path / f"p{k}.csv"
+        with path.open("w") as stream:
+            stream.write("# format: 3dtrees-trajectory/1\n# time_system: unix_utc\ntime,x,y,z\n")
+            np.savetxt(stream, np.column_stack((unix[part][::10], sensor[part][::10])), delimiter=",", fmt="%.6f")
+        paths.append(path)
+    code, section, _ = _run(tmp_path, [cloud], paths)
+    check = section["delivered_path_check"]
+    assert code == 0 and check["coverage"] == 1.0 and check["median_m"] < 0.01
+    assert all(f["clock_converted"]["to"] == "gps_sow" for f in check["files"])
