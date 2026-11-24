@@ -276,7 +276,8 @@ def _process(args, output_locks, resources, threads, error_message, products, re
                     if safe_report:
                         data = report(info, result, pulses.multi_share)
             if occlusion_paths:
-                path_inputs = _occlusion_path(args, result, pulses, resources, info.time_system)
+                path_inputs = _occlusion_path(args, result, pulses, resources, info.time_system,
+                                              info.crs, info.vertical_crs)
                 if not isinstance(path_inputs, dict):
                     delivered_check = path_inputs[3]
             if args.output is not None:
@@ -373,7 +374,8 @@ def _process(args, output_locks, resources, threads, error_message, products, re
     return 0
 
 
-def _occlusion_path(args, result, pulses, resources, cloud_time_system="none"):
+def _occlusion_path(args, result, pulses, resources, cloud_time_system="none", cloud_crs="local",
+                    cloud_vertical="unknown"):
     import numpy as np
 
     from . import occlusion
@@ -383,6 +385,9 @@ def _occlusion_path(args, result, pulses, resources, cloud_time_system="none"):
             try:
                 time, xyz = occlusion.read_trajectory(args.trajectory)
                 occlusion.validate_trajectory(time, xyz)
+                path_crs, path_vertical = occlusion.read_trajectory_crs(args.trajectory)
+                xyz, crs_warning, crs_converted = occlusion.align_path_crs(
+                    xyz, path_crs, path_vertical, cloud_crs, cloud_vertical)
                 clock = None
                 if len(pulses):
                     # Fallback when the clocks don't align: the path's declared clock, converted to the cloud's.
@@ -392,6 +397,10 @@ def _occlusion_path(args, result, pulses, resources, cloud_time_system="none"):
                 check = occlusion.delivered_miss(pulses, time, xyz)
                 if clock is not None:
                     check["clock_converted"] = clock
+                if crs_warning is not None:
+                    check["crs_warning"] = crs_warning
+                if crs_converted is not None:
+                    check["crs_converted"] = crs_converted
                 stats["bytes_read"] = args.trajectory.stat().st_size
                 return time, xyz, "delivered", check
             except (OSError, ValueError) as error:

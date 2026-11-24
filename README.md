@@ -19,8 +19,11 @@ The reader supports LAS/LAZ 1.2–1.4 and point formats 0–10. Each file needs 
 All files must share a GPS time system and metric coordinates. If the CRS is missing, the tool assumes
 metres and preserves the input coordinates. The tool refuses point formats 0 and 2 because they lack GPS time.
 Like Raster, Trajectory treats a geocentric CRS as a local placeholder when the cloud bounds are centred less
-than 1,000 km from the origin. These products use local coordinates with unknown CRS. For Earth-centred
-coordinates, reproject the cloud to a projected CRS in metres.
+than 1,000 km from the origin. For Earth-centred coordinates, reproject the cloud to a projected CRS in metres.
+Without a usable CRS the CSV header says `# crs: local` and the GeoJSON property `crs` is `local`: positions are
+in the cloud's own coordinates. A delivered path may be in any EPSG CRS (`# crs:` line) and is converted to the
+cloud's CRS before use; a local path only fits a local cloud, and a path without a `# crs:` line is taken to be
+in the cloud's CRS.
 
 ### Outputs
 
@@ -169,7 +172,7 @@ datasets before scheduling a job.
 | Too many unpaired LAS/LAZ returns | The reader tries a 1 µs time tolerance for complete, unique return sequences on the same source and channel. |
 | Usable scan angles and GPS time | `scan_angle` fits the angle off nadir, assuming a level line scanner. If pairing failed, the affected file goes to the single-return traversal. |
 | Missing path windows in a file with usable single returns | `lines_scan_angle` keeps reliable line fits and uses scan angles to fill missing time windows. The combined estimate is marked `rough`. |
-| A delivered path in the cloud's clock and CRS | Occlusion uses the delivered positions. An estimated trajectory is optional. |
+| A delivered path with timestamps, in any EPSG CRS or local like the cloud | Occlusion uses the delivered positions. An estimated trajectory is optional. |
 | Too little geometric information for either estimator | The refusal message asks for the delivered trajectory. |
 
 Line fits that miss their pulse lines by more than ten times the median, with a threshold of at least 0.25 m, are

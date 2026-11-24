@@ -96,8 +96,8 @@ LEAP_SECONDS = ((915_148_800, 13), (1_136_073_600, 14), (1_230_768_000, 15), (1_
 PATH_CLOCK_MIN_SHARE = 0.5  # share of the cloud's time span the path must cover before its clock is trusted
 
 
-def read_trajectory_clock(path: Path) -> tuple[str, int | None]:
-    """The ``# time_system`` and ``# gps_week`` lines of a 3Dtrees trajectory CSV."""
+def read_trajectory_meta(path: Path) -> dict[str, str]:
+    """The ``# key: value`` header lines of a 3Dtrees trajectory CSV."""
     meta = {}
     with path.open(encoding="utf-8-sig") as stream:
         for line in stream:
@@ -105,6 +105,61 @@ def read_trajectory_clock(path: Path) -> tuple[str, int | None]:
                 break
             key, _, value = line.lstrip("# ").partition(":")
             meta[key.strip()] = value.strip()
+    return meta
+
+
+def read_trajectory_crs(path: Path) -> tuple[str | None, str]:
+    """The path's ``# crs`` (``EPSG:n`` or ``local``; legacy ``unknown`` reads as local; None without a crs line)
+    and its ``# vertical_crs``."""
+    meta = read_trajectory_meta(path)
+    crs = meta.get("crs")
+    if crs is not None and crs.lower() in ("", "unknown", "local"):
+        crs = "local"
+    return crs, meta.get("vertical_crs") or "unknown"
+
+
+def _is_epsg(label: str) -> bool:
+    return label.upper().startswith("EPSG:")
+
+
+def align_path_crs(xyz: np.ndarray, path_crs: str | None, path_vertical: str, cloud_crs: str,
+                   cloud_vertical: str) -> tuple[np.ndarray, str | None, dict | None]:
+    """The path's positions in the cloud's CRS, a warning when its CRS was converted or assumed, and what was
+    converted. Raises ValueError when local and EPSG coordinates meet or the conversion fails."""
+    if path_crs is None:
+        return xyz, f"The delivered path declares no CRS; the cloud's CRS ({cloud_crs}) was assumed.", None
+    path_local, cloud_local = not _is_epsg(path_crs), not _is_epsg(cloud_crs)
+    if path_local and cloud_local:
+        return xyz, None, None
+    if path_local != cloud_local:
+        raise ValueError(f"The delivered path is in {path_crs} coordinates and the point cloud in {cloud_crs}; "
+                         "they cannot be aligned.")
+    if path_crs.upper() == cloud_crs.upper():
+        return xyz, None, None
+    from pyproj import Transformer
+    from pyproj.exceptions import ProjError
+
+    vertical = _is_epsg(path_vertical) and _is_epsg(cloud_vertical)
+    source, target = (f"{path_crs}+{path_vertical}", f"{cloud_crs}+{cloud_vertical}") if vertical else (path_crs, cloud_crs)
+    try:
+        transformer = Transformer.from_crs(source, target, always_xy=True)
+        if vertical:
+            x, y, z = transformer.transform(xyz[:, 0], xyz[:, 1], xyz[:, 2], errcheck=True)
+        else:
+            (x, y), z = transformer.transform(xyz[:, 0], xyz[:, 1], errcheck=True), xyz[:, 2]
+    except ProjError as error:
+        raise ValueError(f"The delivered path's CRS ({path_crs}) could not be converted to the cloud's CRS "
+                         f"({cloud_crs}): {error}") from error
+    out = np.c_[x, y, z].astype(np.float64)
+    if not np.isfinite(out).all():
+        raise ValueError(f"The delivered path's CRS ({path_crs}) could not be converted to the cloud's CRS ({cloud_crs}).")
+    return (out, f"The delivered path's CRS ({path_crs}) was converted to the cloud's CRS ({cloud_crs}).",
+            {"from": source, "to": target, "vertical": vertical})
+
+
+def read_trajectory_clock(path: Path) -> tuple[str, int | None]:
+    """The ``# time_system`` and ``# gps_week`` lines of a 3Dtrees trajectory CSV."""
+    meta = read_trajectory_meta(path)
     week = meta.get("gps_week", "")
     return meta.get("time_system", "none") or "none", int(week) if week.isdigit() else None
 
@@ -677,6 +732,9 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         if warnings:
             tags["OCCLUSION_WARNINGS"] = json.dumps(warnings, ensure_ascii=False, separators=(",", ":"))
         if delivered_check is not None:
+            if delivered_check.get("crs_warning"):
+                warnings.append(delivered_check["crs_warning"])
+                tags["OCCLUSION_WARNINGS"] = json.dumps(warnings, ensure_ascii=False, separators=(",", ":"))
             if delivered_check.get("clock_converted"):
                 clock = delivered_check["clock_converted"]
                 warnings.append(f"The delivered path's times ({clock['from']}) did not match the cloud's GPS time; "

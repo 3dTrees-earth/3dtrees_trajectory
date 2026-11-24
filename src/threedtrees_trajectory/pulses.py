@@ -62,9 +62,27 @@ class Pulses:
 
 
 
+LOCAL = "local"  # no usable CRS: coordinates are the cloud's own
+
+
+def crs_labels(crs: CRS | None) -> tuple[str, str]:
+    """(horizontal, vertical) labels for the CSV header: ``EPSG:n`` or ``local`` / ``unknown``. A compound CRS gives
+    its horizontal EPSG, and its vertical EPSG when known."""
+    if crs is None:
+        return LOCAL, "unknown"
+    vertical = "unknown"
+    if crs.is_compound:
+        parts = crs.sub_crs_list
+        crs = parts[0]
+        epsg = parts[1].to_epsg() if len(parts) > 1 else None
+        vertical = f"EPSG:{epsg}" if epsg else vertical
+    epsg = crs.to_epsg()
+    return (f"EPSG:{epsg}", vertical) if epsg else (LOCAL, "unknown")
+
+
 @dataclass
 class CloudInfo:
-    crs: str  # "EPSG:xxxx" or "unknown"
+    crs: str  # "EPSG:xxxx" (horizontal) or "local" (cloud coordinates: no usable CRS)
     time_system: str  # gps_adjusted | gps_sow | none
     points: int
     files: list[str]
@@ -81,10 +99,11 @@ class CloudInfo:
     return_modes: list[dict] = field(default_factory=list)
     has_gps_time: bool | None = None
     single_return_files: list[int] = field(default_factory=list)
+    vertical_crs: str = "unknown"  # "EPSG:xxxx" when the cloud's CRS is compound
 
     @classmethod
     def from_paths(cls, paths: list[Path]) -> CloudInfo:
-        return cls("unknown", "none", 0, [str(path) for path in paths])
+        return cls(LOCAL, "none", 0, [str(path) for path in paths])
 
 
 def _crs(header: laspy.LasHeader) -> CRS | None:
@@ -486,8 +505,7 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                         raise ValueError("Input clouds must use the same coordinate reference system.")
                     crs = file_crs
                     reference = cloud_crs(crs, lower, upper)
-                    epsg = reference.to_epsg() if reference is not None else None
-                    info.crs = f"EPSG:{epsg}" if epsg else "unknown"
+                    info.crs, info.vertical_crs = crs_labels(reference)
 
                 if not np.isfinite(header.offsets).all() or not np.isfinite(header.scales).all() or np.any(header.scales <= 0):
                     raise ValueError("LAS coordinates must have finite offsets and positive finite scales.")

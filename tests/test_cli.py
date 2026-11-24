@@ -83,9 +83,9 @@ def test_geocentric_crs_near_origin_is_a_local_placeholder(tmp_path, ecef):
     if ecef:
         _assert_refusal(output, "Earth-centred coordinates: reproject to a projected CRS in metres")
     else:
-        assert "# crs: unknown\n" in output.read_text()
+        assert "# crs: local\n" in output.read_text()
         layer = json.loads(output.with_suffix(".geojson").read_text())["features"][0]
-        assert layer["properties"]["source_crs"] == "unknown"
+        assert layer["properties"]["source_crs"] == "local"
         x, y, _ = layer["geometry"]["coordinates"][0][0]
         assert x == pytest.approx(500, abs=0.02)
         assert 500 <= y < 503
@@ -174,7 +174,7 @@ def test_las_point_formats(tmp_path, point_format, version):
         np.interp(rows[:, 0], time, coord) for coord in sensor.T
     ]))) < 0.05
     report = _report(output)
-    assert report["crs"] == "unknown"
+    assert report["crs"] == "local"
     assert report["resources"]["points_read"] == report["points"]
 
 
