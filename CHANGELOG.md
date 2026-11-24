@@ -7,6 +7,7 @@ Re-cut of 1.0.0 (24 Nov 2026):
 - Treat a geocentric CRS on a cloud centred within 1,000 km of the origin as a local placeholder. Reject Earth-centred inputs at or beyond that distance with exit 2.
 - Accept terrain rasters without a CRS in the cloud coordinates. Warn when assuming a CRS for one input or falling back to lowest hits because the raster is outside the cloud.
 - Return exit 127 for memory exhaustion and worker kills, with a debug refusal report and empty products at safe destinations.
+- When a delivered path's times cover less than half of the cloud's GPS-time span, its declared clock (`# time_system`: `unix_utc`, `gps_unix`, `gps_adjusted`, or `gps_sow` with `gps_week`) is converted to the cloud's GPS week seconds or adjusted GPS time, with leap seconds. A path on another clock than its cloud then lines up (tested on a week-seconds crop of 2018). The conversion is noted in `OCCLUSION_WARNINGS` and in the report's `delivered_path_check`.
 
 First cut:
 
