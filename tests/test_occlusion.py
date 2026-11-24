@@ -134,22 +134,25 @@ def test_band_shares_use_column_relative_layers():
     np.testing.assert_array_equal(hidden, [0, 1, 1, 0])
 
 
-def _terrain_fixture(tmp_path, coverage):
+def _terrain_fixture(tmp_path, coverage, cloud_crs="EPSG:32632", raster_crs="EPSG:32632"):
     import rasterio
     from pyproj import CRS
     from rasterio.transform import from_origin
 
     cloud = tmp_path / "flight.laz"
     flight(cloud, seconds=6, rate=500)
-    points = laspy.read(cloud)
-    points.header.add_crs(CRS.from_epsg(32632))
-    points.write(cloud)
+    if cloud_crs:
+        points = laspy.read(cloud)
+        points.header.add_crs(CRS.from_user_input(cloud_crs))
+        points.write(cloud)
     grid, _ = occlusion._grid([cloud], 0.5)
     x, y = grid.origin[:2]
     nx, ny = grid.shape[:2]
     width, height = (nx + 1) // 2, (ny + 1) // 2
     if coverage == "partial":
         width -= 1
+    if coverage == "outside":
+        x += 10_000
     transform = from_origin(x, y + height, 1, 1)
     terrain = np.full((height, width), 0.375, np.float32)
     if coverage == "partial":
@@ -157,7 +160,7 @@ def _terrain_fixture(tmp_path, coverage):
     elif coverage == "missing":
         terrain[:] = -9999
     path = tmp_path / "ground.tif"
-    crs = "EPSG:32633" if coverage == "mismatch" else "EPSG:32632"
+    crs = "EPSG:32633" if coverage == "mismatch" else raster_crs
     with rasterio.open(path, "w", driver="GTiff", width=width, height=height, count=1, dtype=terrain.dtype,
                        crs=crs, transform=transform, nodata=-9999) as raster:
         raster.write(terrain, 1)
@@ -232,6 +235,42 @@ def test_terrain_crs_mismatch_exits_two_in_combined_run(tmp_path, capsys):
     report = json.loads(out.with_suffix(".report.json").read_text())
     assert report["exit_code"] == 2 and reason in report["occlusion"]["error"]
     assert out.stat().st_size == copc.stat().st_size == cog.stat().st_size == 0
+
+
+@needs_untwine
+@pytest.mark.parametrize(("cloud_crs", "raster_crs", "coverage", "warning"), [
+    (None, None, "full", None),
+    ("EPSG:4978", None, "full", None),
+    ("EPSG:4978", "EPSG:4978", "full", None),
+    ("EPSG:32632", None, "full", "has no usable CRS"),
+    ("EPSG:32632", None, "outside", "using lowest hits"),
+])
+def test_terrain_without_a_real_crs(tmp_path, capsys, cloud_crs, raster_crs, coverage, warning):
+    import rasterio
+
+    cloud, terrain, _, _ = _terrain_fixture(tmp_path, coverage, cloud_crs, raster_crs)
+    out, copc, cog = tmp_path / "p.csv", tmp_path / "occlusion.copc.laz", tmp_path / "occlusion.tif"
+    assert main([str(cloud), "-o", str(out), "--debug", "--dtm", str(terrain),
+                 "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 0
+    report = json.loads(out.with_suffix(".report.json").read_text())["occlusion"]
+    source = "lowest_hit" if coverage == "outside" else "dtm"
+    assert report["ground"] == source
+    points = laspy.read(copc)
+    record = next(vlr for vlr in points.evlrs if vlr.user_id == "3dtrees" and vlr.record_id == 1)
+    tags = json.loads(record.record_data)
+    expected_crs = cloud_crs if cloud_crs == "EPSG:32632" else None
+    parsed = points.header.parse_crs()
+    assert (parsed.to_string() if parsed else None) == expected_crs
+    with rasterio.open(cog) as raster:
+        assert (raster.crs.to_string() if raster.crs else None) == expected_crs
+        assert raster.tags()["OCCLUSION_GROUND"] == source
+        assert raster.tags().get("OCCLUSION_WARNINGS") == tags.get("OCCLUSION_WARNINGS")
+    if warning:
+        assert warning in capsys.readouterr().err
+        assert warning in report["warnings"][0]
+        assert json.loads(tags["OCCLUSION_WARNINGS"]) == report["warnings"]
+    else:
+        assert "warnings" not in report and "OCCLUSION_WARNINGS" not in tags
 
 
 @pytest.mark.parametrize("offset", [100, 400_000_000])

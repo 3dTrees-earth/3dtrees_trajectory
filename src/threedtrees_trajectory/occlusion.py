@@ -33,7 +33,7 @@ from laspy.vlrs.vlrlist import VLRList
 
 from .cloud import is_copc, open_cloud
 from .output import delivered_miss_flag
-from .pulses import Pulses, _crs, _time_system, cloud_crs
+from .pulses import Pulses, _crs, _time_system, cloud_crs, is_local_geocentric
 from .resources import RunResources, available_memory, decoding_threads
 from . import ray_walk, time_windows
 from .window_input import ScanIndex
@@ -210,20 +210,33 @@ def _ground_from_lowest(lowest: np.ndarray, grid: Grid, raster_columns=None) -> 
 
 @contextmanager
 def open_dtm(path: Path, crs_wkt: str | None):
-    """Open a terrain raster whose CRS can be matched to the point cloud."""
+    """Open a terrain raster in the cloud coordinates, with a warning if assumed."""
     import rasterio
+    from pyproj import CRS
     from rasterio.errors import RasterioError
 
     try:
         with rasterio.open(path) as raster:
-            if not crs_wkt or raster.crs != rasterio.crs.CRS.from_wkt(crs_wkt):
-                raise TerrainError(f"{path.name} and the point cloud must use the same coordinate reference system.")
-            yield raster
+            raster_crs = raster.crs
+            if raster_crs is not None:
+                left, bottom, right, top = raster.bounds
+                reference = CRS.from_wkt(raster_crs.to_wkt())
+                if is_local_geocentric(reference, ((left + right) / 2, (bottom + top) / 2)):
+                    raster_crs = None
+            warning = None
+            if crs_wkt and raster_crs:
+                if raster_crs != rasterio.crs.CRS.from_wkt(crs_wkt):
+                    raise TerrainError(f"{path.name} and the point cloud must use the same coordinate reference system.")
+            elif crs_wkt:
+                warning = f"DTM {path.name} has no usable CRS; assuming point-cloud coordinates."
+            elif raster_crs:
+                warning = f"The point cloud has no usable CRS; assuming DTM {path.name} uses the same coordinates."
+            yield raster, warning
     except (OSError, RasterioError) as error:
         raise TerrainError(f"Could not sample terrain raster {path.name}: {error}") from error
 
 
-def _sample_dtm(path: Path, grid: Grid, crs_wkt: str | None) -> np.ndarray:
+def _sample_dtm(path: Path, grid: Grid, crs_wkt: str | None) -> tuple[np.ndarray, list[str]]:
     """Sample the raster cell containing each voxel column centre."""
     from rasterio.transform import rowcol
     from rasterio.windows import Window
@@ -232,7 +245,8 @@ def _sample_dtm(path: Path, grid: Grid, crs_wkt: str | None) -> np.ndarray:
     cx = grid.origin[0] + (np.arange(nx) + 0.5) * grid.voxel
     cy = grid.origin[1] + (np.arange(ny) + 0.5) * grid.voxel
     ground = np.full((nx, ny), np.nan)
-    with open_dtm(path, crs_wkt) as raster:
+    covered = False
+    with open_dtm(path, crs_wkt) as (raster, warning):
         for xy in _xy_windows(grid):
             x, y = np.meshgrid(cx[xy[0]], cy[xy[1]], indexing="ij")
             rows, cols = rowcol(raster.transform, x, y)
@@ -240,13 +254,16 @@ def _sample_dtm(path: Path, grid: Grid, crs_wkt: str | None) -> np.ndarray:
             inside = (rows >= 0) & (rows < raster.height) & (cols >= 0) & (cols < raster.width)
             if not inside.any():
                 continue
+            covered = True
             rows, cols = rows[inside], cols[inside]
             row, col = int(rows.min()), int(cols.min())
             window = Window(col, row, int(cols.max()) - col + 1, int(rows.max()) - row + 1)
             values = raster.read(1, window=window, masked=True)[rows - row, cols - col]
             elevations = values.astype(np.float64).filled(np.nan) * raster.scales[0] + raster.offsets[0]
             ground[xy][inside] = np.where(np.isfinite(elevations), elevations, np.nan)
-    return ground
+    if not covered:
+        return ground, [f"DTM {path.name} does not cover any point-cloud voxel columns; using lowest hits."]
+    return ground, [warning] if warning else []
 
 
 def _stage(resources, name, **kwargs):
@@ -554,7 +571,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
     with _stage(resources, "finalize extent/crop") as extent:
         low, high = index.surfaces(*time_bounds, extent)
         index.release_surfaces()
-        terrain = _sample_dtm(dtm, full_grid, crs_wkt) if dtm is not None else None
+        terrain, terrain_warnings = _sample_dtm(dtm, full_grid, crs_wkt) if dtm is not None else (None, [])
         raster_columns = np.isfinite(terrain) if terrain is not None else None
         terrain_digest = hashlib.sha256(terrain).hexdigest() if terrain is not None else None
         grid, top, ground, spikes = _crop(full_grid, low, high, terrain, raster_columns)
@@ -587,8 +604,9 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         if ground_source == "dtm+lowest_hit":
             tags["OCCLUSION_GROUND_DTM_SHARE"] = str(ground_shares["dtm"])
             tags["OCCLUSION_GROUND_LOWEST_HIT_SHARE"] = str(ground_shares["lowest_hit"])
-        if path_warnings:
-            tags["OCCLUSION_WARNINGS"] = json.dumps(path_warnings, ensure_ascii=False, separators=(",", ":"))
+        warnings = [*path_warnings, *terrain_warnings]
+        if warnings:
+            tags["OCCLUSION_WARNINGS"] = json.dumps(warnings, ensure_ascii=False, separators=(",", ":"))
         if delivered_check is not None:
             tags["OCCLUSION_DELIVERED_MISS_FLAG"] = delivered_miss_flag(delivered_check)
             flag = delivered_check["threshold_exceeded"]
@@ -625,6 +643,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
                          "peak_concurrent_workers": stage["peak_concurrent_workers"],
                          "reused_windows": stage["reused_windows"]},
         "ground": ground_source,
+        **({"warnings": terrain_warnings} if terrain_warnings else {}),
         **({"ground_column_shares": ground_shares} if ground_shares is not None else {}),
         "ground_spikes_replaced": spikes,
         **{key: extent[key] for key in ("echoes_read", "echoes_outside_path")},

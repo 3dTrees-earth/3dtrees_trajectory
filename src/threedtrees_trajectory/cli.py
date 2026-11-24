@@ -304,6 +304,8 @@ def _run(argv, output_locks) -> int:
         for warning in result.warnings:
             print(f"warning: {warning}", file=sys.stderr)
     if occlusion_paths and "error" not in data["occlusion"]:
+        for warning in data["occlusion"].get("warnings", ()):
+            print(f"warning: {warning}", file=sys.stderr)
         print(f"occlusion: {data['occlusion']['occluded_share']} of the observed voxels hidden -> "
               f"{args.occlusion_copc}, {args.occlusion_cog}")
     return 0
