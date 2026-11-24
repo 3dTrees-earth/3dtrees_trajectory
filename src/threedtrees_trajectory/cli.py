@@ -221,7 +221,7 @@ def _run(argv, output_locks) -> int:
                     if safe_report:
                         data = report(info, result, pulses.multi_share)
             if occlusion_paths:
-                path_inputs = _occlusion_path(args, result, pulses, resources)
+                path_inputs = _occlusion_path(args, result, pulses, resources, info.time_system)
                 if not isinstance(path_inputs, dict):
                     delivered_check = path_inputs[3]
             if args.output is not None:
@@ -309,7 +309,7 @@ def _run(argv, output_locks) -> int:
     return 0
 
 
-def _occlusion_path(args, result, pulses, resources):
+def _occlusion_path(args, result, pulses, resources, cloud_time_system="none"):
     import numpy as np
 
     from . import occlusion
@@ -319,7 +319,15 @@ def _occlusion_path(args, result, pulses, resources):
             try:
                 time, xyz = occlusion.read_trajectory(args.trajectory)
                 occlusion.validate_trajectory(time, xyz)
+                clock = None
+                if len(pulses):
+                    # Fallback when the clocks don't align: the path's declared clock, converted to the cloud's.
+                    system, week = occlusion.read_trajectory_clock(args.trajectory)
+                    time, clock = occlusion.align_path_clock(time, system, week, cloud_time_system,
+                                                             (float(pulses.time.min()), float(pulses.time.max())))
                 check = occlusion.delivered_miss(pulses, time, xyz)
+                if clock is not None:
+                    check["clock_converted"] = clock
                 stats["bytes_read"] = args.trajectory.stat().st_size
                 return time, xyz, "delivered", check
             except (OSError, ValueError, MemoryError) as error:

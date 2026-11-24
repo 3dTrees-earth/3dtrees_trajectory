@@ -313,3 +313,61 @@ def test_product_windows_preserve_cog_and_copc(tmp_path, monkeypatch):
     points = [np.sort(array, order=("X", "Y", "Z")) for array in points]
     for name in points[0].dtype.names:
         np.testing.assert_array_equal(points[0][name], points[1][name])
+
+
+def test_slam_unix_path_converts_to_gps_week_seconds():
+    # Dataset 2018 (GeoSLAM via CloudCompare): path in Unix UTC, cloud in GPS week seconds.
+    unix = np.array([1761057992.41066, 1761058886.62656])
+    sow = occlusion.path_to_cloud_clock(unix, "unix_utc", None, "gps_sow")
+    np.testing.assert_allclose(sow, unix - 315_964_800 + 18 - 2389 * 604_800)
+    adjusted = occlusion.path_to_cloud_clock(unix, "unix_utc", None, "gps_adjusted")
+    np.testing.assert_allclose(adjusted, unix - 315_964_800 + 18 - 1e9)
+    np.testing.assert_allclose(occlusion.path_to_cloud_clock(sow, "gps_sow", 2389, "gps_adjusted"), adjusted)
+    assert occlusion.path_to_cloud_clock(sow, "gps_sow", None, "gps_adjusted") is None
+    assert occlusion.path_to_cloud_clock(sow, "gps_sow", 2389, "gps_sow") is None
+    assert occlusion.path_to_cloud_clock(unix, "none", None, "gps_sow") is None
+
+
+def test_path_clock_is_converted_only_when_raw_times_miss_the_cloud():
+    time = np.arange(300000.0, 300020.0, 0.5)
+    same, clock = occlusion.align_path_clock(time, "unix_utc", None, "gps_sow", (300000.0, 300020.0))
+    assert clock is None and same is time
+    unix = time + 2389 * 604_800 + 315_964_800 - 18
+    converted, clock = occlusion.align_path_clock(unix, "unix_utc", None, "gps_sow", (300000.0, 300020.0))
+    np.testing.assert_allclose(converted, time)
+    assert clock["from"] == "unix_utc" and clock["to"] == "gps_sow" and clock["raw_share"] == 0
+    kept, clock = occlusion.align_path_clock(unix, "none", None, "gps_sow", (300000.0, 300020.0))
+    assert clock is None and kept is unix
+
+
+def test_delivered_slam_path_in_unix_time_is_aligned(tmp_path):
+    cloud = tmp_path / "flight.laz"
+    time, sensor = flight(cloud, seconds=4, rate=500)  # GPS week seconds from 300000
+    path, report = tmp_path / "slam.csv", tmp_path / "report.json"
+    unix = time[::25] + 2389 * 604_800 + 315_964_800 - 18
+    with path.open("w") as stream:
+        stream.write("# format: 3dtrees-trajectory/1\n# time_system: unix_utc\ntime,x,y,z\n")
+        np.savetxt(stream, np.column_stack((unix, sensor[::25])), delimiter=",", fmt="%.6f")
+    main([str(cloud), "--trajectory", str(path), "--debug", "--report", str(report),
+          "--occlusion-copc", str(tmp_path / "out.copc.laz"), "--occlusion-cog", str(tmp_path / "out.tif")])
+    check = json.loads(report.read_text())["occlusion"]["delivered_path_check"]
+    assert check["clock_converted"]["from"] == "unix_utc" and check["clock_converted"]["to"] == "gps_sow"
+    assert check["median_m"] < 0.01  # the converted path sits on the pulse lines
+
+
+@needs_untwine
+def test_delivered_slam_path_in_unix_time_runs_with_warning(tmp_path):
+    import rasterio
+
+    cloud = tmp_path / "flight.laz"
+    time, sensor = flight(cloud, seconds=4, rate=500)
+    path = tmp_path / "slam.csv"
+    with path.open("w") as stream:
+        stream.write("# time_system: unix_utc\ntime,x,y,z\n")
+        np.savetxt(stream, np.column_stack((time[::25] + 2389 * 604_800 + 315_964_800 - 18, sensor[::25])),
+                   delimiter=",", fmt="%.6f")
+    cog = tmp_path / "out.tif"
+    assert main([str(cloud), "--trajectory", str(path), "--occlusion-copc", str(tmp_path / "out.copc.laz"),
+                 "--occlusion-cog", str(cog)]) == 0
+    with rasterio.open(cog) as raster:
+        assert "converted to gps_sow" in raster.tags()["OCCLUSION_WARNINGS"]

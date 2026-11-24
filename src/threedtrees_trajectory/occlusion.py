@@ -87,6 +87,70 @@ def read_trajectory(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return data[order, 0], data[order, 1:4]
 
 
+GPS_EPOCH_UNIX = 315_964_800  # 1980-01-06 in Unix seconds
+WEEK_S = 604_800
+# GPS - UTC in seconds, from the Unix time it applies (1999 onwards; no leap second since 2017).
+LEAP_SECONDS = ((915_148_800, 13), (1_136_073_600, 14), (1_230_768_000, 15), (1_341_100_800, 16),
+                (1_435_708_800, 17), (1_483_228_800, 18))
+PATH_CLOCK_MIN_SHARE = 0.5  # share of the cloud's time span the path must cover before its clock is trusted
+
+
+def read_trajectory_clock(path: Path) -> tuple[str, int | None]:
+    """The ``# time_system`` and ``# gps_week`` lines of a 3Dtrees trajectory CSV."""
+    meta = {}
+    with path.open(encoding="utf-8-sig") as stream:
+        for line in stream:
+            if line.strip() and not line.lstrip().startswith("#"):
+                break
+            key, _, value = line.lstrip("# ").partition(":")
+            meta[key.strip()] = value.strip()
+    week = meta.get("gps_week", "")
+    return meta.get("time_system", "none") or "none", int(week) if week.isdigit() else None
+
+
+def path_to_cloud_clock(time: np.ndarray, system: str, week: int | None, cloud_system: str) -> np.ndarray | None:
+    """The path's times on the cloud's clock (gps_adjusted or gps_sow), or None when they can't be converted."""
+    if system == cloud_system or cloud_system not in ("gps_adjusted", "gps_sow"):
+        return None
+    if system == "unix_utc":
+        starts, offsets = np.array(LEAP_SECONDS).T
+        index = np.searchsorted(starts, time, side="right") - 1
+        if (index < 0).any():
+            return None
+        gps = time - GPS_EPOCH_UNIX + offsets[index]
+    elif system == "gps_unix":
+        gps = time - GPS_EPOCH_UNIX
+    elif system == "gps_adjusted":
+        gps = time + 1e9
+    elif system == "gps_sow" and week is not None:
+        gps = week * WEEK_S + time
+    else:
+        return None
+    if cloud_system == "gps_adjusted":
+        return gps - 1e9
+    return gps - math.floor(gps[0] / WEEK_S) * WEEK_S
+
+
+def _clock_share(time: np.ndarray, cloud_span: tuple[float, float]) -> float:
+    low, high = cloud_span
+    overlap = min(high, time[-1] + TIME_MARGIN) - max(low, time[0] - TIME_MARGIN)
+    return max(0.0, overlap) / max(high - low, TIME_MARGIN)
+
+
+def align_path_clock(time: np.ndarray, system: str, week: int | None, cloud_system: str,
+                     cloud_span: tuple[float, float]) -> tuple[np.ndarray, dict | None]:
+    """Use the path's times as they are; if they cover less than half the cloud's time span, try the path's
+    declared clock converted to the cloud's. Returns the times and, when converted, what was converted."""
+    raw = _clock_share(time, cloud_span)
+    if raw >= PATH_CLOCK_MIN_SHARE:
+        return time, None
+    converted = path_to_cloud_clock(time, system, week, cloud_system)
+    if converted is None or _clock_share(converted, cloud_span) < PATH_CLOCK_MIN_SHARE:
+        return time, None
+    return converted, {"from": system, "to": cloud_system, "raw_share": round(raw, 4),
+                       "converted_share": round(_clock_share(converted, cloud_span), 4)}
+
+
 def _grid(paths: list[Path], voxel: float) -> tuple[Grid, str | None]:
     lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
     system, crs = None, None
@@ -586,9 +650,15 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         if ground_source == "dtm+lowest_hit":
             tags["OCCLUSION_GROUND_DTM_SHARE"] = str(ground_shares["dtm"])
             tags["OCCLUSION_GROUND_LOWEST_HIT_SHARE"] = str(ground_shares["lowest_hit"])
-        if path_warnings:
-            tags["OCCLUSION_WARNINGS"] = json.dumps(path_warnings, ensure_ascii=False, separators=(",", ":"))
+        warnings = list(path_warnings)
+        if warnings:
+            tags["OCCLUSION_WARNINGS"] = json.dumps(warnings, ensure_ascii=False, separators=(",", ":"))
         if delivered_check is not None:
+            if delivered_check.get("clock_converted"):
+                clock = delivered_check["clock_converted"]
+                warnings.append(f"The delivered path's times ({clock['from']}) did not match the cloud's GPS time; "
+                                f"they were converted to {clock['to']}.")
+                tags["OCCLUSION_WARNINGS"] = json.dumps(warnings, ensure_ascii=False, separators=(",", ":"))
             tags["OCCLUSION_DELIVERED_MISS_FLAG"] = delivered_miss_flag(delivered_check)
             flag = delivered_check["threshold_exceeded"]
             if flag is not None:
