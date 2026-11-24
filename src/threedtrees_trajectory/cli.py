@@ -88,8 +88,9 @@ def _run(argv, output_locks) -> int:
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
     parser.add_argument("--threads", help="maximum decoding threads and GPS-time window workers (defaults to GALAXY_SLOTS or 10)")
     parser.add_argument("--full", action="store_true", help="keep all pulses (requires more memory)")
-    parser.add_argument("--trajectory", type=Path,
-                        help="delivered path (3Dtrees trajectory CSV); used for occlusion instead of estimating one")
+    parser.add_argument("--trajectory", type=Path, nargs="+", action="extend",
+                        help="one or more delivered paths (3Dtrees trajectory CSVs); used for occlusion instead of "
+                             "estimating one. Each part of the cloud uses the path that covers its time and fits best")
     parser.add_argument("--occlusion-copc", type=Path, help="occlusion voxels as COPC (with --occlusion-cog)")
     parser.add_argument("--occlusion-cog", type=Path,
                         help="occluded share above ground as a COG, with one height band per voxel layer (default 0.5 m)")
@@ -118,7 +119,7 @@ def _run(argv, output_locks) -> int:
     oom = None
     try:
         clouds = [path.resolve() for path in args.clouds]
-        inputs = clouds + [path.resolve() for path in (args.trajectory, args.dtm) if path is not None]
+        inputs = clouds + [path.resolve() for path in (*(args.trajectory or ()), args.dtm) if path is not None]
         resolved_products = tuple(path.resolve() for path in products)
         destinations = resolved_products
         if report_path is not None:
@@ -383,32 +384,90 @@ def _occlusion_path(args, result, pulses, resources, cloud_time_system="none", c
     if args.trajectory is not None:
         with resources.stage("delivered-path check") as stats:
             try:
-                time, xyz = occlusion.read_trajectory(args.trajectory)
-                occlusion.validate_trajectory(time, xyz)
-                path_crs, path_vertical = occlusion.read_trajectory_crs(args.trajectory)
-                xyz, crs_warning, crs_converted = occlusion.align_path_crs(
-                    xyz, path_crs, path_vertical, cloud_crs, cloud_vertical)
-                clock = None
-                if len(pulses):
-                    # Fallback when the clocks don't align: the path's declared clock, converted to the cloud's.
-                    system, week = occlusion.read_trajectory_clock(args.trajectory)
-                    time, clock = occlusion.align_path_clock(time, system, week, cloud_time_system,
-                                                             (float(pulses.time.min()), float(pulses.time.max())))
-                check = occlusion.delivered_miss(pulses, time, xyz)
-                if clock is not None:
-                    check["clock_converted"] = clock
-                if crs_warning is not None:
-                    check["crs_warning"] = crs_warning
-                if crs_converted is not None:
-                    check["crs_converted"] = crs_converted
-                stats["bytes_read"] = args.trajectory.stat().st_size
-                return time, xyz, "delivered", check
+                delivered = [_delivered_file(occlusion, path, pulses, cloud_time_system, cloud_crs, cloud_vertical)
+                             for path in args.trajectory]
+                stats["bytes_read"] = sum(path.stat().st_size for path in args.trajectory)
+                if len(delivered) == 1 and _covers_all(delivered[0], pulses):
+                    # One path over the whole cloud: traced exactly as before multi-path support.
+                    time, xyz, check = delivered[0]
+                    check.update(occlusion.delivered_miss(pulses, time, xyz))
+                    check.update(path_files=1, coverage=1.0)
+                    return time, xyz, "delivered", check
+                return _delivered_set(delivered, args.trajectory, pulses)
             except (OSError, ValueError) as error:
                 raise_if_oom(error)
                 return {"error": _supplementary(str(error) or "The delivered-path check failed.")}
     time = np.array([f.time for f in result.fits], float)
     xyz = np.array([f.xyz for f in result.fits], float).reshape(-1, 3)
     return time, xyz, result.method, None
+
+
+def _delivered_file(occlusion, path, pulses, cloud_time_system, cloud_crs, cloud_vertical):
+    """One delivered path read, checked, and aligned to the cloud's CRS and clock, with what was converted."""
+    time, xyz = occlusion.read_trajectory(path)
+    occlusion.validate_trajectory(time, xyz)
+    path_crs, path_vertical = occlusion.read_trajectory_crs(path)
+    xyz, crs_warning, crs_converted = occlusion.align_path_crs(xyz, path_crs, path_vertical, cloud_crs, cloud_vertical)
+    clock = None
+    if len(pulses):
+        # Fallback when the clocks don't align: the path's declared clock, converted to the cloud's.
+        system, week = occlusion.read_trajectory_clock(path)
+        time, clock = occlusion.align_path_clock(time, system, week, cloud_time_system,
+                                                 (float(pulses.time.min()), float(pulses.time.max())))
+    check = {}
+    if clock is not None:
+        check["clock_converted"] = clock
+    if crs_warning is not None:
+        check["crs_warning"] = crs_warning
+    if crs_converted is not None:
+        check["crs_converted"] = crs_converted
+    return time, xyz, check
+
+
+def _covers_all(delivered, pulses) -> bool:
+    from . import paths as multi
+
+    time, xyz, _ = delivered
+    if not len(pulses):
+        return True
+    _, coverage, _ = multi.choose(pulses, [multi.DeliveredPath("path", time, xyz)])
+    return coverage == 1.0
+
+
+def _delivered_set(delivered, names, pulses):
+    """Several delivered paths: duplicates collapsed, each pulse segment matched to the path that explains it."""
+    from . import paths as multi
+
+    found, warnings, files = [], [], []
+    for (time, xyz, check), name in zip(delivered, names):
+        candidate = multi.DeliveredPath(Path(name).name, time, xyz)
+        entry = {"file": candidate.name, **check}
+        twin = next((p for p in found if multi.same_path(p, candidate)), None)
+        if twin is not None:
+            entry["duplicate_of"] = twin.name
+            warnings.append(f"The delivered path {candidate.name} repeats {twin.name}; it is used once.")
+        else:
+            found.append(candidate)
+            if check.get("crs_warning"):
+                warnings.append(f"{candidate.name}: {check['crs_warning']}")
+            if check.get("clock_converted"):
+                clock = check["clock_converted"]
+                warnings.append(f"{candidate.name}: times ({clock['from']}) converted to {clock['to']}.")
+        files.append(entry)
+    segments, coverage, segment_warnings = multi.choose(pulses, found)
+    warnings += segment_warnings
+    if coverage == 0:
+        raise ValueError("The point cloud and path have no overlapping GPS times.")
+    if coverage < multi.MIN_PULSE_COVERAGE:
+        raise ValueError(f"Only {coverage:.0%} of pulses had a delivered path covering their time.")
+    pathset = multi.PathSet(found, segments)
+    check = {"files": files, "path_files": len(names), "coverage": round(coverage, 4), "warnings": warnings,
+             "segments": [{"file": s.file, "point_source": s.source, "gps_start": s.start, "gps_end": s.end,
+                           "pulses_sampled": s.pulses, "path": found[s.path].name if s.path >= 0 else None,
+                           "candidates": [found[k].name for k in s.candidates],
+                           "miss_m": {found[k].name: m for k, m in s.misses.items()}} for s in segments]}
+    check.update(multi.assigned_miss(pulses, pathset))
+    return pathset, None, "delivered", check
 
 
 def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds, path_quality, path_warnings) -> dict:
@@ -424,6 +483,9 @@ def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds, path
     time, xyz, method, check = path_inputs
     if isinstance(indexed_clouds, dict):
         return indexed_clouds
+    pathset = None
+    if xyz is None:  # several delivered paths
+        pathset, time = time, None
     try:
         return occlusion.run(
             args.clouds, time, xyz, args.occlusion_copc, args.occlusion_cog, voxel=args.voxel,
@@ -431,7 +493,7 @@ def _occlusion(args, path_inputs, resources, info, threads, indexed_clouds, path
             quality="rough" if method in ("scan_angle", "lines_scan_angle") or info.single_return_files else None,
             path_method=method, path_quality=path_quality, path_warnings=path_warnings,
             delivered_check=check, threads=threads, prepared=indexed_clouds, single_files=info.single_return_files,
-            budget=int(args.grid_memory_gib * 2**30), resources=resources,
+            budget=int(args.grid_memory_gib * 2**30), resources=resources, pathset=pathset,
         )
     except (occlusion.TerrainError, CheckpointStorageError):
         raise

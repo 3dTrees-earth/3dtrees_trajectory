@@ -673,9 +673,15 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         dtm: Path | None = None, quality: str | None = None, delivered_check: dict | None = None,
         path_method: str | None = None, path_quality: str | None = None, path_warnings=(),
         budget: int = DEFAULT_BUDGET, resources: RunResources | None = None,
-        threads: int | None = None, prepared=None, single_files=()) -> dict:
-    """Trace disjoint GPS-time windows and sum the voxel counts before classification."""
-    validate_trajectory(time, xyz)
+        threads: int | None = None, prepared=None, single_files=(), pathset=None) -> dict:
+    """Trace disjoint GPS-time windows and sum the voxel counts before classification. ``pathset`` (several
+    delivered paths, each pulse segment on its own path) replaces ``time`` and ``xyz``."""
+    if pathset is None:
+        validate_trajectory(time, xyz)
+        span = time[0], time[-1]
+    else:
+        span = pathset.time_range
+        time, xyz = np.empty(0), np.empty((0, 3))
     scratch = scratch or copc.parent
     copc.parent.mkdir(parents=True, exist_ok=True)
     cog.parent.mkdir(parents=True, exist_ok=True)
@@ -691,7 +697,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         raise ValueError("Occlusion requires scanner-order LAS/LAZ. Supply the standardized files instead of COPC.")
     _validate_source(index)
     full_grid = index.grid
-    time_bounds = time[0] - TIME_MARGIN, np.nextafter(time[-1] + TIME_MARGIN, np.inf)
+    time_bounds = span[0] - TIME_MARGIN, np.nextafter(span[1] + TIME_MARGIN, np.inf)
     with _stage(resources, "finalize extent/crop") as extent:
         low, high = index.surfaces(*time_bounds, extent)
         index.release_surfaces()
@@ -712,12 +718,14 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             ground_source = "dtm" if raster_count == total_columns else "dtm+lowest_hit"
     layer_ranges = ray_walk.layers(grid, top, ground)
     with _stage(resources, "plan GPS-time windows") as planning:
-        layout = time_windows.plan(index, grid, time, xyz, time_bounds, slots, min(budget, available_memory()), layer_ranges)
+        layout = time_windows.plan(index, grid, time, xyz, time_bounds, slots, min(budget, available_memory()), layer_ranges,
+                                   pathset=pathset)
         planning.update(windows=len(layout), estimated_checkpoint_bytes=sum(12 * w.count_cells for w in layout))
     identity = identify(paths,
                         [str(copc.resolve()), str(cog.resolve()), voxel, source, quality, list(single_files),
                          [(w.lower, w.upper, [(s.start, s.stop) for s in w.bounds]) for w in layout],
-                         *([terrain_digest] if terrain_digest is not None else [])], time, xyz)
+                         *([terrain_digest] if terrain_digest is not None else []),
+                         *([pathset.digest()] if pathset is not None else [])], time, xyz)
     work = scratch / f".occlusion-{identity}"
     with lock_job(work):
         for orphan in work.glob("merge-*"):
@@ -735,6 +743,12 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
             if delivered_check.get("crs_warning"):
                 warnings.append(delivered_check["crs_warning"])
                 tags["OCCLUSION_WARNINGS"] = json.dumps(warnings, ensure_ascii=False, separators=(",", ":"))
+            for warning in delivered_check.get("warnings", ()):
+                warnings.append(warning)
+                tags["OCCLUSION_WARNINGS"] = json.dumps(warnings, ensure_ascii=False, separators=(",", ":"))
+            if "coverage" in delivered_check:
+                tags["OCCLUSION_DELIVERED_PATH_FILES"] = str(delivered_check["path_files"])
+                tags["OCCLUSION_DELIVERED_PATH_COVERAGE"] = str(delivered_check["coverage"])
             if delivered_check.get("clock_converted"):
                 clock = delivered_check["clock_converted"]
                 warnings.append(f"The delivered path's times ({clock['from']}) did not match the cloud's GPS time; "
@@ -748,7 +762,7 @@ def run(paths: list[Path], time: np.ndarray, xyz: np.ndarray, copc: Path, cog: P
         specs.sort(key=lambda job: (-layout[job[0]].echoes, -job[1]))
         with _stage(resources, "traversal", children=True, scratch=work) as stage:
             windows = execute(work, specs, slots, time_windows.trace_window, time_windows.init_worker,
-                              (index, grid, time, xyz, work, single_files, layer_ranges, time_bounds), stage)
+                              (index, grid, time, xyz, work, single_files, layer_ranges, time_bounds, pathset), stage)
             stage["windows"] = [windows[i] | {"estimated_worker_bytes": w.memory} for i, w in enumerate(layout)]
             stage["bytes_written"] = sum(w["bytes_written"] for w in windows.values())
         with TemporaryDirectory(dir=work, prefix="merge-") as folder, \

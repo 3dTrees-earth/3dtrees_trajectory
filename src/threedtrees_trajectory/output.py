@@ -48,6 +48,11 @@ def write_csv(path: Path, info: CloudInfo, result: Result, *, delivered_check: d
         rows.append("# warning: " + " ".join(warning.splitlines()))
     if delivered_check is not None:
         rows.append(f"# delivered_path_miss_flag: {delivered_miss_flag(delivered_check)}")
+        if "path_files" in delivered_check:
+            rows.append(f"# delivered_path_files: {delivered_check['path_files']}")
+            rows.append(f"# delivered_path_coverage: {delivered_check['coverage']}")
+        for warning in delivered_check.get("warnings", ()):
+            rows.append("# warning: " + " ".join(warning.splitlines()))
     rows.append(COLUMNS)
     timed = info.time_system != "none"
     for f in result.fits:

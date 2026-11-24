@@ -46,17 +46,19 @@ class TimeWindow:
                 + FRAGMENT_BYTES * self.echoes)
 
 
-def _path_bounds(block, lower, upper, time, xyz):
+def _path_bounds(block, lower, upper, time, xyz, pathset=None):
     first, last = max(lower, block.time_min), min(upper, block.time_max)
+    if pathset is not None:
+        return pathset.bounds(first, last)
     left, right = np.searchsorted(time, [first, last])
     endpoints = np.array([np.interp([first, last], time, axis) for axis in xyz.T]).T
     points = np.concatenate((endpoints, xyz[left:right]))
     return points.min(axis=0), points.max(axis=0)
 
 
-def _ray_bounds(block, lower, upper, grid, time, xyz):
+def _ray_bounds(block, lower, upper, grid, time, xyz, pathset=None):
     """Conservatively enclose rays up to the original grid exit."""
-    sensor_lo, sensor_hi = _path_bounds(block, lower, upper, time, xyz)
+    sensor_lo, sensor_hi = _path_bounds(block, lower, upper, time, xyz, pathset)
     grid_lo, grid_hi = grid.origin, grid.origin + np.array(grid.shape) * grid.voxel
     echo_lo = block.lower
     echo_hi = block.upper + grid.voxel * 1e-7
@@ -73,12 +75,12 @@ def _ray_bounds(block, lower, upper, grid, time, xyz):
     return np.maximum(grid_lo, low), np.minimum(grid_hi, high)
 
 
-def _plan_window(index, grid, time, xyz, lower, upper, layer_ranges):
+def _plan_window(index, grid, time, xyz, lower, upper, layer_ranges, pathset=None):
     files = tuple(tuple(block for block in blocks if block.overlaps(lower, upper)) for blocks in index.blocks)
     blocks = [block for file in files for block in file]
     if not blocks:
         return None
-    bounds = np.asarray([_ray_bounds(block, lower, upper, grid, time, xyz) for block in blocks])
+    bounds = np.asarray([_ray_bounds(block, lower, upper, grid, time, xyz, pathset) for block in blocks])
     start = np.maximum(0, np.floor((bounds[:, 0].min(axis=0) - grid.origin) / grid.voxel).astype(int) - 1)
     stop = np.minimum(grid.shape, np.floor((bounds[:, 1].max(axis=0) - grid.origin) / grid.voxel).astype(int) + 2)
     extent = tuple(slice(int(lo), int(hi)) for lo, hi in zip(start, stop))
@@ -86,7 +88,7 @@ def _plan_window(index, grid, time, xyz, lower, upper, layer_ranges):
     return TimeWindow(lower, upper, extent, files, sum(block.stop - block.start for block in blocks), cells)
 
 
-def plan(index, grid, time, xyz, time_bounds, slots, budget, layer_ranges):
+def plan(index, grid, time, xyz, time_bounds, slots, budget, layer_ranges, pathset=None):
     if budget <= WORKING_BYTES:
         raise ValueError("The occlusion job lacks memory for one GPS-time worker.")
     lower, upper = time_bounds
@@ -103,7 +105,7 @@ def plan(index, grid, time, xyz, time_bounds, slots, budget, layer_ranges):
     windows = []
     while pending:
         lower, upper = pending.pop()
-        window = _plan_window(index, grid, time, xyz, lower, upper, layer_ranges)
+        window = _plan_window(index, grid, time, xyz, lower, upper, layer_ranges, pathset)
         if window is None:
             continue
         if window.memory <= budget and window.echoes <= TRACE_LIMIT:
@@ -117,13 +119,13 @@ def plan(index, grid, time, xyz, time_bounds, slots, budget, layer_ranges):
     return windows
 
 
-def init_worker(index, grid, time, xyz, work, single_files, layer_ranges, coverage):
+def init_worker(index, grid, time, xyz, work, single_files, layer_ranges, coverage, pathset=None):
     global _CONTEXT
-    _CONTEXT = index, grid, time, xyz, work, single_files, layer_ranges, coverage
+    _CONTEXT = index, grid, time, xyz, work, single_files, layer_ranges, coverage, pathset
 
 
 def trace_window(number, window):
-    index, grid, time, xyz, work, single_files, layer_ranges, coverage = _CONTEXT
+    index, grid, time, xyz, work, single_files, layer_ranges, coverage, pathset = _CONTEXT
     start_wall, start_cpu = perf_counter(), process_time()
     try:
         Path("/proc/self/clear_refs").write_text("5", encoding="ascii")
@@ -134,7 +136,7 @@ def trace_window(number, window):
     pending = destination.with_suffix(".part")
     counts = np.lib.format.open_memmap(pending, mode="w+", dtype=np.uint32, shape=(columns.cells, 3))
     tracer = Walker(grid, columns, counts)
-    decoded = recovered = unpaired = traced = 0
+    decoded = recovered = unpaired = traced = unassigned = 0
     for file, blocks in enumerate(window.blocks):
         fragments = []
         scales, offsets = None, None
@@ -149,11 +151,17 @@ def trace_window(number, window):
             one = (np.ones(len(t), bool) if force_single else
                    (np.asarray(chunk.return_number) <= 1) & (np.asarray(chunk.number_of_returns) <= 1))
             single = keep & one
+            if single.any() and pathset is not None:
+                which = np.full(len(t), -1, np.int64)
+                which[single] = pathset.assign(t[single], file, np.asarray(chunk.point_source_id)[single])
+                unassigned += int(np.count_nonzero(single & (which < 0)))
+                single &= which >= 0
             if single.any():
                 seconds = t[single]
                 coords = [axis[single] * scale + offset + grid.voxel * 1e-7 for axis, scale, offset in
                           zip((chunk.X, chunk.Y, chunk.Z), scales, offsets)]
-                tracer.add(coords, _positions(seconds, time, xyz))
+                tracer.add(coords, _positions(seconds, time, xyz) if pathset is None
+                           else pathset.positions(seconds, which[single]))
                 traced += len(seconds)
             if (keep & ~one).any():
                 # Group in acquisition order before selecting this window.
@@ -166,24 +174,28 @@ def trace_window(number, window):
                 selected = (clocks >= window.lower) & (clocks < window.upper)
                 paired = selected & complete
                 if paired.any():
-                    _trace_multi(tracer, records[np.repeat(paired, sizes)], sizes[paired],
-                                 scales, offsets, grid.voxel, time, xyz)
-                    traced += int(sizes[paired].sum())
+                    done, skipped = _trace_multi(tracer, records[np.repeat(paired, sizes)], sizes[paired],
+                                                 scales, offsets, grid.voxel, time, xyz, pathset, file)
+                    traced += done
+                    unassigned += skipped
                 if (selected & ~complete).any():
                     fragments.append(records[np.repeat(selected & ~complete, sizes)])
         if fragments:
             records = np.concatenate(fragments)
             fragments.clear()
-            joined = 0
+            joined = skipped_fragments = 0
             for batch in _sorted_fragments(records):
                 sizes, complete = group_multi(batch, acquisition_order=False)
                 if complete.any():
                     paired = np.repeat(complete, sizes)
-                    _trace_multi(tracer, batch[paired], sizes[complete], scales, offsets, grid.voxel, time, xyz)
-                    joined += int(paired.sum())
+                    done, skipped = _trace_multi(tracer, batch[paired], sizes[complete], scales, offsets, grid.voxel,
+                                                 time, xyz, pathset, file)
+                    joined += done + skipped
+                    skipped_fragments += skipped
+                    unassigned += skipped
             recovered += joined
             unpaired += len(records) - joined
-            traced += joined
+            traced += joined - skipped_fragments
             del records
     traversed, missing = map(int, tracer.stats)
     del tracer
@@ -195,6 +207,7 @@ def trace_window(number, window):
     data = dict(window=number + 1, gps_from=window.lower, gps_until=window.upper, points_read=decoded,
                 echoes_traced=traced, recovered_echoes=recovered, unpaired_echoes=unpaired,
                 traversed_pulses=traversed, missing_returns=missing,
+                **({"unassigned_echoes": unassigned} if pathset is not None else {}),
                 grid_shape=window.shape, grid_voxels=math.prod(window.shape), count_voxels=columns.cells,
                 wall_seconds=perf_counter() - start_wall, cpu_seconds=process_time() - start_cpu,
                 peak_rss_bytes=_proc_rss('self', 'VmHWM') or _rss(), bytes_written=destination.stat().st_blocks * 512)
@@ -232,12 +245,27 @@ def _positions(seconds, time, xyz):
     return (np.interp(seconds, time, axis) for axis in xyz.T)
 
 
-def _trace_multi(tracer, records, sizes, scales, offsets, voxel, time, xyz):
+def _trace_multi(tracer, records, sizes, scales, offsets, voxel, time, xyz, pathset=None, file=0):
+    """Trace complete pulses; with several paths, only pulses whose segment has a path. Returns echoes traced and
+    echoes skipped for lack of a path."""
+    skipped = 0
+    which = None
+    if pathset is not None:
+        starts = np.r_[0, np.cumsum(sizes)[:-1]]
+        which = pathset.assign(records["time"][starts], file, records["source"][starts])
+        keep = which >= 0
+        if not keep.all():
+            skipped = int(sizes[~keep].sum())
+            records, sizes, which = records[np.repeat(keep, sizes)], sizes[keep], which[keep]
+        if not len(sizes):
+            return 0, skipped
     points = [records[axis] * scale + offset + voxel * 1e-7
               for axis, scale, offset in zip(("x", "y", "z"), scales, offsets)]
     pulses = np.r_[0, np.cumsum(sizes, dtype=np.int32)].astype(np.int32, copy=False)
     rn = records["returns"] & 15
-    tracer.add(points, _positions(records["time"][pulses[:-1]], time, xyz), rn, pulses)
+    seconds = records["time"][pulses[:-1]]
+    tracer.add(points, _positions(seconds, time, xyz) if pathset is None else pathset.positions(seconds, which), rn, pulses)
+    return int(sizes.sum()), skipped
 
 
 def count_blocks(work, windows, layer_ranges):
