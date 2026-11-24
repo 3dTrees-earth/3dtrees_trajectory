@@ -1,6 +1,6 @@
 # 3dtrees_trajectory
 
-The 1.0.0 scope covers ULS and MLS. The tool estimates the flight or walking path from a standardized point cloud
+The tool supports ULS and MLS. It estimates the flight or walking path from a standardized point cloud
 collection and writes a 3Dtrees trajectory CSV and a map layer. It can also map occlusion along the estimated or
 delivered path. Use `--debug` to write a separate quality and resource report. The current package version is 1.0.0.
 
@@ -18,6 +18,9 @@ standardization.
 The reader supports LAS/LAZ 1.2–1.4 and point formats 0–10. Each file needs finite, varying GPS time.
 All files must share a GPS time system and metric coordinates. If the CRS is missing, the tool assumes
 metres and preserves the input coordinates. The tool refuses point formats 0 and 2 because they lack GPS time.
+Like Raster, Trajectory treats a geocentric CRS as a local placeholder when the cloud bounds are centred less
+than 1,000 km from the origin. These products use local coordinates with unknown CRS. For Earth-centred
+coordinates, reproject the cloud to a projected CRS in metres.
 
 ### Outputs
 
@@ -79,9 +82,11 @@ if seen clear, occluded (3) if only traversed behind returns, or unobserved (4) 
 
 Voxel size defaults to 0.5 m. `--voxel` accepts 0.05–10 m. With `--dtm PATH`, the tool uses the terrain
 raster cell containing each voxel column centre (nearest-neighbour sampling). The raster tool's 1 m
-`<prefix>_dtm.tif` is a supported input. The raster and cloud must declare the same CRS. A missing or
-mismatched CRS exits 2. Nodata and columns outside the raster use the same lowest-hit estimate as a run
-without `--dtm`. That estimate starts at the centre of the lowest filled voxel per column, fills empty
+`<prefix>_dtm.tif` is a supported input. If both inputs declare a real CRS, they must agree. A DTM without a
+CRS or with a local placeholder is sampled in the cloud coordinates. When one input has a real CRS and the
+other has no usable CRS, the products and debug report record the coordinate assumption. A DTM outside
+the cloud triggers a warning and falls back to lowest hits. Nodata and uncovered columns also use lowest hits.
+That estimate starts at the centre of the lowest filled voxel per column, fills empty
 columns from the nearest estimate and replaces heights more than 2 m above the local 5 m median.
 The highest filled voxel caps each column.
 
