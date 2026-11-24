@@ -9,6 +9,7 @@ Re-cut of 1.0.0 (24 Nov 2026):
 - Return exit 127 for memory exhaustion and worker kills, with a debug refusal report and empty products at safe destinations.
 - When a delivered path's times cover less than half of the cloud's GPS-time span, its declared clock (`# time_system`: `unix_utc`, `gps_unix`, `gps_adjusted`, or `gps_sow` with `gps_week`) is converted to the cloud's GPS week seconds or adjusted GPS time, with leap seconds. A path on another clock than its cloud then lines up (tested on a week-seconds crop of 2018). The conversion is noted in `OCCLUSION_WARNINGS` and in the report's `delivered_path_check`.
 - Write `# crs: local` (CSV), `"crs": "local"` (GeoJSON properties, debug report) when the cloud has no usable CRS, in place of `unknown`; a compound CRS writes its horizontal EPSG and its vertical EPSG in `# vertical_crs`. Path CSVs with `# crs: unknown` still read as local.
+- The trajectory CSV declares `# format: 3dtrees-trajectory/estimated` (was `/2`), so estimated paths are told apart from uploaded ones (`/1`, `/2` with names). Columns and other header keys are unchanged.
 - A delivered path in another EPSG CRS is converted to the cloud's CRS (3D when both declare a vertical EPSG) before the miss check, noted in `OCCLUSION_WARNINGS` and `delivered_path_check.crs_converted`. A local path with an EPSG cloud (or the reverse) or a failed conversion is refused for occlusion with the supplementary note; a path without a `# crs:` line is assumed to be in the cloud's CRS, with a warning.
 
 First cut:

@@ -60,7 +60,7 @@ def test_occlusion_needs_both_products(tmp_path, capsys):
 
 
 @needs_untwine
-def test_estimated_path_gives_trajectory_2_report_copc_and_cog(tmp_path):
+def test_estimated_path_gives_trajectory_estimated_report_copc_and_cog(tmp_path):
     import csv
     import rasterio
 
@@ -68,7 +68,7 @@ def test_estimated_path_gives_trajectory_2_report_copc_and_cog(tmp_path):
     out, copc, cog = tmp_path / "p.csv", tmp_path / "o.copc.laz", tmp_path / "o.tif"
     assert main([str(tmp_path / "f.laz"), "--debug", "-o", str(out), "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == 0
     lines = out.read_text().splitlines()
-    assert lines[0] == "# format: 3dtrees-trajectory/2"
+    assert lines[0] == "# format: 3dtrees-trajectory/estimated"
     header, *rows = csv.reader(line for line in lines if not line.startswith("#"))
     assert header == ["time", "x", "y", "z", "roll", "pitch", "yaw", "name"]
     assert rows and all(len(row) == 8 and row[4:] == ["", "", "", ""] for row in rows)

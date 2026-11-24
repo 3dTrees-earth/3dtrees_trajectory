@@ -29,7 +29,7 @@ in the cloud's CRS.
 
 | File | Contents |
 | --- | --- |
-| `trajectory.csv` | `3dtrees-trajectory/2` with columns `time,x,y,z,roll,pitch,yaw,name`. Time and XYZ use the cloud's clock and coordinates. Attitude and name are empty. The `#` header records method, quality, source, and any warnings or delivered-path miss flag. |
+| `trajectory.csv` | `3dtrees-trajectory/estimated` (uploaded paths are `/1`, or `/2` with names) with columns `time,x,y,z,roll,pitch,yaw,name`. Time and XYZ use the cloud's clock and coordinates. Attitude and name are empty. The `#` header records method, quality, source, and any warnings or delivered-path miss flag. |
 | `trajectory.geojson` | Path segments separated at gaps over 5 seconds, thinned to about one vertex per metre. Uses WGS84 when the CRS is known and cloud coordinates otherwise. |
 
 `--geojson` overrides the default map layer path next to the CSV. The tool creates output directories

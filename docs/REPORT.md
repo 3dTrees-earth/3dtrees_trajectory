@@ -94,7 +94,7 @@ A merged COPC is accepted for trajectory estimation. Occlusion requires the scan
 
 | Output | Content |
 | --- | --- |
-| Trajectory CSV (`3dtrees-trajectory/2`) | time, x, y, z per position, with method, quality, source and any warnings in the header. If the job also checks a delivered path, the header carries its miss flag. A companion GeoJSON provides the map layer. |
+| Trajectory CSV (`3dtrees-trajectory/estimated`) | time, x, y, z per position, with method, quality, source and any warnings in the header. If the job also checks a delivered path, the header carries its miss flag. A companion GeoJSON provides the map layer. |
 | Occlusion COPC | One point per filled (1), occluded (3), or unobserved (4) voxel from ground through canopy top, with hit, pass and hidden counts. |
 | Occlusion COG | Occluded share per voxel layer above ground, followed by the unobserved share for the column. Pixels and height bands default to 0.5 m and follow `--voxel`. The `OCCLUSION_BAND_M` tag records the height step. |
 

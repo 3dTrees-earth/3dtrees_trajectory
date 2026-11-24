@@ -1,4 +1,4 @@
-"""Write results as the 3Dtrees trajectory CSV (``3dtrees-trajectory/2``, the layout delivered paths and scan positions
+"""Write results as the 3Dtrees trajectory CSV (``3dtrees-trajectory/estimated``: the columns delivered paths and scan positions
 share; this tool writes paths) and a JSON quality report."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .estimate import UNRELIABLE_LINE_MISS, Result
 from .publish import write_text
 from .pulses import LOCAL, CloudInfo, Pulses
 
-FORMAT = "3dtrees-trajectory/2"
+FORMAT = "3dtrees-trajectory/estimated"  # uploaded paths are /1, or /2 when rows have names
 COLUMNS = "time,x,y,z,roll,pitch,yaw,name"
 
 
