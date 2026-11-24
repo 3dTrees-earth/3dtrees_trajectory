@@ -1,6 +1,6 @@
 import os
 import signal
-from errno import ENOSPC
+from errno import ENOMEM, ENOSPC
 from types import SimpleNamespace
 
 import laspy
@@ -14,14 +14,12 @@ from threedtrees_trajectory import cloud as cloud_io, occlusion, parallel_read, 
 from threedtrees_trajectory.cli import main
 from threedtrees_trajectory.cloud import TimeSortedCopc
 from threedtrees_trajectory.pulses import read_pulses
-from threedtrees_trajectory.resources import RunResources
+from threedtrees_trajectory.resources import OutOfMemory, RunResources
 from threedtrees_trajectory.window_input import ECHO, ScanIndex, group_multi
 
 
 def _worker_checkpoint_test(index, work, failure, peak):
-    attempted = work / f"attempted-{index}"
-    if failure == "kill" or (failure == "once" and not attempted.exists()):
-        attempted.touch()
+    if failure == "kill":
         os.kill(os.getpid(), signal.SIGKILL)
     if failure == "invalid":
         raise ValueError("invalid input")
@@ -29,6 +27,10 @@ def _worker_checkpoint_test(index, work, failure, peak):
         raise OSError(ENOSPC, "No space left on device")
     if failure == "sigbus":
         os.kill(os.getpid(), signal.SIGBUS)
+    if failure == "numpy":
+        np.empty(2**60, dtype=np.uint8)
+    if failure == "mmap":
+        raise OSError(ENOMEM, "Cannot allocate memory")
     counts, marker = window_jobs.window_files(work, index)
     np.save(counts, np.full((8, 3), index, np.uint32))
     data = {"window": index + 1, "peak_rss_bytes": peak}
@@ -44,11 +46,10 @@ def test_reuse_finished_window_after_a_worker_is_killed(tmp_path, monkeypatch):
     memory = 5 * 2**30
     monkeypatch.setattr(window_jobs, "available_memory", lambda: memory)
     stage = {}
-    with pytest.raises(ValueError, match="Occlusion window 2 stopped"):
+    with pytest.raises(OutOfMemory, match=r"Occlusion window 2 was killed \(SIGKILL\)"):
         window_jobs.execute(tmp_path, [_spec(0, tmp_path), _spec(1, tmp_path, "kill")], 1,
                             _worker_checkpoint_test, None, (), stage)
-    assert stage["memory_retries"] == 1
-    assert stage["window_reservations_bytes"][2][-1] == memory
+    assert stage["completed_windows"] == 1
     first, _ = window_jobs.window_files(tmp_path, 0)
     committed = first.stat().st_mtime_ns
     stage = {}
@@ -59,28 +60,34 @@ def test_reuse_finished_window_after_a_worker_is_killed(tmp_path, monkeypatch):
     assert first.stat().st_mtime_ns == committed
 
 
-def test_peak_rss_admits_more_windows_and_killed_worker_retries(tmp_path, monkeypatch):
+def test_peak_rss_admits_more_windows(tmp_path, monkeypatch):
     gib = 2**30
     memory = int(2.75 * gib)
     monkeypatch.setattr(window_jobs, "available_memory", lambda: memory)
-    specs = [_spec(0, tmp_path, planned=2 * gib), _spec(1, tmp_path, "once", planned=2 * gib),
+    specs = [_spec(0, tmp_path, planned=2 * gib), _spec(1, tmp_path, planned=2 * gib),
              _spec(2, tmp_path, planned=2 * gib), _spec(3, tmp_path, planned=2 * gib)]
     stage = {}
     windows = window_jobs.execute(tmp_path, specs, 3, _worker_checkpoint_test, None, (), stage)
     assert sorted(windows) == list(range(4))
     reservations = stage["window_reservations_bytes"]
     assert reservations[1] == [2 * gib]
-    assert reservations[2][0] < gib and reservations[2][1] == memory
+    assert reservations[2][0] < gib
     assert stage["peak_concurrent_workers"] == 3
-    assert stage["peak_reserved_bytes"] == memory
-    assert stage["memory_retries"] == 1
+    assert stage["peak_reserved_bytes"] == 2 * gib
 
 
-def test_invalid_input_is_not_retried(tmp_path):
+def test_invalid_input_from_a_worker_remains_a_value_error(tmp_path):
     stage = {}
     with pytest.raises(ValueError, match="invalid input"):
         window_jobs.execute(tmp_path, [_spec(0, tmp_path, "invalid")], 1, _worker_checkpoint_test, None, (), stage)
-    assert stage["memory_retries"] == 0
+    assert stage["completed_windows"] == 0
+
+
+@pytest.mark.parametrize("failure", ["numpy", "mmap"])
+def test_worker_allocation_failure_is_oom(tmp_path, failure, monkeypatch):
+    monkeypatch.setattr(window_jobs, "available_memory", lambda: 2**30)
+    with pytest.raises(OutOfMemory, match="Occlusion window 1"):
+        window_jobs.execute(tmp_path, [_spec(0, tmp_path, failure)], 1, _worker_checkpoint_test, None, (), {})
 
 
 def test_memory_pressure_admits_one_worker_at_a_time(tmp_path, monkeypatch):
@@ -92,7 +99,6 @@ def test_memory_pressure_admits_one_worker_at_a_time(tmp_path, monkeypatch):
                                   _worker_checkpoint_test, None, (), stage)
     assert list(windows) == [0, 1]
     assert stage["peak_concurrent_workers"] == 1
-    assert stage["memory_retries"] == 0
 
 
 @pytest.mark.parametrize(("failure", "message"), [("full", "No space left"), ("sigbus", "Check free scratch space")])
@@ -100,7 +106,6 @@ def test_checkpoint_write_failure_is_clear(tmp_path, failure, message):
     stage = {}
     with pytest.raises(OSError, match=message):
         window_jobs.execute(tmp_path, [_spec(0, tmp_path, failure)], 1, _worker_checkpoint_test, None, (), stage)
-    assert stage["memory_retries"] == 0
     assert window_jobs.finished(tmp_path, 0, (8, 3)) is None
 
 
@@ -161,7 +166,7 @@ def test_interrupted_occlusion_resumes_with_identical_products(tmp_path, monkeyp
 
     with monkeypatch.context() as patch:
         patch.setattr(occlusion, "execute", interrupt)
-        with pytest.raises(ValueError, match="Occlusion window 2 stopped"):
+        with pytest.raises(OutOfMemory, match="Occlusion window 2 was killed"):
             occlusion.run([cloud], time, xyz, copc, cog, voxel=1, threads=2)
 
     resumed = occlusion.run([cloud], time, xyz, copc, cog, voxel=1, threads=2)

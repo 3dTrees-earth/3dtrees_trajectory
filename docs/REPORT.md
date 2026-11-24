@@ -163,8 +163,8 @@ The steps below follow `src/threedtrees_trajectory/cli.py:main`.
    count, count voxels and columns. It scales the planning estimate for later workers by the highest observed
    RSS-to-estimate ratio, adds 25% and 256 MiB, and checks cgroup headroom before admitting workers.
    Clean file pages can be reclaimed. Dirty and writeback pages count against headroom.
-   On suspected memory failure, it drains active workers before retrying the affected window alone
-   with a larger reservation. Completed count files can be reused after an interruption.
+   On worker memory failure, the job exits 127 so it can be retried with more memory.
+   Completed count files can be reused after an interruption.
    The reread needs point source ID for pulse grouping and clock repair, so it skips scan angle.
    Unrepaired path-boundary rereads need just the base layer, Z and GPS time.
 9. **Classify voxels + write products** (`occlusion.py`). Workers sum hit, pass and hidden counts and classify each

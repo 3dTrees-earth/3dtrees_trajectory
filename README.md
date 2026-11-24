@@ -46,9 +46,11 @@ is required for an occlusion-only debug run. The Galaxy wrapper should publish J
 | `2` | Invalid arguments or data, a detected static (TLS) acquisition, or a failed output operation. |
 | `3` | GPS time is missing, nonfinite or constant in a moving acquisition. A constant point clock cannot be aligned with a moving delivered path. |
 | `4` | The cloud has no usable estimate and no delivered path to support occlusion. |
+| `127` | The tool ran out of memory or lost a processing worker. Rerun with more memory. |
 
 Refusals print their reason to stderr and record it in the debug report when requested. Safe, writable product
 destinations receive zero-byte files. Keep a delivered path as supplementary data when the tool cannot use it.
+If the kernel kills the main process, the caller still sees signal 9 (shell exit status 137).
 
 Supply an output CSV for an estimated path. The CSV, GeoJSON, report and input paths must be distinct.
 If you set `--interval`, use a positive finite number of seconds (default 0.5). An interval must be long enough for
@@ -113,8 +115,8 @@ and canopy. The planner splits a window further in time when its working memory 
 budget. Set the planning ceiling with `--grid-memory-gib` (16 GiB by default). At runtime the scheduler reserves
 the estimated memory of each window within the available cgroup memory and `--threads` limit. Clean file
 cache is reclaimable. Dirty and writeback pages count toward the working budget. The scheduler adjusts
-subsequent reservations using each completed window's peak RSS. A worker that runs out of memory is retried once
-on its own if a larger reservation is available.
+subsequent reservations using each completed window's peak RSS. If a worker runs out of memory, the job exits
+with code 127 so the scheduler or operator can retry it with more memory.
 
 Workers merge counts and classify independent voxel blocks. The writer publishes COPC records and raster windows
 in grid order. Repeat the same command to resume an interrupted run and reuse finished windows. Keep the
@@ -193,7 +195,7 @@ the path tool's scope.
 - GPS-window scratch contains durable compact counts at 12 bytes per stored voxel plus output intermediates.
   Count arrays are sparse files until the walker touches those cells. The debug report records recovered and unpaired
   echoes, executed and reused windows, per-window RSS, sampled aggregate RSS, allocated scratch, peak worker
-  concurrency, memory reservations and retries.
+  concurrency and memory reservations.
 - `resources` records wall time, CPU, peak RSS, points read, decoder threads and cgroup measurements.
   Cgroup memory includes file cache.
 

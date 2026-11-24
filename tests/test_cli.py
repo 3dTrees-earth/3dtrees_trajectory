@@ -2,6 +2,8 @@ import json
 import os
 import subprocess
 import sys
+from concurrent.futures.process import BrokenProcessPool
+from errno import ENOMEM
 from pathlib import Path
 
 import laspy
@@ -122,6 +124,36 @@ def test_refusal_on_stderr_and_empty_products_without_debug(tmp_path, capsys, co
     assert "Keep the delivered path as supplementary data on the dataset" in stderr
     assert all(path.read_bytes() == b"" for path in (output, geojson, copc, cog))
     assert not list(tmp_path.rglob("*.json"))
+
+
+@pytest.mark.parametrize(("module_name", "function_name", "failure"), [
+    ("pulses", "read_pulses", MemoryError()),
+    ("estimate", "estimate", BrokenProcessPool("Path worker disappeared")),
+    ("occlusion", "read_trajectory", OSError(ENOMEM, "Cannot allocate memory")),
+    ("occlusion", "run", RuntimeError("std::bad_alloc")),
+])
+def test_memory_failure_is_a_job_refusal(tmp_path, monkeypatch, capsys, module_name, function_name, failure):
+    from importlib import import_module
+
+    def exhaust_memory(*args, **kwargs):
+        raise failure
+
+    module = import_module(f"threedtrees_trajectory.{module_name}")
+    monkeypatch.setattr(module, function_name, exhaust_memory)
+    cloud = tmp_path / "flight.las"
+    flight(cloud, seconds=6, rate=400)
+    out, copc, cog = tmp_path / "path.csv", tmp_path / "out.copc.laz", tmp_path / "out.tif"
+    for path in (out, out.with_suffix(".geojson"), copc, cog):
+        path.write_text("stale")
+    args = [str(cloud), "-o", str(out), "--debug", "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]
+    if function_name == "read_trajectory":
+        args += ["--trajectory", str(tmp_path / "delivered.csv")]
+
+    assert main(args) == 127
+    report = _assert_refusal(out, "out of memory:")
+    assert report["exit_code"] == 127
+    assert "rerun with more memory" in capsys.readouterr().err
+    assert copc.read_bytes() == cog.read_bytes() == b""
 
 
 @pytest.mark.parametrize(("point_format", "version"), POINT_FORMATS)

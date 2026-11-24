@@ -20,6 +20,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import subprocess
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ from laspy.vlrs.vlrlist import VLRList
 from .cloud import is_copc, open_cloud
 from .output import delivered_miss_flag
 from .pulses import Pulses, _crs, _time_system, cloud_crs, is_local_geocentric
-from .resources import RunResources, available_memory, decoding_threads
+from .resources import OutOfMemory, RunResources, available_memory, decoding_threads, raise_if_oom
 from . import ray_walk, time_windows
 from .window_input import ScanIndex
 from .window_jobs import execute, identify, lock_job
@@ -356,7 +357,11 @@ def _index_copc(flat: Path, copc: Path, size: int, work: Path, *, tags: dict[str
     done = subprocess.run([UNTWINE, "--files", str(flat), "--output_dir", str(copc), "--temp_dir", str(work)],
                           env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if done.returncode != 0 or not copc.is_file():
-        raise ValueError(f"could not write the occlusion COPC: {done.stderr.strip()[-500:]}")
+        if done.returncode in (-signal.SIGKILL, 128 + signal.SIGKILL):
+            raise OutOfMemory("The Untwine COPC writer was killed (SIGKILL).")
+        stderr = done.stderr.strip()
+        raise_if_oom(RuntimeError(stderr))
+        raise ValueError(f"could not write the occlusion COPC: {stderr[-500:]}")
     with copc.open("r+b" if tags else "rb") as stream:
         header = laspy.LasHeader.read_from(stream, read_evlrs=False)
         if header.point_count != size:

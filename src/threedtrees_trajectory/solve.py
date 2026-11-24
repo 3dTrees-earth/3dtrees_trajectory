@@ -24,6 +24,7 @@ from scipy import ndimage
 from scipy.optimize import least_squares
 
 from .pulses import Pulses
+from .resources import OutOfMemory
 
 
 @dataclass
@@ -183,7 +184,7 @@ def path_from_scan_angle(p: Pulses, interval: float = 0.5, min_pulses: int = 200
                 if (args := next(tasks, None)) is not None:
                     pending.append(pool.submit(_fit_scan_angle, *args))
     except BrokenProcessPool as error:
-        raise ValueError("A scan-angle path worker stopped before completing its fit.") from error
+        raise OutOfMemory("A scan-angle path worker stopped before completing its fit.") from error
     return fits
 
 

@@ -4,12 +4,39 @@ from __future__ import annotations
 import os
 import resource
 import sys
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
+from errno import ENOMEM
 from pathlib import Path
 from threading import Event, Thread
 from time import perf_counter
 
 CGROUP = Path("/sys/fs/cgroup")
+
+
+class OutOfMemory(MemoryError):
+    """A stage ran out of memory or lost a worker to an apparent OOM kill."""
+
+
+def memory_failure(error: Exception) -> str | None:
+    if (isinstance(error, (MemoryError, BrokenProcessPool))
+            or isinstance(error, OSError) and error.errno == ENOMEM
+            or type(error).__name__ == "CPLE_OutOfMemoryError"):
+        return str(error) or type(error).__name__
+    detail = str(error)
+    message = detail.lower()
+    if "std::bad_alloc" in message or message.startswith(
+        ("out of memory", "cannot allocate memory", "failed to allocate memory", "memory allocation failed")
+    ):
+        return detail
+    if isinstance(error.__cause__, Exception):
+        return memory_failure(error.__cause__)
+    return None
+
+
+def raise_if_oom(error: Exception) -> None:
+    if detail := memory_failure(error):
+        raise OutOfMemory(detail) from error
 
 
 def _read(path: Path) -> str:

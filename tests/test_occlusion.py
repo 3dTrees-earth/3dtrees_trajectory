@@ -10,9 +10,19 @@ from legacy_occlusion import trace_reference
 from synthetic import _write, flight, scan
 from threedtrees_trajectory import occlusion
 from threedtrees_trajectory.cli import main
+from threedtrees_trajectory.resources import OutOfMemory
 
 UNTWINE = Path(occlusion.UNTWINE)
 needs_untwine = pytest.mark.skipif(not os.access(UNTWINE, os.X_OK), reason="untwine not installed")
+
+
+def test_untwine_killed_by_signal_is_oom(tmp_path, monkeypatch):
+    writer = tmp_path / "untwine"
+    writer.write_text('#!/bin/sh\nkill -KILL "$$"\n')
+    writer.chmod(0o755)
+    monkeypatch.setattr(occlusion, "UNTWINE", str(writer))
+    with pytest.raises(OutOfMemory, match=r"Untwine COPC writer was killed \(SIGKILL\)"):
+        occlusion._index_copc(tmp_path / "flat.laz", tmp_path / "out.copc.laz", 1, tmp_path)
 
 
 def test_classify_follows_occpy():

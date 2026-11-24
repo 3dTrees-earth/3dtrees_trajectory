@@ -31,6 +31,7 @@ from .cloud import (
 )
 
 from .coverage import UnusableTime
+from .resources import raise_if_oom
 
 TIME_TOLERANCE_S = 1e-6
 PROBE = 1_000_000  # points read first to tell a single-return cloud
@@ -89,7 +90,8 @@ class CloudInfo:
 def _crs(header: laspy.LasHeader) -> CRS | None:
     try:
         return header.parse_crs()
-    except (CRSError, ValueError):
+    except (CRSError, ValueError) as error:
+        raise_if_oom(error)
         return None  # a malformed CRS record leaves the CRS unknown
 
 

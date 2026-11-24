@@ -3,14 +3,13 @@ share; this tool writes paths) and a JSON quality report."""
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 import numpy as np
 
 from . import __version__
 from .estimate import UNRELIABLE_LINE_MISS, Result
+from .publish import write_text
 from .pulses import CloudInfo, Pulses
 
 FORMAT = "3dtrees-trajectory/2"
@@ -54,7 +53,7 @@ def write_csv(path: Path, info: CloudInfo, result: Result, *, delivered_check: d
     for f in result.fits:
         x, y, z = f.xyz
         rows.append(f"{f'{f.time:.6f}' if timed else ''},{x:.4f},{y:.4f},{z:.4f},,,,")
-    _write_text(path, "\n".join(rows) + "\n")
+    write_text(path, "\n".join(rows) + "\n")
 
 
 def quality(result: Result, miss: np.ndarray) -> str:
@@ -125,27 +124,6 @@ def refusal(info: CloudInfo, pulses: Pulses | None, reason: str) -> dict:
     }
 
 
-def _write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = None
-    try:
-        with NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", dir=path.parent, delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(text)
-        os.replace(temporary, path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
-def write_empty(path: Path) -> None:
-    _write_text(path, "")
-
-
-def write_report(path: Path, data: dict) -> None:
-    _write_text(path, json.dumps(data, indent=1, allow_nan=False) + "\n")
-
-
 def geojson(info: CloudInfo, result: Result, gap: float = 5.0, spacing: float = 1.0) -> dict:
     """A light map layer: the path as lines split where positions are more than ``gap`` seconds apart (no line drawn
     across unscanned turns), thinned to about one vertex per ``spacing`` metres. WGS84 when
@@ -182,7 +160,7 @@ def geojson(info: CloudInfo, result: Result, gap: float = 5.0, spacing: float = 
 
 
 def write_geojson(path: Path, data: dict) -> None:
-    _write_text(path, json.dumps(data, separators=(",", ":"), allow_nan=False) + "\n")
+    write_text(path, json.dumps(data, separators=(",", ":"), allow_nan=False) + "\n")
 
 
 def geojson_from_csv(path: Path) -> dict:

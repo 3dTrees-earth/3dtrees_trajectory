@@ -12,7 +12,7 @@ import numpy as np
 
 from .cloud import RETURN_FIELDS, open_cloud, read_points_exact
 from .coverage import UnusableTime
-from .resources import available_memory
+from .resources import OutOfMemory, available_memory
 
 MAX_TAIL = 65_536
 WORKER_BYTES = 1_500_000_000
@@ -118,7 +118,7 @@ def collect_ranges(path, index, total, batch, record_size, shift, strides, scan_
                 blocks.extend(part_blocks)
                 summaries.extend(part_summaries)
     except BrokenProcessPool as error:
-        raise ValueError("A scanner-order read worker stopped before completing its record range.") from error
+        raise OutOfMemory("A scanner-order read worker stopped before completing its record range.") from error
     if points != total:
         raise SerialReadRequired
     if scan_index is not None:

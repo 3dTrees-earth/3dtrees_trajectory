@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import ctypes
-import errno
 import fcntl
 import hashlib
 import json
@@ -10,14 +9,13 @@ import multiprocessing
 import os
 import signal
 import sys
-from collections import deque
 from multiprocessing.connection import wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
 
-from .resources import available_memory
+from .resources import OutOfMemory, available_memory, memory_failure, raise_if_oom
 
 SCHEMA = 4
 
@@ -92,8 +90,8 @@ def finished(work, index, shape):
             array = np.load(counts, mmap_mode="r", allow_pickle=False)
             if array.shape == shape and array.dtype == np.uint32:
                 return json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError, EOFError):
-            pass
+        except (OSError, ValueError, EOFError) as error:
+            raise_if_oom(error)
     return None
 
 
@@ -135,7 +133,7 @@ def _run_window(sender, worker, init, initargs, index, args, parent_pid):
 
 
 def execute(work, specs, slots, worker, init, initargs, stage):
-    """Admit fresh processes by estimated RSS and retry suspected OOMs in isolation."""
+    """Admit fresh processes by estimated RSS and retain completed checkpoints on failure."""
     results, pending = {}, []
     model = WorkerMemory()
     for index, planned, shape, args in specs:
@@ -148,12 +146,12 @@ def execute(work, specs, slots, worker, init, initargs, stage):
     memory = available_memory()
     stage.update(reused_windows=len(results), scheduled_windows=len(pending), worker_slots=slots,
                  worker_memory_bytes=memory, peak_concurrent_workers=0, peak_reserved_bytes=0,
-                 window_reservations_bytes={}, memory_retries=0)
+                 window_reservations_bytes={})
     context = multiprocessing.get_context("spawn")
-    retry, running = deque(), {}
+    running = {}
     reserved = 0
 
-    def start(job, amount, isolated=False):
+    def start(job, amount):
         nonlocal reserved
         index, _, _, args = job
         receiver, sender = context.Pipe(duplex=False)
@@ -165,7 +163,7 @@ def execute(work, specs, slots, worker, init, initargs, stage):
             raise
         finally:
             sender.close()
-        running[receiver] = process, job, amount, isolated
+        running[receiver] = process, job, amount
         reserved += amount
         stage["window_reservations_bytes"].setdefault(index + 1, []).append(amount)
         stage["peak_concurrent_workers"] = max(stage["peak_concurrent_workers"], len(running))
@@ -175,32 +173,23 @@ def execute(work, specs, slots, worker, init, initargs, stage):
         return ValueError(f"Occlusion window {index + 1} stopped. Repeat the command to resume from {work.name}.")
 
     try:
-        while pending or running or retry:
+        while pending or running:
             free = min(memory - reserved, available_memory())
-            if retry:
-                if not running:
-                    job, previous = retry.popleft()
-                    if free <= previous:
-                        raise stopped(job[0])
-                    start(job, free, isolated=True)
-                    stage["memory_retries"] += 1
-            elif not any(isolated for _, _, _, isolated in running.values()):
-                for job in pending[:]:
-                    if len(running) >= slots:
-                        break
-                    _, planned, _, _ = job
-                    # A pessimistic estimate can still try the window with the entire job budget.
-                    amount = min(model.reserve(planned), free) if not running and planned <= free else model.reserve(planned)
-                    if amount <= free:
-                        start(job, amount)
-                        pending.remove(job)
-                        free -= amount
+            for job in pending[:]:
+                if len(running) >= slots:
+                    break
+                _, planned, _, _ = job
+                # A pessimistic estimate can still try the window with the entire job budget.
+                amount = min(model.reserve(planned), free) if not running and planned <= free else model.reserve(planned)
+                if amount <= free:
+                    start(job, amount)
+                    pending.remove(job)
+                    free -= amount
             if not running:
-                raise ValueError("A planned occlusion window exceeds available job memory. Lower --grid-memory-gib "
-                                 "or request more job memory.")
+                raise OutOfMemory("A planned occlusion window exceeds available job memory.")
 
             for receiver in wait(running):
-                process, job, amount, isolated = running[receiver]
+                process, job, amount = running[receiver]
                 index, planned, shape, _ = job
                 try:
                     result, error = receiver.recv()
@@ -212,23 +201,22 @@ def execute(work, specs, slots, worker, init, initargs, stage):
                 receiver.close()
                 del running[receiver]
                 reserved -= amount
+                if exit_code == -signal.SIGKILL:
+                    raise OutOfMemory(f"Occlusion window {index + 1} was killed (SIGKILL).")
                 if result is not None:
                     results[index] = result
                     model.observe(planned, result)
-                elif (exit_code == -signal.SIGKILL or isinstance(error, MemoryError)
-                      or isinstance(error, OSError) and error.errno == errno.ENOMEM):
-                    if isolated:
-                        raise stopped(index) from error
-                    retry.append((job, amount))
                 elif exit_code == -signal.SIGBUS:
                     raise CheckpointStorageError(f"Occlusion window {index + 1} could not access its mapped "
                                                  f"checkpoint (SIGBUS). Check free scratch space and retry.")
                 elif error is not None:
+                    if detail := memory_failure(error):
+                        raise OutOfMemory(f"Occlusion window {index + 1}: {detail}") from error
                     raise error
                 else:
                     raise stopped(index)
     finally:
-        for receiver, (process, _, _, _) in running.items():
+        for receiver, (process, _, _) in running.items():
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=2)
