@@ -10,7 +10,7 @@ import pytest
 from legacy_occlusion import trace_reference
 from synthetic import flight
 from test_occlusion import needs_untwine
-from threedtrees_trajectory import cloud as cloud_io, occlusion, pulses, time_windows, window_jobs
+from threedtrees_trajectory import cloud as cloud_io, occlusion, parallel_read, pulses, time_windows, window_jobs
 from threedtrees_trajectory.cli import main
 from threedtrees_trajectory.cloud import TimeSortedCopc
 from threedtrees_trajectory.pulses import read_pulses
@@ -185,7 +185,9 @@ def test_concurrent_cli_run_preserves_shared_outputs(tmp_path):
 
 
 @needs_untwine
-def test_parallel_and_sequential_windows_write_identical_products(tmp_path):
+def test_parallel_and_sequential_windows_write_identical_products(tmp_path, monkeypatch):
+    # Admit both tiny fixture windows despite their fixed production reservations.
+    monkeypatch.setattr(window_jobs, "available_memory", lambda: 6 * 2**30)
     cloud = tmp_path / "flight.las"
     time, xyz = flight(cloud, seconds=2, rate=300)
     results = []
@@ -273,7 +275,13 @@ def test_time_window_counts_match_whole_grid(tmp_path, monkeypatch, voxel):
     assert sum(window["traversed_pulses"] for window in stats) == len(time)
 
 
-def test_parallel_record_reads_preserve_order_and_extent(tmp_path, monkeypatch):
+@pytest.fixture
+def four_read_workers(monkeypatch):
+    # Give tiny fixtures the production planner's reservation for four decoders.
+    monkeypatch.setattr(parallel_read, "available_memory", lambda: 4 * parallel_read.WORKER_BYTES)
+
+
+def test_parallel_record_reads_preserve_order_and_extent(tmp_path, monkeypatch, four_read_workers):
     cloud = tmp_path / "flight.laz"
     time, _ = flight(cloud, seconds=3, rate=400)
     monkeypatch.setattr(pulses, "CHUNK", 313)
@@ -308,7 +316,7 @@ def pf7_cloud(tmp_path):
     return original, compressed, data
 
 
-def test_pf7_selective_read_preserves_required_values(pf7_cloud, monkeypatch):
+def test_pf7_selective_read_preserves_required_values(pf7_cloud, monkeypatch, four_read_workers):
     original, compressed, data = pf7_cloud
     monkeypatch.setattr(pulses, "CHUNK", 313)
     monkeypatch.setattr(pulses, "PROBE", 100)

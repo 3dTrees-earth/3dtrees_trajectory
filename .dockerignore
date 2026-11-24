@@ -5,3 +5,7 @@
 !src/run.py
 !src/threedtrees_trajectory/
 !src/threedtrees_trajectory/*.py
+!src/threedtrees_trajectory/ray_walk.cpp
+!requirements-dev.txt
+!tests/
+!tests/*.py

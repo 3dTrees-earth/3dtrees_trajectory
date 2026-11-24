@@ -1,0 +1,81 @@
+name: Test and publish container
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/3dtrees-earth/3dtrees_trajectory
+  TEST_CPUS: "2"
+  TEST_MEMORY: 4g
+
+jobs:
+  test-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve and validate image tags
+        if: github.event_name == 'push'
+        id: tags
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+          import tomllib
+
+          package = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          cli = runpy.run_path("src/threedtrees_trajectory/__init__.py")["__version__"]
+          if cli != package:
+              raise SystemExit(f"CLI version {cli} must match package version {package}")
+
+          tag = "latest"
+          if os.environ["GITHUB_REF_TYPE"] == "tag":
+              ref = os.environ["GITHUB_REF_NAME"]
+              if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", ref) or ref[1:] != package:
+                  raise SystemExit(f"Release tag {ref!r} must match v{package}")
+              tag = package
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"release={tag}", file=output)
+              print(f"revision=sha-{os.environ['GITHUB_SHA'][:7]}", file=output)
+          PY
+
+      - name: Run container acceptance suite
+        run: make test
+
+      - name: Tag the tested runtime image
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ steps.tags.outputs.release }}
+          REVISION_TAG: ${{ steps.tags.outputs.revision }}
+        run: |
+          make image IMAGE="$IMAGE_NAME:$REVISION_TAG"
+          docker tag "$IMAGE_NAME:$REVISION_TAG" "$IMAGE_NAME:$RELEASE_TAG"
+
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to GHCR
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ steps.tags.outputs.release }}
+          REVISION_TAG: ${{ steps.tags.outputs.revision }}
+        run: |
+          docker push "$IMAGE_NAME:$REVISION_TAG"
+          docker push "$IMAGE_NAME:$RELEASE_TAG"

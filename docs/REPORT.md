@@ -1,6 +1,76 @@
 # 3dtrees_trajectory: what the tool does, when, and where the time goes
 
-Status 23 Nov 2026, `main` after round 9. Version 1.0.0 covers moving lidar (ULS and MLS). TLS is v1.1.
+## 1.0.0 release summary
+
+Trajectory 1.0.0 estimates the path of a moving ULS or MLS sensor from one standardized LAS/LAZ
+collection. It writes a trajectory CSV and GeoJSON. When occlusion is requested, it writes a voxel COPC
+and a height-band COG, using 0.5 m voxels by default. A delivered moving-path CSV can drive occlusion.
+An optional Raster DTM must share the cloud's CRS. Missing terrain samples use the lowest-hit estimate.
+
+The 3Dtrees default workflow places the step after Raster. Eligibility requires ULS or MLS, varying GPS
+time in every standardized file, and a path method for each file. Multiple returns, single returns with
+nonzero scan angle, or a standardized delivered path with timestamps qualify. The workflow records the
+preflight reason when it skips an ineligible collection. The CLI validates inputs and path quality again
+when it runs.
+
+| Exit | Result |
+| --- | --- |
+| 0 | Success. A combined run can retain a successful estimate with an occlusion warning. |
+| 2 | Invalid arguments or input, static acquisition, or a hard resource or output failure. |
+| 3 | GPS time is absent, constant or nonfinite and cannot support a moving path. |
+| 4 | The tool could not estimate a usable path. |
+
+Refusals print their reason to stderr and leave zero-byte outputs at safe destinations.
+`--debug` adds a JSON report with method, quality, refusal reasons, and resource measurements.
+A merged input COPC supports trajectory estimation only. Occlusion requires scanner-order input.
+TLS stations, merged TLS clouds and unsupported SLAM clocks are covered under [Limits and v1.1](#5-limits-and-v11).
+
+The CSV converter header and debug JSON identify `3dtrees_trajectory 1.0.0`. These version fields are
+the only product changes from the round-10 candidate.
+
+### Release resource measurements
+
+![CPU scaling, allocated core-seconds and anonymous memory](figures/cpu-scaling.png)
+
+Each of the four round-10 controls ran at 2, 4, 6, 8 and 10 CPU slots under a 50 GiB cap.
+Anonymous RSS and allocated scratch are the maximum values across the five runs per dataset.
+
+| Dataset | LAZ (GB) | 2 slots (s) | 4 slots (s) | 6 slots (s) | 8 slots (s) | 10 slots (s) | Peak anon (GiB) | Peak scratch (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1807 ULS | 0.61 | 54.2 | 33.6 | 30.7 | 26.2 | 25.1 | 3.84 | 0.54 |
+| 2014 ULS | 0.48 | 128.6 | 76.3 | 61.5 | 53.9 | 49.6 | 4.29 | 2.67 |
+| 1844 ULS | 7.66 | 607.5 | 508.3 | 353.8 | 271.3 | 229.8 | 3.87 | 3.59 |
+| 1788 MLS | 0.11 | 236.4 | 138.8 | 113.4 | 100.1 | 91.6 | 2.81 | 7.35 |
+
+The CSV, GeoJSON and COG were byte-identical across slot counts. The compressed COPC bytes varied
+with Untwine sampling. All sorted decoded voxel records, coordinate metadata and scientific debug fields
+matched. The debug reports also contain run-specific resource and window measurements.
+
+A supplementary ULS replay of raw dataset 1804 used six slots for 10.50 GB LAZ and 0.95 billion
+points. It took 505.9 s, used 1779.0 CPU s (3.52 mean cores) and reached 3.74 GiB anonymous RSS,
+23.87 GiB of total cgroup memory and 8.71 GiB of scratch.
+
+**Galaxy TPV recommendation**
+
+```yaml
+cores: 6 if input_size <= 5 else 10
+mem: 20 + 0.55 * input_size
+```
+
+Here `input_size` is the standardized LAZ collection size in GB. Six slots added 6–124 s of wall time
+across the four controls and saved 8–27% of allocated core-seconds. Four slots added 8–279 s and
+saved 12–47%. For the three sub-1 GB controls, choosing four slots over six added 3–25 s.
+A job with fewer slots finishes sooner when its queue wait falls by more than its additional run
+time. Queue wait was outside these local measurements. The 5 GB cutoff is a provisional
+boundary between the small controls and 1844, where six slots increased elapsed time by
+124 s.
+
+The memory request has a 20 GB floor and reaches 58.5 GB (about 54.5 GiB) for 70 GB of input. The
+70 GB raw ULS replay of 2585 in round 10 used ten slots, a 50 GiB cap, zero swap, and about 50.2 GiB of
+allocated scratch. It finished in 2:11:02 with zero OOM kills. A separate checkpoint replay measured
+a 1:13 merge. Substituting that phase gives an estimated 1:51:27 from scratch. Size scratch separately
+from memory and validate standardized 2585 and unusually wide ground-to-canopy grids before extending
+this resource rule beyond the measured workloads.
 
 ## 1. What the tool does
 
@@ -370,7 +440,7 @@ and under 44 min in round 10. The round-2 spatial-tile replay took 7 h 46 min un
 full 50 GiB replays used the raw acquisition. A standardized 2585 replay is required to validate the
 Galaxy estimate for that acquisition.
 
-**Resource request for Galaxy (proposal, 10 cores)**
+**Round-10 resource estimates by point count (10 cores)**
 
 | Points | RAM | Scratch | Wall limit |
 | --- | --- | --- | --- |

@@ -12,6 +12,7 @@ from matplotlib.patches import FancyBboxPatch
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("output", type=Path)
 parser.add_argument("--stages", type=Path, default=Path(__file__).with_name("stages.csv"))
+parser.add_argument("--scaling", type=Path, help="Trajectory release benchmark CSV")
 args = parser.parse_args()
 OUT = args.output
 OUT.mkdir(parents=True, exist_ok=True)
@@ -78,6 +79,44 @@ def plot_stages(modes, title, filename, *, minutes=False):
 plot_stages(("Round 9 control", "Round 10"), "Trajectory controls · 10 CPU slots", "stages.png")
 plot_stages(("Round 8 50 GiB", "Round 10 50 GiB"), "Dataset 2585 full replays · 10 CPU slots and 50 GiB",
             "stages-2585.png", minutes=True)
+
+def plot_scaling(path):
+    with path.open(newline="") as stream:
+        measurements = list(csv.DictReader(stream))
+
+    slots = (2, 4, 6, 8, 10)
+    datasets = (("1807", "1807 ULS"), ("2014", "2014 ULS"), ("1844", "1844 ULS"), ("1788", "1788 MLS"))
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4.2), layout="constrained")
+    for (dataset, label), color, marker in zip(datasets, colors, ("o", "s", "^", "D")):
+        runs = sorted((row for row in measurements if row["dataset"] == dataset),
+                      key=lambda row: int(row["threads"]))
+        assert tuple(int(row["threads"]) for row in runs) == slots, dataset
+        speed = [float(row["speedup_vs_10"]) for row in runs]
+        wall_ratio = [1 / value for value in speed]
+        allocation = [n * value / 10 for n, value in zip(slots, wall_ratio)]
+        memory = [float(row["peak_anon_gib"]) for row in runs]
+        for ax, values in zip(axes, (wall_ratio, allocation, memory)):
+            ax.plot(slots, values, color=color, marker=marker, label=label)
+
+    for ax, title, units in zip(
+        axes,
+        ("Elapsed time", "CPU allocation", "Peak anonymous RSS"),
+        ("× 10-slot elapsed time", "× 10-slot core-seconds", "GiB"),
+    ):
+        ax.set(title=title, xlabel="CPU slots", ylabel=units, xticks=slots)
+        ax.grid(axis="y", alpha=0.25)
+        ax.spines[["top", "right"]].set_visible(False)
+    for ax in axes[:2]:
+        ax.axhline(1, color="#555", linestyle="--", linewidth=0.8, zorder=0)
+    axes[0].legend(loc="upper right", frameon=False, fontsize=8)
+    fig.suptitle("Trajectory 1.0.0 CPU scaling · 50 GiB per job", fontsize=14)
+    fig.savefig(OUT / "cpu-scaling.png", dpi=160)
+    plt.close(fig)
+
+
+if args.scaling is not None:
+    plot_scaling(args.scaling)
+
 
 # ---------- flow.png: decision flow ----------
 fig, ax = plt.subplots(figsize=(13, 15))

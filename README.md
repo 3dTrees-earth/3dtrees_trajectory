@@ -2,7 +2,7 @@
 
 The 1.0.0 scope covers ULS and MLS. The tool estimates the flight or walking path from a standardized point cloud
 collection and writes a 3Dtrees trajectory CSV and a map layer. It can also map occlusion along the estimated or
-delivered path. Use `--debug` to write a separate quality and resource report. The current package version is 0.1.0.
+delivered path. Use `--debug` to write a separate quality and resource report. The current package version is 1.0.0.
 
 ## Run
 
@@ -252,15 +252,13 @@ For 2585, the delivered-path median horizontal error remains 37.8 m. Quality lab
 ## Development and container
 
 ```bash
-uv venv .venv
-uv pip install -e '.[test]'
-.venv/bin/python -m pytest -q
-docker build -t 3dtrees_trajectory:dev .
+make test
+make image
 ```
 
 The Dockerfile pins both base image digests, the Untwine and system Expat versions, and the Linux Python runtime packages.
 
-Tests generate small LAS/LAZ clouds with known positions and verify the coordinates, refusals, resource reporting,
+The Docker suite runs with two CPUs and a 4 GiB limit by default. Tests generate small LAS/LAZ clouds with known positions and verify the coordinates, refusals, resource reporting,
 and byte-for-byte stability across decoder thread counts.
 
 Call `python /src/run.py` from a writable job directory. The Docker image defaults to a non-root user. For a
@@ -278,6 +276,7 @@ The Galaxy wrapper should accept one collection of standardized LAS/LAZ files pe
 members to one tool job. Pass `--threads "${GALAXY_SLOTS:-4}"` from the job allocation and collect the requested
 CSV, GeoJSON and occlusion products.
 Keep sampling and platform diagnostics in the CLI. File metadata and geometry refusals are checked at runtime.
-A published release tag that matches the CLI and package versions publishes
-`ghcr.io/3dtrees-earth/3dtrees_trajectory:<version>` and a SIF built from the same Docker digest at
-`oras://ghcr.io/3dtrees-earth/3dtrees_trajectory:<version>-sif`.
+CI tests the image on pull requests, pushes to `main`, and pushes of `v*` tags. After the tests pass, it
+publishes `ghcr.io/3dtrees-earth/3dtrees_trajectory:sha-<short-sha>` and either `:latest` for `main` or
+the package version (for example, `:1.0.0`) for a matching release tag. Galaxy converts that Docker image
+to Singularity when preparing the tool container.

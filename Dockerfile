@@ -15,7 +15,7 @@ COPY src/threedtrees_trajectory/ray_walk.cpp /tmp/ray_walk.cpp
 RUN g++ -std=c++17 -O3 -fno-fast-math -ffp-contract=off -fPIC -shared -static-libstdc++ -static-libgcc \
     /tmp/ray_walk.cpp -o /tmp/_ray_walk.so
 
-FROM python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+FROM python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 # Rasterio's bundled GDAL links against the system Expat library.
@@ -31,3 +31,17 @@ COPY --from=ray-walker /tmp/_ray_walk.so /src/threedtrees_trajectory/_ray_walk.s
 # Galaxy runs its job script with /bin/sh and calls /src/run.py from the job directory.
 WORKDIR /data
 USER 65532:65532
+
+FROM runtime AS test
+USER root
+COPY requirements-dev.txt /src/requirements-dev.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: -r /src/requirements-dev.txt \
+    && python -m pip install --no-cache-dir --only-binary=:all: --no-deps occpy_ls==0.3.0
+COPY tests/ /test-suite/tests/
+RUN ln -s /src /test-suite/src
+ENV PYTHONPATH=/src
+WORKDIR /test-suite
+USER 65532:65532
+CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+
+FROM runtime AS release
