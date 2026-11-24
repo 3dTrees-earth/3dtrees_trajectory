@@ -25,6 +25,15 @@ in the cloud's own coordinates. A delivered path may be in any EPSG CRS (`# crs:
 cloud's CRS before use; a local path only fits a local cloud, and a path without a `# crs:` line is taken to be
 in the cloud's CRS.
 
+`--trajectory` takes one or more delivered paths (one merged file with several flights, several files with one
+path, or several files with several paths). The pulses are grouped into segments: one input file and point source
+in a contiguous GPS-time stretch, cut at pauses over 5 s and where a path starts or ends. A segment uses the path
+that covers it; where several do (a duplicate export, a second platform at the same time, the same week seconds on
+another day), the path with the lowest median miss to a fixed sample of 20,000 of its return lines wins. Exact
+duplicates are used once. Pulses no path covers are not traced (warning); under 50 % coverage occlusion is refused.
+The CSV header records `delivered_path_files` and `delivered_path_coverage`; the debug report lists every segment
+with its chosen path and miss. One path that covers the whole cloud is traced exactly as before.
+
 ### Outputs
 
 | File | Contents |

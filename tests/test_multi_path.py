@@ -7,11 +7,8 @@ import numpy as np
 import pytest
 
 from synthetic import flight
+from test_occlusion import needs_untwine
 from threedtrees_trajectory.cli import main
-
-needs_untwine = pytest.mark.skipif(
-    not __import__("shutil").which("untwine") and not __import__("os").environ.get("TRAJECTORY_UNTWINE"),
-    reason="untwine not installed")
 
 
 def _path(path, time, xyz, step=10):
