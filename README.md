@@ -287,3 +287,21 @@ CI tests the image on pull requests, pushes to `main`, and pushes of `v*` tags. 
 publishes `ghcr.io/3dtrees-earth/3dtrees_trajectory:sha-<short-sha>` and either `:latest` for `main` or
 the package version (for example, `:1.0.0`) for a matching release tag. Galaxy converts that Docker image
 to Singularity when preparing the tool container.
+
+## Credits and licences
+
+This tool is MIT-licensed. Its code was written for 3Dtrees; no third-party source code was copied into it except as
+noted below.
+
+- **Occlusion ray walk** (`src/threedtrees_trajectory/ray_walk.cpp`): a C++ port of the voxel traversal and echo
+  classification of [OccPy](https://github.com/dkueken/OccPy) 0.3.0 (MIT, © 2023 Daniel Kükenbrink; notice kept in the
+  file header). Method: Kükenbrink et al. (2017), *Remote Sensing of Environment*,
+  [doi:10.1016/j.rse.2016.10.023](https://doi.org/10.1016/j.rse.2016.10.023), based on Amanatides & Woo (1987).
+- **Path from pulse lines** (`solve.py`, method `lines`): the sensor lies where the lines through the first and last
+  return of multi-return pulses meet, per time window — Gatziolis & McGaughey (2019), *Remote Sensing*,
+  [doi:10.3390/rs11192258](https://doi.org/10.3390/rs11192258); the same idea underlies lidR's `track_sensor()`
+  (Roussel2020) and PDAL's `filters.trajectory` (Karney 2022,
+  [arXiv:2208.12116](https://arxiv.org/abs/2208.12116)). Our implementation is new Python code; no lidR (GPL-3) or PDAL
+  (BSD-3) code is included.
+- **Path from scan angles** (`solve.py`, method `scan_angle`): a cone fit of single returns on their recorded scan angle,
+  written for this tool; Karney (2022) uses scan angles in a related way.
