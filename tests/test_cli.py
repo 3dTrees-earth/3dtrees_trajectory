@@ -341,3 +341,32 @@ def test_position_fit_handles_sampled_chunks(tmp_path, monkeypatch):
     truth = np.column_stack([np.interp([f.time for f in result.fits], time, coord) for coord in sensor.T])
     assert len(result.fits) == 12
     assert np.max(np.abs(np.array([f.xyz for f in result.fits]) - truth)) < 0.05
+
+
+def test_returns_stored_apart_with_missing_middle_returns_still_give_lines(tmp_path):
+    """LiDAR360-style export: first and last return of a shot stored apart, return 2 of 3 missing, many lone
+    last returns. The shots with first + last still give the lines method."""
+    from synthetic import _records, _hits, _write
+    rng = np.random.default_rng(3)
+    time = 300000.0 + np.arange(0, 8, 1 / 400)
+    sensor = np.c_[np.full(len(time), 1000.0), 2000.0 + 5.0 * (time - time[0]), np.full(len(time), 60.0)]
+    angle = rng.uniform(-40, 40, len(time))
+    a = np.radians(angle)
+    direction = np.c_[np.sin(a), np.zeros(len(a)), -np.cos(a)]
+    first, last, two = _hits(sensor, direction, rng, 1.0)
+    keep = two & (rng.random(len(time)) < 0.3)  # 30 % of shots keep their first return
+    xyz = np.r_[last, first[keep]]  # all last returns first, then the first returns: stored apart
+    t = np.r_[time, time[keep]]
+    rn = np.r_[np.full(len(time), 3), np.ones(keep.sum())].astype(np.uint8)
+    nr = np.full(len(t), 3, np.uint8)
+    cloud = tmp_path / "apart.las"
+    _write(cloud, xyz, t, rn, nr, np.zeros(len(t)))
+    output = tmp_path / "path.csv"
+    assert main([str(cloud), "-o", str(output), "--debug"]) == 0
+    report = _report(output)
+    assert report["method"] == "lines"
+    assert report["pulse_check"]["return_modes"][0]["line_pulses"] > 0
+    fits = np.array([[float(v) for v in line.split(",")[:4]] for line in output.read_text().splitlines()
+                     if line and line[0].isdigit()])
+    truth = np.c_[[np.interp(fits[:, 0], time, sensor[:, k]) for k in range(3)]].T
+    assert np.median(np.linalg.norm(fits[:, 1:] - truth, axis=1)) < 0.05

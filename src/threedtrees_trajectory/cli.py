@@ -244,11 +244,12 @@ def _process(args, output_locks, resources, threads, error_message, products, re
             if args.output is not None:
                 with resources.stage("path estimation", children=True, worker_details=False):
                     try:
-                        if any(mode["mode"] == "single" and not mode["has_scan_angle"]
+                        if any(mode["mode"] == "single" and not mode["has_scan_angle"] and not mode.get("line_pulses")
                                for mode in info.return_modes):
                             raise NoTrajectory("Single returns without scan angle: no usable pulse lines or scan "
                                                "angles in one or more files. Please provide the delivered trajectory file.")
-                        angle_files = [mode["index"] for mode in info.return_modes if mode["mode"] == "single"]
+                        angle_files = [mode["index"] for mode in info.return_modes
+                                       if mode["mode"] == "single" and mode["has_scan_angle"]]
                         result = estimate(pulses, check_platform=False, interval=args.interval,
                                           angle_files=angle_files, workers=threads)
                         if estimate_quality(result) == "unreliable":

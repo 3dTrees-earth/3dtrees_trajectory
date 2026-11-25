@@ -157,20 +157,28 @@ class _Store:
         return np.empty((0, width) if width else 0, dtype)
 
 
-def _join_stray(stray: _Store, pulses: _Store) -> tuple[int, int]:
-    """Recover separated returns only when their complete, unambiguous sequence is present."""
+def _join_stray(stray: _Store, pulses: _Store, allow_gaps: bool = False) -> tuple[int, int]:
+    """Recover separated returns when their complete, unambiguous sequence is present. With ``allow_gaps`` the
+    first and the declared last return suffice, with no repeated return number (some exports, e.g. LiDAR360,
+    drop intermediate returns but keep first and last)."""
     t, xyz, number = stray.array("time", np.float64), stray.array("xyz", np.float32, 3), stray.array("number", np.uint8)
     source, file, angle = stray.array("source", np.uint16), stray.array("file", np.uint16), stray.array("angle", np.float32)
     total, channel = stray.array("total", np.uint8), stray.array("channel", np.uint8)
     order = np.lexsort((number, channel, t, source, file))
     t, source, file, channel = t[order], source[order], file[order], channel[order]
     same = (t[1:] == t[:-1]) & (source[1:] == source[:-1]) & (file[1:] == file[:-1]) & (channel[1:] == channel[:-1])
-    # A repeated/skipped return number invalidates the complete group.
-    sequential = np.diff(number[order].astype(np.int16)) == 1
+    # A repeated return number makes the group ambiguous; a missing intermediate return does not change the
+    # shot's first-to-last line.
+    step = np.diff(number[order].astype(np.int16))
+    increasing = step > 0 if allow_gaps else step == 1
     start = np.flatnonzero(np.r_[True, ~same])
     end = np.r_[start[1:], len(t)] - 1
-    broken = np.logical_or.reduceat(np.r_[same & ~sequential, False], start)
-    good = (~broken) & (number[order[start]] == 1) & (end - start + 1 == total[order[start]])
+    broken = np.logical_or.reduceat(np.r_[same & ~increasing, False], start)
+    good = (~broken) & (number[order[start]] == 1)
+    if allow_gaps:
+        good &= (end > start) & (number[order[end]] == total[order[start]])
+    else:
+        good &= end - start + 1 == total[order[start]]
     start, end = start[good], end[good]
     pulses.add(time=t[start], first=xyz[order[start]], last=xyz[order[end]],
                returns=(end - start + 1).astype(np.uint8), source=source[start], file=file[start], angle=angle[order[start]])
@@ -390,6 +398,8 @@ class _FilePulses:
         info.joined_out_of_order_points = self.stray_count
         recovered = 0
         if self.stray_count and not self.stray_limit_exceeded:
+            # Joining consumes the store; keep the column lists for a retry with missing returns allowed.
+            self.stray_columns = {name: list(parts) for name, parts in self.stray.columns.items()}
             count, echoes = _join_stray(self.stray, self.recovered)
             self.counts[0] += count * stride
             recovered = min(info.fragment_echoes, echoes * stride)
@@ -398,7 +408,20 @@ class _FilePulses:
             return False
         if not info.unpaired_multi_echoes:
             return True
-        return self.counts[0] > 0 and info.unpaired_multi_echoes <= max(200, info.complete_multi_echoes + recovered)
+        okay = self.counts[0] > 0 and info.unpaired_multi_echoes <= max(200, info.complete_multi_echoes + recovered)
+        return okay
+
+    def gapped_lines(self):
+        """Shots with missing intermediate returns, joined from the separated echoes (only used when strict
+        pairing failed for this file): a store of first-to-last lines and their count."""
+        lines = _Store("time", "first", "last", "returns", "source", "file", "angle")
+        columns = getattr(self, "stray_columns", None)
+        if not columns or self.stray_limit_exceeded:
+            return lines, 0
+        stray = _Store(*columns)
+        stray.columns = columns
+        count, _ = _join_stray(stray, lines, allow_gaps=True)
+        return lines, count
 
     def has_angles(self):
         return any(np.any(np.isfinite(part) & (np.abs(part) > 0) & (np.abs(part) < 90))
@@ -567,8 +590,12 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                 single_stride = 1 if full else max(1, -(-info.points // max_single))
                 strides = (info.kept_every[0], single_stride)
                 okay = local.finish(info.kept_every[0])
+                lines = None
                 if not okay:
                     exact_info = local.info
+                    # Shots recovered from separated returns still give first-to-last lines for the path, even
+                    # when too many lone echoes remain for the file to be traced as multi-return.
+                    lines = local.gapped_lines()
                     del local
                     if prepared is None:
                         mode = "time_tolerance"
@@ -589,11 +616,15 @@ def read_pulses(paths: list[Path], max_multi: int = MAX_MULTI, max_single: int =
                             local.collect(chunk, index, shift, strides, True)
                         local.finish(strides[0])
                         local.info = exact_info
+                        if lines is not None and lines[1]:
+                            local.recovered.extend(lines[0])
+                            local.counts[0] += lines[1] * strides[0]
                 if local.counts[0] == 0 and mode == "paired":
                     mode = "single"
                 angles = local.has_angles()
                 info.return_modes.append({"file": str(path), "index": index, "mode": mode, "has_scan_angle": angles,
-                                          "unpaired_multi_echoes": local.info.unpaired_multi_echoes})
+                                          "unpaired_multi_echoes": local.info.unpaired_multi_echoes,
+                                          "line_pulses": int(local.counts[0])})
                 for key in _PARTIAL_COUNTS:
                     setattr(info, key, getattr(info, key) + getattr(local.info, key))
                 counts += local.counts
