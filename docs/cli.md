@@ -30,6 +30,6 @@ occlusion products from the delivered paths.
 ## Galaxy wrapper
 
 The Galaxy tool **3Dtrees: Trajectory and Occlusion** (bgruening/galaxytools, `tools/3dtrees_trajectory`) exposes:
-the point cloud collection, an optional DTM, optional delivered trajectories (multiple), and under *Advanced options*
-voxel size (0.25–2 m), path sampling interval (0.1–5 s) and *Use all pulses*. Threads come from `GALAXY_SLOTS`;
+the point cloud collection, an optional DTM, optional delivered trajectories (multiple), voxel size (0.25–2 m), path sampling interval (0.1–5 s) and
+*Use all pulses*. Threads come from `GALAXY_SLOTS`;
 internals (`--grid-memory-gib`, `--debug`, `--no-platform-check`) are not exposed. Errors are detected by exit code.

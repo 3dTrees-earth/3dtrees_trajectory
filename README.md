@@ -40,7 +40,7 @@ a usable CRS (none, or Standardization's EPSG:4978 placeholder near the origin) 
 `crs: local` and stay in cloud coordinates. Optional: one terrain raster (`--dtm`, may have no CRS) and one or more
 delivered paths (`--trajectory`). Details: [docs/inputs.md](docs/inputs.md).
 
-**Advanced options** (also in the Galaxy form): `--voxel` voxel edge and COG band step (default 0.5 m; Galaxy 0.25–2 m),
+**Options** (also plain fields in the Galaxy form): `--voxel` voxel edge and COG band step (default 0.5 m; Galaxy 0.25–2 m),
 `--interval` seconds between path positions (default 0.5), `--full` fit the path from every pulse instead of a
 sample.
 
