@@ -95,7 +95,7 @@ Use `--debug` for current window memory and scratch measurements. [Stage resourc
 
 A replay of 36 archived 3Dtrees ULS/MLS datasets matched the time and XYZ bytes of all 35 prior paths.
 Dataset 2018 reproduced its refusal because it has single returns without a usable scan angle.
-The archive and replay ran separately on geos. Replay jobs used eight decoder slots with a ten-CPU affinity mask.
+The archive and replay ran separately on the 3Dtrees compute server. Replay jobs used eight decoder slots with a ten-CPU affinity mask.
 
 | Dataset | Points read | Archived → replay wall time | Archived → replay peak RSS |
 | --- | ---: | ---: | ---: |
