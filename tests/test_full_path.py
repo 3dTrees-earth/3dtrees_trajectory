@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from synthetic import flight, scan
-from threedtrees_trajectory import full_path
+from threedtrees_trajectory import cli, full_path
 from threedtrees_trajectory.cli import main
 
 
@@ -29,6 +29,7 @@ def test_full_windows_match_whole_cloud(tmp_path, monkeypatch, separated):
     expected, actual = tmp_path / "whole.csv", tmp_path / "streamed.csv"
     with monkeypatch.context() as patch:
         patch.setattr(full_path, "try_estimate", lambda *args: None)
+        patch.setattr(cli, "FULL_IN_MEMORY", True)
         reference = _run_path([cloud], expected)
     report = _run_path([cloud], actual)
     assert report["stages"][0]["full_window_fit"] == "streamed"
@@ -50,6 +51,7 @@ def test_full_merges_overlapping_strips_before_fitting(tmp_path, monkeypatch):
     expected, actual = tmp_path / "whole.csv", tmp_path / "streamed.csv"
     with monkeypatch.context() as patch:
         patch.setattr(full_path, "try_estimate", lambda *args: None)
+        patch.setattr(cli, "FULL_IN_MEMORY", True)
         reference = _run_path(clouds, expected)
     report = _run_path(clouds, actual)
     assert report["stages"][0]["full_window_fit"] == "streamed"
@@ -65,3 +67,17 @@ def test_full_still_refuses_static_cloud(tmp_path):
     assert main([str(cloud), "--full", "--debug", "-o", str(out)]) == 2
     assert not out.stat().st_size
     assert "static (TLS) scan" in out.with_suffix(".report.json").read_text()
+
+
+def test_all_pulses_is_the_default_and_sample_opts_out(tmp_path):
+    cloud = tmp_path / "flight.las"
+    flight(cloud, seconds=6, rate=400)
+    full, sample = tmp_path / "full.csv", tmp_path / "sample.csv"
+    assert main([str(cloud), "--threads", "1", "--debug", "-o", str(full)]) == 0
+    assert main([str(cloud), "--threads", "1", "--debug", "-o", str(sample), "--sample"]) == 0
+    full_report = json.loads(full.with_suffix(".report.json").read_text())
+    sample_report = json.loads(sample.with_suffix(".report.json").read_text())
+    assert full_report["stages"][0]["full_window_fit"] == "streamed"
+    assert "full_window_fit" not in sample_report["stages"][0]
+    assert main([str(cloud), "--full", "--threads", "1", "-o", str(tmp_path / "alias.csv")]) == 0  # old flag still accepted
+    assert (tmp_path / "alias.csv").read_bytes() == full.read_bytes()

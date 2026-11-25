@@ -17,6 +17,9 @@ from .publish import write_empty, write_report
 from .resources import RunResources, decoding_threads, memory_failure, raise_if_oom
 
 
+# Without the streamed fit, all pulses would have to be held in memory; the reader samples instead. Tests set
+# this to compare the streamed fit with the whole-cloud fit.
+FULL_IN_MEMORY = False
 SUPPLEMENTARY_PATH_NOTE = "Keep the delivered path as supplementary data on the dataset; it will be added once supported."
 
 
@@ -87,7 +90,9 @@ def _run(argv, output_locks) -> int:
     parser.add_argument("--no-platform-check", action="store_true", help="skip static (TLS) cloud detection when estimating a path")
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
     parser.add_argument("--threads", help="maximum decoding threads and GPS-time window workers (defaults to GALAXY_SLOTS or 10)")
-    parser.add_argument("--full", action="store_true", help="keep all pulses (requires more memory)")
+    parser.add_argument("--sample", action="store_true",
+                        help="fit the path from a bounded sample of pulses instead of all pulses (the default)")
+    parser.add_argument("--full", action="store_true", help=argparse.SUPPRESS)  # all pulses is the default now
     parser.add_argument("--trajectory", type=Path, nargs="+", action="extend",
                         help="one or more delivered paths (3Dtrees trajectory CSVs); used for occlusion instead of "
                              "estimating one. Each part of the cloud uses the path that covers its time and fits best")
@@ -228,7 +233,8 @@ def _process(args, output_locks, resources, threads, error_message, products, re
                         with open_dtm(args.dtm, indexed_clouds[1]):
                             pass
                 scan_index = indexed_clouds[0] if isinstance(indexed_clouds, tuple) else None
-                if args.full and args.output is not None and args.trajectory is None:
+                all_pulses = not args.sample and args.output is not None
+                if all_pulses and args.trajectory is None:
                     from .full_path import try_estimate
 
                     try:
@@ -238,7 +244,9 @@ def _process(args, output_locks, resources, threads, error_message, products, re
                         raise_if_oom(error)
                     stage["full_window_fit"] = "streamed" if streamed is not None else "standard reader"
                 if streamed is None:
-                    pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
+                    # The in-memory reader always samples: all pulses are fitted only by the streamed GPS-time
+                    # windows, so memory stays bounded for any input size.
+                    pulses, _ = read_pulses(args.clouds, full=all_pulses and FULL_IN_MEMORY, info=info,
                                             scratch=work, resources=resources,
                                             scan_index=scan_index, threads=threads)
                 else:
@@ -256,6 +264,9 @@ def _process(args, output_locks, resources, threads, error_message, products, re
                     if platform == "static":
                         raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
             data = {"tool": f"3dtrees_trajectory {__version__}", "files": info.files, "trajectory": "delivered"}
+            if streamed is not None:
+                with resources.stage("path estimation") as stage:
+                    stage["fitted_during"] = "read/time-sort"  # GPS-time windows are fitted while they are read
             if args.output is not None and streamed is None:
                 with resources.stage("path estimation", children=True, worker_details=False):
                     try:
@@ -276,6 +287,10 @@ def _process(args, output_locks, resources, threads, error_message, products, re
                             info.single_return_files = list(range(len(args.clouds)))
                             result.warnings.append("Pulse lines missed the fitted path by more than 0.5 m at the median.")
                         result.evidence = evidence
+                        if all_pulses and not FULL_IN_MEMORY:
+                            result.warnings.append(
+                                "The path was fitted from a sample of pulses: the all-pulse fit streams plain LAS/LAZ "
+                                "without a delivered path or a pairing fallback.")
                     except ValueError as error:
                         raise_if_oom(error)
                         if args.trajectory is None:

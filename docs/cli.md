@@ -4,7 +4,7 @@
 
 ```text
 3dtrees-trajectory CLOUD [CLOUD …] [-o CSV] [--geojson PATH] [--trajectory CSV [CSV …]] [--dtm TIF]
-                   [--occlusion-copc PATH --occlusion-cog PATH] [--voxel M] [--interval S] [--full]
+                   [--occlusion-copc PATH --occlusion-cog PATH] [--voxel M] [--interval S] [--sample]
                    [--threads N] [--grid-memory-gib G] [--no-platform-check] [--debug [--report PATH]] [--version]
 ```
 
@@ -18,7 +18,7 @@
 | `--occlusion-copc`, `--occlusion-cog` | | both together | occlusion products |
 | `--voxel` | 0.5 | 0.05–10 m | voxel edge and COG band step |
 | `--interval` | 0.5 | > 0 s | seconds between path positions |
-| `--full` | off | | keep every pulse for the path fit (memory grows with input) |
+| `--sample` | off | | fit the path from a bounded sample of pulses instead of all pulses; `--full` (all pulses) is the default and still accepted |
 | `--threads` | `GALAXY_SLOTS` or 10 | ≥ 1 | decoder threads and GPS-time window workers |
 | `--grid-memory-gib` | 16 | ≤ 64 | soft per-worker budget before further GPS-time splitting |
 | `--no-platform-check` | off | | skip the static (TLS) check for a known moving acquisition |
@@ -31,5 +31,5 @@ occlusion products from the delivered paths.
 
 The Galaxy tool **3Dtrees: Trajectory and Occlusion** (bgruening/galaxytools, `tools/3dtrees_trajectory`) exposes:
 the point cloud collection, an optional DTM, optional delivered trajectories (multiple), voxel size (0.25–2 m), path sampling interval (0.1–5 s) and
-*Use all pulses*. Threads come from `GALAXY_SLOTS`;
+*Use all pulses* (on by default; off passes `--sample`). Threads come from `GALAXY_SLOTS`;
 internals (`--grid-memory-gib`, `--debug`, `--no-platform-check`) are not exposed. Errors are detected by exit code.

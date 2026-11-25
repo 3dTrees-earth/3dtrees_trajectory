@@ -145,7 +145,7 @@ def test_memory_failure_is_a_job_refusal(tmp_path, monkeypatch, capsys, module_n
     out, copc, cog = tmp_path / "path.csv", tmp_path / "out.copc.laz", tmp_path / "out.tif"
     for path in (out, out.with_suffix(".geojson"), copc, cog):
         path.write_text("stale")
-    args = [str(cloud), "-o", str(out), "--debug", "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]
+    args = [str(cloud), "-o", str(out), "--debug", "--occlusion-copc", str(copc), "--occlusion-cog", str(cog), "--sample"]
     if function_name == "read_trajectory":
         args += ["--trajectory", str(tmp_path / "delivered.csv")]
 

@@ -12,9 +12,22 @@
   coordinates, GPS time, return numbers, scanner channel, point source ID and scan angle during path
   estimation. Window tracing skips scan angle, and ordinary extent rereads use only positions and GPS time
   plus the LAZ base layer. Point formats 0–5 use full decoding.
-- The defaults retain approximately 40 million multi-return and 10 million single-return pulses, or 40 million
-  single-return pulses for single-return acquisitions. `--full` keeps every pulse and uses memory proportional
-  to input size.
+- **All pulses (default).** For plain LAS/LAZ without a delivered path, worker processes read seekable record
+  ranges per GPS-time window and fit each window as soon as its pulses are complete; the solver keeps a compact
+  normal system per window, so memory does not grow with the input. Echoes stored apart or overlapping files spill
+  compact window records to scratch beside the job (up to about 85 GB for a 7 B-point flight such as 2585).
+  COPC input, a delivered path, or a pairing fallback use the in-memory reader, which keeps a bounded sample
+  (about 40 million multi-return and 10 million single-return pulses, or 40 million single-return pulses for
+  single-return acquisitions) and says so in a CSV warning. `--sample` uses that sample everywhere.
+
+  | Dataset (10 cores) | sample: wall / CPU / peak RSS | all pulses: wall / CPU / peak RSS |
+  | --- | --- | --- |
+  | 1844 (7.7 GB, 678 M points, 419 M pulses) | 31 s / 261 s / 1.65 GiB | 35 s / 315 s / 0.46 GiB |
+  | 2585 (70 GB, 7.04 B points, 5.2 B pulses), raw files | — | 533 s, 0.50 GiB process RSS, 4.6 GiB over all workers, ~83 GB scratch |
+
+  Before streaming (1.0.0 first cuts) all pulses on 1844 took 130 s and 34.5 GiB. Paths from all pulses and from
+  the sample differ by a median of 0.1–0.2 mm (p95 2–5 mm); outputs of the streamed fit are byte-identical to the
+  whole-cloud fit.
 - GPS-window scratch contains durable compact counts at 12 bytes per stored voxel plus output intermediates.
   Count arrays are sparse files until the walker touches those cells. The debug report records recovered and unpaired
   echoes, executed and reused windows, per-window RSS, sampled aggregate RSS, allocated scratch, peak worker

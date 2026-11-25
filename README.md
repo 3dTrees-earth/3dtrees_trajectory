@@ -41,8 +41,8 @@ a usable CRS (none, or Standardization's EPSG:4978 placeholder near the origin) 
 delivered paths (`--trajectory`). Details: [docs/inputs.md](docs/inputs.md).
 
 **Options** (also plain fields in the Galaxy form): `--voxel` voxel edge and COG band step (default 0.5 m; Galaxy 0.25–2 m),
-`--interval` seconds between path positions (default 0.5), `--full` fit the path from every pulse instead of a
-sample.
+`--interval` seconds between path positions (default 0.5). The path is fitted from **all pulses** by default, streamed
+in GPS-time windows with bounded memory; `--sample` fits it from a bounded sample instead (`--full` is still accepted).
 
 ## Outputs
 
