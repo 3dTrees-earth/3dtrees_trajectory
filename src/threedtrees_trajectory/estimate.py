@@ -76,9 +76,13 @@ def estimate(p: Pulses, check_platform: bool = True, interval: float = 0.5, *, u
     if (result.method == "lines" and angle_files
             and np.median([fit.miss for fit in result.fits]) <= UNRELIABLE_LINE_MISS):
         result = _fill_angle_windows(p, result, interval, angle_files, workers)
+    return world_result(result, p.origin)
+
+
+def world_result(result, origin):
     if not result.fits:
         raise NoTrajectory("No reliable position could be fitted. Please provide the trajectory file.")
-    result.fits = [solve.Fit(f.time, f.xyz + p.origin, f.pulses, f.miss) for f in result.fits]
+    result.fits = [solve.Fit(f.time, f.xyz + origin, f.pulses, f.miss) for f in result.fits]
     if not all(np.isfinite(f.time) and np.isfinite(f.xyz).all() for f in result.fits):
         raise ValueError("The estimated path contains non-finite coordinates or times.")
     return result
@@ -126,11 +130,7 @@ def _estimate(p: Pulses, check_platform: bool, interval: float, use_lines: bool,
             raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
     lines = solve.path_from_lines(p, interval=interval, workers=workers) if use_lines and multi_share >= MULTI_SHARE_MIN else []
     if len(lines) >= MIN_LINE_POSITIONS:  # a gappy path from lines beats a full one from scan angles (metres off)
-        kept = solve.drop_outliers(lines)
-        if len(kept) < len(lines):
-            warnings.append(f"{len(lines) - len(kept)} of {len(lines)} positions were more than 1 m off the path of "
-                            "their neighbours and were dropped.")
-        return Result("lines", kept, warnings, evidence)
+        return line_result(lines, evidence)
     if p.has_scan_angle:
         warnings.append("Single returns only: path from scan angles, about 1 m horizontally and 0.1 m vertically on "
                         "RIEGL and DJI flights, much worse where the scan angle isn't measured off nadir (YellowScan 8 m).")
@@ -140,3 +140,12 @@ def _estimate(p: Pulses, check_platform: bool, interval: float, use_lines: bool,
                          "Please provide the trajectory file.")
     raise NoTrajectory("Single returns without scan angle: the path can't be estimated from this cloud. "
                      "Please provide the trajectory file.")
+
+
+def line_result(lines, evidence):
+    kept = solve.drop_outliers(lines)
+    warnings = []
+    if len(kept) < len(lines):
+        warnings.append(f"{len(lines) - len(kept)} of {len(lines)} positions were more than 1 m off the path of "
+                        "their neighbours and were dropped.")
+    return Result("lines", kept, warnings, evidence)

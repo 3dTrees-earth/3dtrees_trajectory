@@ -50,10 +50,8 @@ def _previous_tail(reader, start):
     raise SerialReadRequired
 
 
-def _collect_range(path, index, start, stop, total, shift, strides, grid, probe):
-    from .pulses import _FilePulses
-    from .window_input import ScanIndex
-
+def read_range(path, start, stop, total):
+    """Read a record range, assigning a GPS-time group at a boundary to its right."""
     with open_cloud(path, sequential=True) as reader:
         left = _previous_tail(reader, start)
         if reader.points_read != left:
@@ -61,6 +59,13 @@ def _collect_range(path, index, start, stop, total, shift, strides, grid, probe)
         chunk = read_points_exact(reader, stop - left)
         if stop < total:
             chunk = chunk[:_tail_start(chunk.gps_time)]
+    return left, chunk
+
+
+def _collect_range(path, index, start, stop, total, shift, strides, grid, probe):
+    from .pulses import _FilePulses
+
+    left, chunk = read_range(path, start, stop, total)
     if not len(chunk) or (start == 0 and len(chunk) < probe):
         raise SerialReadRequired
     minimum, maximum = float(chunk.gps_time.min()), float(chunk.gps_time.max())
@@ -68,13 +73,17 @@ def _collect_range(path, index, start, stop, total, shift, strides, grid, probe)
         raise UnusableTime("GPS times must be finite.")
     local = _FilePulses([path])
     local.collect(chunk, index, shift, strides, False)
-    blocks, summaries = [], []
-    if grid is not None:
-        scan = ScanIndex([path], grid)
-        scan.observe(0, chunk)
-        blocks = [replace(block, start=block.start + left, stop=block.stop + left) for block in scan.blocks[0]]
-        summaries = scan.summaries[0]
+    blocks, summaries = index_range(path, left, chunk, grid) if grid is not None else ([], [])
     return local, minimum, maximum, len(chunk), blocks, summaries
+
+
+def index_range(path, left, chunk, grid):
+    from .window_input import ScanIndex
+
+    scan = ScanIndex([path], grid)
+    scan.observe(0, chunk)
+    blocks = [replace(block, start=block.start + left, stop=block.stop + left) for block in scan.blocks[0]]
+    return blocks, scan.summaries[0]
 
 
 def probe_single_returns(path, size):

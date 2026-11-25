@@ -212,6 +212,7 @@ def _process(args, output_locks, resources, threads, error_message, products, re
     path_warnings = []
     if error_message is None:
         try:
+            streamed = None
             with resources.stage("read/time-sort", children=True) as stage:
                 work = (report_path or args.output or args.occlusion_copc).resolve().parent
                 if occlusion_paths:
@@ -226,22 +227,36 @@ def _process(args, output_locks, resources, threads, error_message, products, re
                     if args.dtm is not None and isinstance(indexed_clouds, tuple) and not indexed_clouds[0].copc:
                         with open_dtm(args.dtm, indexed_clouds[1]):
                             pass
-                pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
-                                        scratch=work, resources=resources,
-                                        scan_index=indexed_clouds[0] if isinstance(indexed_clouds, tuple) else None,
-                                        threads=threads)
+                scan_index = indexed_clouds[0] if isinstance(indexed_clouds, tuple) else None
+                if args.full and args.output is not None and args.trajectory is None:
+                    from .full_path import try_estimate
+
+                    try:
+                        streamed = try_estimate(args.clouds, args.interval, threads, not args.no_platform_check,
+                                                work, scan_index)
+                    except (OSError, ValueError, LaspyException, LazrsError, StructError, EOFError, OverflowError) as error:
+                        raise_if_oom(error)
+                    stage["full_window_fit"] = "streamed" if streamed is not None else "standard reader"
+                if streamed is None:
+                    pulses, _ = read_pulses(args.clouds, full=args.full and args.output is not None, info=info,
+                                            scratch=work, resources=resources,
+                                            scan_index=scan_index, threads=threads)
+                else:
+                    result, pulses, info = streamed
                 stage.update(bytes_read=sum(path.stat().st_size for path in args.clouds),
                              parallel_record_workers=info.read_workers)
             if not len(pulses):
                 raise NoTrajectory("No usable pulses could be reconstructed from the input.")
             evidence = "given"
             with resources.stage("platform check"):
-                if args.trajectory is not None or not args.no_platform_check:
+                if streamed is not None:
+                    evidence = result.evidence
+                elif args.trajectory is not None or not args.no_platform_check:
                     platform, evidence = detect_platform(pulses)
                     if platform == "static":
                         raise ValueError(STATIC_REFUSAL.format(evidence=evidence))
             data = {"tool": f"3dtrees_trajectory {__version__}", "files": info.files, "trajectory": "delivered"}
-            if args.output is not None:
+            if args.output is not None and streamed is None:
                 with resources.stage("path estimation", children=True, worker_details=False):
                     try:
                         if any(mode["mode"] == "single" and not mode["has_scan_angle"] and not mode.get("line_pulses")
@@ -268,15 +283,15 @@ def _process(args, output_locks, resources, threads, error_message, products, re
                         result = None
                         path_warnings.append(f"Estimated path: {error}")
                         data["estimated_path_error"] = str(error)
-                if result is not None:
-                    try:
-                        layer = geojson(info, result)
-                    except ProjError as error:
-                        raise_if_oom(error)
-                        result.warnings.append("The map layer could not be projected to WGS84.")
-                    path_warnings = result.warnings
-                    if safe_report:
-                        data = report(info, result, pulses.multi_share)
+            if result is not None:
+                try:
+                    layer = geojson(info, result)
+                except ProjError as error:
+                    raise_if_oom(error)
+                    result.warnings.append("The map layer could not be projected to WGS84.")
+                path_warnings = result.warnings
+                if safe_report:
+                    data = report(info, result, pulses.multi_share)
             if occlusion_paths:
                 path_inputs = _occlusion_path(args, result, pulses, resources, info.time_system,
                                               info.crs, info.vertical_crs)

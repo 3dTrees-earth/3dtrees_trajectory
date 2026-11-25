@@ -261,10 +261,7 @@ def _angles(chunk: laspy.ScaleAwarePointRecord, index: np.ndarray) -> np.ndarray
     return chunk.scan_angle_rank[index].astype(np.float32)
 
 
-def _collect_chunk(chunk: laspy.ScaleAwarePointRecord, time: np.ndarray, file: int, shift: np.ndarray,
-                   strides: tuple[int, int], counts: np.ndarray, pulses: _Store, stray: _Store, info: CloudInfo,
-                   copc: bool, sampled_stats: bool = False) -> int:
-    multi_every, single_every = strides
+def _pulse_groups(chunk, time, copc):
     rn, nr = np.asarray(chunk.return_number), np.asarray(chunk.number_of_returns)
     source = chunk.point_source_id
     channel = np.asarray(chunk.scanner_channel) if chunk.point_format.id >= 6 else np.zeros(len(chunk), np.uint8)
@@ -283,6 +280,14 @@ def _collect_chunk(chunk: laspy.ScaleAwarePointRecord, time: np.ndarray, file: i
             ambiguous = np.zeros(groups[-1] + 1, bool)
             ambiguous[groups[:-1][repeated]] = True
             complete &= ~ambiguous[groups[start]]
+    return start, end, single, complete, rn, nr, source, channel
+
+
+def _collect_chunk(chunk: laspy.ScaleAwarePointRecord, time: np.ndarray, file: int, shift: np.ndarray,
+                   strides: tuple[int, int], counts: np.ndarray, pulses: _Store, stray: _Store, info: CloudInfo,
+                   copc: bool, sampled_stats: bool = False) -> int:
+    multi_every, single_every = strides
+    start, end, single, complete, rn, nr, source, channel = _pulse_groups(chunk, time, copc)
     incomplete = ~single & ~complete
     sizes = end - start + 1
     multi_sample = _sample(time[start], multi_every)

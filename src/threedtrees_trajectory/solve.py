@@ -75,7 +75,28 @@ def _closest_point(origin: np.ndarray, direction: np.ndarray, dt: np.ndarray | N
     return solution[:3], (solution[3:] if dt is not None else np.zeros(3))
 
 
-def fit_lines(origin: np.ndarray, direction: np.ndarray, time: np.ndarray, moving: bool, min_pulses: int) -> Fit | None:
+def _compact_moving_point(origin, direction, dt, cond_max):
+    """Accumulate the moving line fit using the six unique entries of each projector."""
+    x, y, z = direction.T
+    projector = np.stack((1 - x * x, -x * y, -x * z, 1 - y * y, -y * z, 1 - z * z))
+    moments = np.stack((np.ones_like(dt), dt, dt * dt))
+    symmetric = np.array([[0, 1, 2], [1, 3, 4], [2, 4, 5]])
+    blocks = (moments @ projector.T)[:, symmetric]
+    matrix = np.empty((6, 6))
+    matrix[:3, :3], matrix[:3, 3:] = blocks[:2]
+    matrix[3:, :3], matrix[3:, 3:] = blocks[1:]
+    # The orthogonal projector is symmetric and idempotent, so P.T @ P = P.
+    # Near the solver's conditioning cutoff retain the original construction.
+    if not np.isfinite(matrix).all() or np.linalg.cond(matrix) > 1e7:
+        return _closest_point(origin, direction, dt, cond_max)
+    projected = origin - np.einsum("ij,ij->i", origin, direction)[:, None] * direction
+    rhs = (moments[:2] @ projected).ravel()
+    solution = np.linalg.solve(matrix, rhs)
+    return solution[:3], solution[3:]
+
+
+def fit_lines(origin: np.ndarray, direction: np.ndarray, time: np.ndarray, moving: bool, min_pulses: int, *,
+              compact: bool = False) -> Fit | None:
     """One position from a set of pulse lines; the lines that miss it by more than 3 median misses are dropped."""
     centre = origin.mean(axis=0)
     p = origin - centre
@@ -83,20 +104,25 @@ def fit_lines(origin: np.ndarray, direction: np.ndarray, time: np.ndarray, movin
     dt = time - t0 if moving else None
     keep = np.ones(len(p), bool)
     fit, miss = None, None
+    closest = _compact_moving_point if moving and compact else _closest_point
     for _ in range(5):
-        fit = _closest_point(p[keep], direction[keep], dt[keep] if moving else None, 1e10 if moving else 1e6)
+        fit = closest(p[keep], direction[keep], dt[keep] if moving else None, 1e10 if moving else 1e6)
         if fit is None:
             return None
         offset = p - (fit[0] + (dt[:, None] * fit[1] if moving else 0))
-        miss = np.linalg.norm(offset - (offset * direction).sum(axis=1)[:, None] * direction, axis=1)
-        limit = 3 * max(float(np.median(miss[keep])), 0.01)
+        if compact:
+            offset -= np.einsum("ij,ij->i", offset, direction)[:, None] * direction
+            miss = np.sqrt(np.einsum("ij,ij->i", offset, offset))
+        else:
+            miss = np.linalg.norm(offset - (offset * direction).sum(axis=1)[:, None] * direction, axis=1)
+        limit = 3 * max(float(np.median(miss[keep], overwrite_input=True)), 0.01)
         new_keep = miss <= limit
-        if new_keep.sum() < min_pulses:
+        if np.count_nonzero(new_keep) < min_pulses:
             return None
         if np.array_equal(new_keep, keep):
             break
         keep = new_keep
-    return Fit(t0, fit[0] + centre, int(keep.sum()), float(np.median(miss[keep])))
+    return Fit(t0, fit[0] + centre, np.count_nonzero(keep), float(np.median(miss[keep], overwrite_input=True)))
 
 
 def _fit_windows(fit, starts, length, minimum, workers):
@@ -120,11 +146,18 @@ def path_from_lines(p: Pulses, interval: float = 0.5, min_pulses: int = 50, min_
     starts = np.flatnonzero(np.r_[True, (window[1:] != window[:-1]) | (source[1:] != source[:-1])])
     def fit_window(window):
         lo, hi = window
-        selected = index[lo:hi]
-        origin, line, length = _line_vectors(p, selected)
-        return fit_lines(origin, line / length[:, None], p.time[selected], True, min_pulses)
+        return fit_line_window(p, index[lo:hi], min_pulses)
 
     fits = _fit_windows(fit_window, starts, len(index), min_pulses, workers)
+    return filter_line_fits(fits)
+
+
+def fit_line_window(p, selected, min_pulses):
+    origin, line, length = _line_vectors(p, selected)
+    return fit_lines(origin, line / length[:, None], p.time[selected], True, min_pulses)
+
+
+def filter_line_fits(fits):
     # A window whose lines don't meet (median miss 0.7-30 m against 0.02 m) fitted noise or mixed pulses: drop it.
     if fits:
         limit = max(0.25, 10 * float(np.median([f.miss for f in fits])))
