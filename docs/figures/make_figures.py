@@ -162,7 +162,7 @@ box(7.4, 8.6, "Merge first-read column bounds in path coverage\nSample terrain r
 box(7.4, 6.0, "Stream disjoint GPS windows in parallel\nAdjust admission using observed worker peak RSS.", w=5.6, h=1.6)
 box(7.4, 3.5, "Classify blocks in parallel, then write in grid order", w=5.8, h=1.2)
 ok(7.4, 1.2, "Occlusion COPC (classes 1, 3 and 4)\n+ COG (one band per voxel layer, 0.5 m default)")
-box(11.65, 8.6, "Occlusion error\nstderr, empty products,\nexit 2 if scratch is full", color="#fde2e1", w=2.4, h=1.9)
+box(11.65, 8.6, "Occlusion refused\nor failed: stderr,\nempty products, exit 2", color="#fde2e1", w=2.4, h=1.9)
 
 for y1, y2 in ((28.2, 27.4), (25.8, 25.0), (23.4, 22.6), (21.0, 20.2), (18.6, 17.8), (15.8, 14.7)):
     arrow(5, y1, 5, y2)

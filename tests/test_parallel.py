@@ -242,18 +242,19 @@ def test_copc_sample_sort_retains_reference_path_inputs(tmp_path, monkeypatch):
 
 
 @needs_untwine
-def test_copc_occlusion_refuses_and_preserves_estimated_path(tmp_path):
+def test_copc_occlusion_fails_the_job(tmp_path, capsys):
+    """Requested occlusion that cannot run fails (exit 2) instead of passing empty products downstream."""
     original, source = tmp_path / "flight.laz", tmp_path / "flight.copc.laz"
     flight(original, seconds=4, rate=500)
     with laspy.open(original) as src:
         occlusion._index_copc(original, source, src.header.point_count, tmp_path)
     assert main([str(source), "--debug", "-o", str(tmp_path / "path.csv"),
                  "--occlusion-copc", str(tmp_path / "out.copc.laz"),
-                 "--occlusion-cog", str(tmp_path / "out.tif")]) == 0
-    assert (tmp_path / "path.csv").stat().st_size
-    assert "Supply the standardized files instead of COPC" in (tmp_path / "path.report.json").read_text()
-    assert "# warning: Occlusion: Occlusion requires scanner-order LAS/LAZ." in (tmp_path / "path.csv").read_text()
-    assert not (tmp_path / "out.tif").stat().st_size
+                 "--occlusion-cog", str(tmp_path / "out.tif")]) == 2
+    assert "Occlusion requires scanner-order LAS/LAZ" in capsys.readouterr().err
+    report = (tmp_path / "path.report.json").read_text()
+    assert "Supply the standardized files instead of COPC" in report and '"exit_code": 2' in report
+    assert all(not (tmp_path / name).stat().st_size for name in ("path.csv", "out.copc.laz", "out.tif"))
 
 
 @pytest.mark.parametrize("voxel", [0.3, 0.5, 1.0])

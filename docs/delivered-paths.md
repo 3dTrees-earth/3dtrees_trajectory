@@ -35,7 +35,7 @@ contiguous GPS-time stretch, cut at pauses over 5 s and wherever any path starts
 | one | that path |
 | several (duplicate export, a second platform or sensor head at the same time, the same week seconds on another day) | the path with the lowest median miss to a fixed, evenly spaced sample of up to 20,000 of the segment's multi-return pulse lines; without lines, the first path given |
 
-Occlusion is refused when fewer than 50 % of the pulses get a path ("The point cloud and path have no overlapping GPS
+Occlusion is refused (exit 2) when fewer than 50 % of the pulses get a path ("The point cloud and path have no overlapping GPS
 times." when none does). Each pulse is then traced from its own segment's path; there is still one grid, one DTM, one
 COPC and one COG per dataset.
 

@@ -58,8 +58,8 @@ Details: [docs/outputs.md](docs/outputs.md).
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Path estimated and/or occlusion written (an occlusion refusal is a warning in a combined run) |
-| `2` | Invalid input or arguments, static (TLS) acquisition, Earth-centred coordinates, failed output |
+| `0` | Path estimated and/or occlusion written |
+| `2` | Invalid input or arguments, static (TLS) acquisition, Earth-centred coordinates, requested occlusion that cannot run (e.g. COPC input, no delivered-path coverage), failed output |
 | `3` | GPS time missing, non-finite or constant |
 | `4` | No usable path (no pulse lines, no scan angle, no delivered path) |
 | `127` | Out of memory or a lost worker; rerun with more memory |

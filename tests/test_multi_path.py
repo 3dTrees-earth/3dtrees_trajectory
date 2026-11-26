@@ -143,7 +143,7 @@ def test_uncovered_pulses_are_skipped_or_refused(tmp_path, share, refused):
     keep = time <= time[0] + share * (time[-1] - time[0])
     path = _path(tmp_path / "p.csv", time[keep], sensor[keep])
     code, section, text = _run(tmp_path, [cloud], [path])
-    assert code == 0
+    assert code == (2 if refused else 0)
     if refused:
         assert "had a delivered path covering their time" in section["error"]
         assert "supplementary" in section["error"]

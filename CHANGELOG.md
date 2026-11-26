@@ -4,6 +4,7 @@
 
 Re-cut of 1.0.0 (24 Nov 2026):
 
+- Requested occlusion that cannot run (COPC input, delivered paths that cannot be aligned or cover under half the pulses, terrain errors) now fails the job with exit 2 and empties every product, instead of exiting 0 with empty occlusion outputs that a downstream tool could take for a result.
 - The GeoJSON map layer is no longer written (`--geojson` and `3dtrees-trajectory-geojson` are removed): nothing displays it; the viewer and map read the trajectory CSV. The CSV, COPC and COG are unchanged.
 - Treat a geocentric CRS on a cloud centred within 1,000 km of the origin as a local placeholder. Reject Earth-centred inputs at or beyond that distance with exit 2.
 - Accept terrain rasters without a CRS in the cloud coordinates. Warn when assuming a CRS for one input or falling back to lowest hits because the raster is outside the cloud.

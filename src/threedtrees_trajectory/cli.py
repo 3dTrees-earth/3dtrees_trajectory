@@ -78,6 +78,21 @@ def _oom_refusal(detail, args, products, report_path, resources, threads) -> int
     return 127
 
 
+COPC_OCCLUSION = "Occlusion requires scanner-order LAS/LAZ. Supply the standardized files instead of COPC."
+
+
+def _is_copc_file(path) -> bool:
+    """COPC from the raw LAS header (its first VLR is copc/1), before any native library is loaded."""
+    try:
+        with open(path, "rb") as stream:
+            head = stream.read(4096)
+        size, vlrs = int.from_bytes(head[94:96], "little"), int.from_bytes(head[100:104], "little")
+        return head[:4] == b"LASF" and vlrs > 0 and head[size + 2:size + 6] == b"copc" and \
+            int.from_bytes(head[size + 18:size + 20], "little") == 1
+    except OSError:
+        return False  # unreadable inputs are reported by the regular checks
+
+
 def _run(argv, output_locks) -> int:
     resources = RunResources()
     parser = argparse.ArgumentParser(prog="3dtrees-trajectory", description=__doc__, allow_abbrev=False)
@@ -152,6 +167,8 @@ def _run(argv, output_locks) -> int:
             raise ValueError("--grid-memory-gib must be positive and at most 64.")
         if not args.clouds:
             raise ValueError("Provide at least one LAS/LAZ file.")
+        if occlusion_paths and any(map(_is_copc_file, args.clouds)):
+            raise ValueError(COPC_OCCLUSION)
         try:
             interval = float(args.interval)
         except ValueError:
@@ -342,21 +359,9 @@ def _process(args, output_locks, resources, threads, error_message, products, re
             error_message = str(error)
             data["occlusion"] = {"error": error_message}
         if error_message is None and "error" in data["occlusion"]:
-            if result is None:
-                error_message = data["occlusion"]["error"]
-            else:
-                result.warnings.append(f"Occlusion: {data['occlusion']['error']}")
-                try:
-                    write_csv(args.output, info, result, delivered_check=delivered_check)
-                except OSError as error:
-                    raise_if_oom(error)
-                    error_message = f"cannot publish trajectory metadata {args.output}: {error}"
-                for path in occlusion_paths:
-                    try:
-                        write_empty(path)
-                    except OSError as error:
-                        raise_if_oom(error)
-                        error_message = f"cannot publish empty output {path}: {error}"
+            # Requested occlusion that cannot be computed fails the job (exit 2), so no empty product reaches a
+            # downstream tool as if it were a result.
+            error_message = f"Occlusion: {data['occlusion']['error']}"
     if error_message is not None:
         print(f"error: {error_message}", file=sys.stderr)
         if safe_report:
