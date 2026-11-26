@@ -21,7 +21,7 @@ coordinates cannot be aligned with the cloud (local against EPSG, judged from th
 upload's EPSG) are dropped before the run with the reason `trajectory_path_crs_mismatch`. TLS is refused
 (`tls_requires_trajectory_v1_1`).
 
-Products: `trajectory` (CSV, GeoJSON) and `occlusion` (COPC, COG) as separate generations; the occlusion COG appears
+Products: `trajectory` (CSV) and `occlusion` (COPC, COG) as separate generations; the occlusion COG appears
 in the viewer's Raster menu and in downloads. The default workflow runs the tool after Raster with its DTM;
 `refresh_trajectory` reruns it on the standardized collection.
 
@@ -54,7 +54,7 @@ docker run --rm --name trajectory-local --user "$(id -u):$(id -g)" \
 
 The Galaxy wrapper should accept one collection of standardized LAS/LAZ files per dataset and pass all its
 members to one tool job. Pass `--threads "${GALAXY_SLOTS:-4}"` from the job allocation and collect the requested
-CSV, GeoJSON and occlusion products.
+CSV and occlusion products.
 Keep sampling and platform diagnostics in the CLI. File metadata and geometry refusals are checked at runtime.
 CI tests the image on pull requests, pushes to `main`, and pushes of `v*` tags. After the tests pass, it
 publishes `ghcr.io/3dtrees-earth/3dtrees_trajectory:sha-<short-sha>` and either `:latest` for `main` or

@@ -23,7 +23,6 @@ test = ["pytest==8.3.4"]
 
 [project.scripts]
 3dtrees-trajectory = "threedtrees_trajectory.cli:main"
-3dtrees-trajectory-geojson = "threedtrees_trajectory.output:main_geojson"
 
 [build-system]
 requires = ["setuptools>=77"]

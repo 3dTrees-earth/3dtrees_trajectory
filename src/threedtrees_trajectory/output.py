@@ -2,7 +2,6 @@
 share; this tool writes paths) and a JSON quality report."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +9,7 @@ import numpy as np
 from . import __version__
 from .estimate import UNRELIABLE_LINE_MISS, Result
 from .publish import write_text
-from .pulses import LOCAL, CloudInfo, Pulses
+from .pulses import CloudInfo, Pulses
 
 FORMAT = "3dtrees-trajectory/estimated"  # uploaded paths are /1, or /2 when rows have names
 COLUMNS = "time,x,y,z,roll,pitch,yaw,name"
@@ -127,72 +126,3 @@ def refusal(info: CloudInfo, pulses: Pulses | None, reason: str) -> dict:
         "quality": "none",
         "error": reason,
     }
-
-
-def geojson(info: CloudInfo, result: Result, gap: float = 5.0, spacing: float = 1.0) -> dict:
-    """A light map layer: the path as lines split where positions are more than ``gap`` seconds apart (no line drawn
-    across unscanned turns), thinned to about one vertex per ``spacing`` metres. WGS84 when
-    the cloud's CRS is known, else the cloud's own coordinates with ``crs`` set to ``local`` in the properties."""
-    xyz = np.array([f.xyz for f in result.fits], float).reshape(-1, 3)
-    lonlat = xyz[:, :2]
-    known = info.crs not in (LOCAL, "unknown") and len(xyz)
-    if known:
-        from pyproj import Transformer
-        lon, lat = Transformer.from_crs(info.crs, "EPSG:4326", always_xy=True).transform(xyz[:, 0], xyz[:, 1], errcheck=True)
-        lonlat = np.c_[lon, lat]
-    digits = 7 if known else 3
-    properties = {"estimated": True, "method": result.method,
-                  "quality": quality(result, np.array([f.miss for f in result.fits], float)),
-                  "crs": "EPSG:4326" if known else LOCAL, "source_crs": info.crs}
-    features = []
-    if len(xyz):
-        time = np.array([f.time for f in result.fits])
-        lines = []
-        for part in np.split(np.arange(len(time)), np.flatnonzero(np.diff(time) > gap) + 1):
-            keep, last = [part[0]], xyz[part[0]]
-            for i in part[1:]:
-                if np.linalg.norm(xyz[i] - last) >= spacing or i == part[-1]:
-                    keep.append(i)
-                    last = xyz[i]
-            if len(keep) > 1:
-                lines.append([[round(float(a), digits), round(float(b), digits), round(float(z), 2)]
-                              for (a, b), z in zip(lonlat[keep], xyz[keep, 2])])
-        if lines:
-            features.append({"type": "Feature", "geometry": {"type": "MultiLineString", "coordinates": lines},
-                             "properties": properties | {"time_start": float(time.min()), "time_end": float(time.max()),
-                                                         "time_system": info.time_system, "segments": len(lines)}})
-    return {"type": "FeatureCollection", "features": features}
-
-
-def write_geojson(path: Path, data: dict) -> None:
-    write_text(path, json.dumps(data, separators=(",", ":"), allow_nan=False) + "\n")
-
-
-def geojson_from_csv(path: Path) -> dict:
-    """The map layer for a path CSV this tool wrote (header keys crs, kind, method, time_system)."""
-    from .solve import Fit
-
-    meta, rows = {}, []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("#"):
-            key, _, value = line[1:].partition(":")
-            meta[key.strip()] = value.strip()
-        elif line and not line.startswith("time,"):
-            rows.append(line.split(","))
-    if meta.get("kind", "path") != "path":
-        raise ValueError(f"{path}: kind {meta['kind']!r}; this version draws paths only")
-    fits = [Fit(float(r[0]), np.array(r[1:4], float), 0, float("nan")) for r in rows]
-    result = Result(meta.get("method", "lines"), fits)
-    crs = meta.get("crs", LOCAL)
-    info = CloudInfo(LOCAL if crs in ("", "unknown") else crs, meta.get("time_system", "none"), 0, [meta.get("source_file", "")], (1, 1))
-    return geojson(info, result)
-
-
-def main_geojson(argv: list[str] | None = None) -> int:
-    """3dtrees-trajectory-geojson: write <name>.geojson next to each given trajectory CSV."""
-    import sys
-    for name in (argv if argv is not None else sys.argv[1:]):
-        path = Path(name)
-        write_geojson(path.with_suffix(".geojson"), geojson_from_csv(path))
-        print(path.with_suffix(".geojson"))
-    return 0

@@ -3,7 +3,7 @@
 [Back to README](../README.md)
 
 ```text
-3dtrees-trajectory CLOUD [CLOUD …] [-o CSV] [--geojson PATH] [--trajectory CSV [CSV …]] [--dtm TIF]
+3dtrees-trajectory CLOUD [CLOUD …] [-o CSV] [--trajectory CSV [CSV …]] [--dtm TIF]
                    [--occlusion-copc PATH --occlusion-cog PATH] [--voxel M] [--interval S] [--sample]
                    [--threads N] [--grid-memory-gib G] [--no-platform-check] [--debug [--report PATH]] [--version]
 ```
@@ -12,7 +12,6 @@
 | --- | --- | --- | --- |
 | `CLOUD …` | | 1–65,536 files | standardized LAS/LAZ files of one acquisition, in collection order |
 | `-o, --output` | | | trajectory CSV (path estimate) |
-| `--geojson` | next to the CSV | | map layer |
 | `--trajectory` | | 1..n files | delivered paths for occlusion ([delivered-paths.md](delivered-paths.md)) |
 | `--dtm` | | one GeoTIFF | terrain for height above ground |
 | `--occlusion-copc`, `--occlusion-cog` | | both together | occlusion products |
@@ -24,7 +23,7 @@
 | `--no-platform-check` | off | | skip the static (TLS) check for a known moving acquisition |
 | `--debug`, `--report` | off | | JSON quality and resource report |
 
-The CSV, GeoJSON, report and input paths must be distinct. Without `-o` the tool checks the cloud and writes only the
+The CSV, report and input paths must be distinct. Without `-o` the tool checks the cloud and writes only the
 occlusion products from the delivered paths.
 
 ## Galaxy wrapper

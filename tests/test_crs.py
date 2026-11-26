@@ -9,7 +9,6 @@ from pyproj import CRS, Transformer
 from synthetic import flight
 from threedtrees_trajectory import occlusion
 from threedtrees_trajectory.cli import main
-from threedtrees_trajectory.output import geojson_from_csv
 from threedtrees_trajectory.pulses import crs_labels
 
 SHIFT = np.array([500_000.0, 5_300_000.0, 0.0])  # the synthetic flight placed in UTM 32N
@@ -89,14 +88,10 @@ def test_epsg_path_on_a_local_cloud_is_refused():
         occlusion.align_path_crs(np.zeros((2, 3)), "EPSG:32632", "unknown", "local", "unknown")
 
 
-def test_local_cloud_writes_local_and_geojson_reads_it(tmp_path):
+def test_local_cloud_writes_local(tmp_path):
     cloud = tmp_path / "flight.las"
     flight(cloud, seconds=6, rate=400)
     output = tmp_path / "path.csv"
     assert main([str(cloud), "-o", str(output)]) == 0
     assert "# crs: local\n" in output.read_text()
-    layer = json.loads(output.with_suffix(".geojson").read_text())["features"][0]
-    assert layer["properties"]["crs"] == "local" and layer["properties"]["source_crs"] == "local"
-    legacy = tmp_path / "legacy.csv"
-    legacy.write_text(output.read_text().replace("# crs: local", "# crs: unknown"))
-    assert geojson_from_csv(legacy)["features"][0]["properties"]["crs"] == "local"
+    assert not output.with_suffix(".geojson").exists()

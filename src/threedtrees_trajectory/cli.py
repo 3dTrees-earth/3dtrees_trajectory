@@ -86,7 +86,6 @@ def _run(argv, output_locks) -> int:
     parser.add_argument("--debug", action="store_true", help="write a JSON quality and resource report")
     parser.add_argument("--report", type=Path,
                         help="debug report path (requires --debug, defaults next to the CSV, required without a CSV)")
-    parser.add_argument("--geojson", type=Path, help="map layer of the path (default next to the CSV)")
     parser.add_argument("--no-platform-check", action="store_true", help="skip static (TLS) cloud detection when estimating a path")
     parser.add_argument("--interval", default="0.5", help="seconds per position (default 0.5)")
     parser.add_argument("--threads", help="maximum decoding threads and GPS-time window workers (defaults to GALAXY_SLOTS or 10)")
@@ -115,8 +114,7 @@ def _run(argv, output_locks) -> int:
 
     occlusion_paths = tuple(p for p in (args.occlusion_copc, args.occlusion_cog) if p is not None)
     report_path = (args.report or args.output.with_suffix(".report.json")) if args.debug else None
-    geojson_path = args.geojson or (args.output.with_suffix(".geojson") if args.output is not None else None)
-    products = ((args.output, geojson_path) if args.output is not None else ()) + occlusion_paths
+    products = ((args.output,) if args.output is not None else ()) + occlusion_paths
     threads = None
     error_message = None
     safe_products = False
@@ -177,7 +175,7 @@ def _run(argv, output_locks) -> int:
     if oom is None:
         try:
             return _process(args, output_locks, resources, threads, error_message, products, report_path,
-                            geojson_path, occlusion_paths)
+                            occlusion_paths)
         except Exception as error:
             if not (oom := memory_failure(error)):
                 raise
@@ -185,7 +183,7 @@ def _run(argv, output_locks) -> int:
 
 
 def _process(args, output_locks, resources, threads, error_message, products, report_path,
-             geojson_path, occlusion_paths) -> int:
+             occlusion_paths) -> int:
     exit_code = 2
     safe_products = bool(products)
     safe_report = report_path is not None
@@ -198,11 +196,10 @@ def _process(args, output_locks, resources, threads, error_message, products, re
 
     from laspy.errors import LaspyException
     from lazrs import LazrsError
-    from pyproj.exceptions import ProjError
 
     from .estimate import STATIC_REFUSAL, detect_platform, estimate
     from .occlusion import TerrainError, open_dtm, prepare_index
-    from .output import estimate_quality, geojson, refusal, report, write_csv, write_geojson
+    from .output import estimate_quality, refusal, report, write_csv
     from .pulses import CloudInfo, read_pulses
     from .window_jobs import CheckpointStorageError, JobBusy, lock_output
 
@@ -211,7 +208,6 @@ def _process(args, output_locks, resources, threads, error_message, products, re
     result = None
     data = None
     indexed_clouds = None
-    layer = None
     path_inputs = None
     delivered_check = None
     path_warnings = []
@@ -299,11 +295,6 @@ def _process(args, output_locks, resources, threads, error_message, products, re
                         path_warnings.append(f"Estimated path: {error}")
                         data["estimated_path_error"] = str(error)
             if result is not None:
-                try:
-                    layer = geojson(info, result)
-                except ProjError as error:
-                    raise_if_oom(error)
-                    result.warnings.append("The map layer could not be projected to WGS84.")
                 path_warnings = result.warnings
                 if safe_report:
                     data = report(info, result, pulses.multi_share)
@@ -317,10 +308,6 @@ def _process(args, output_locks, resources, threads, error_message, products, re
                     write_empty(args.output)
                 else:
                     write_csv(args.output, info, result, delivered_check=delivered_check)
-                if layer is None or not layer["features"]:
-                    write_empty(geojson_path)
-                else:
-                    write_geojson(geojson_path, layer)
             if safe_report:
                 data["pulse_check"] = {
                     "kept": len(pulses), "multi_return_share": round(pulses.multi_share, 6),

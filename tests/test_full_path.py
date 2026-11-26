@@ -35,7 +35,6 @@ def test_full_windows_match_whole_cloud(tmp_path, monkeypatch, separated):
     assert report["stages"][0]["full_window_fit"] == "streamed"
     assert report["pulse_check"] == reference["pulse_check"]
     assert actual.read_bytes() == expected.read_bytes()
-    assert actual.with_suffix(".geojson").read_bytes() == expected.with_suffix(".geojson").read_bytes()
     assert not list(tmp_path.glob(".path-windows-*"))
 
 
@@ -57,7 +56,6 @@ def test_full_merges_overlapping_strips_before_fitting(tmp_path, monkeypatch):
     assert report["stages"][0]["full_window_fit"] == "streamed"
     assert report["pulse_check"] == reference["pulse_check"]
     assert actual.read_bytes() == expected.read_bytes()
-    assert actual.with_suffix(".geojson").read_bytes() == expected.with_suffix(".geojson").read_bytes()
 
 
 def test_full_still_refuses_static_cloud(tmp_path):

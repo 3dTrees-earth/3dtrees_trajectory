@@ -21,9 +21,9 @@ file, including time blocks, so keep pulse siblings and their metadata together 
 
 | Cloud CRS | Treatment |
 | --- | --- |
-| Projected or geographic EPSG in metres | used as is; GeoJSON in WGS84; products carry the CRS |
+| Projected or geographic EPSG in metres | used as is; products carry the CRS |
 | Compound CRS | horizontal EPSG in `# crs:`, the vertical EPSG in `# vertical_crs:` when known |
-| none | **local**: `# crs: local`, GeoJSON in cloud coordinates with `crs: local`, products without CRS |
+| none | **local**: `# crs: local`, products without CRS |
 | EPSG:4978 with the cloud centred < 1,000 km from the origin | Standardization's placeholder: **local**, as in Raster |
 | EPSG:4978 further out (real ECEF) | refused (exit 2): reproject to a projected CRS in metres |
 

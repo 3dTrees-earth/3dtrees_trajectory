@@ -3,8 +3,7 @@
 [Back to README](../README.md)
 
 The tool creates output directories, publishes each file by rename and writes zero-byte files at safe destinations
-when it refuses. `--geojson` overrides the default map layer path next to the CSV; `3dtrees-trajectory-geojson
-trajectory.csv` draws the layer from an existing CSV.
+when it refuses.
 
 ## Trajectory CSV
 
@@ -32,12 +31,6 @@ time,x,y,z,roll,pitch,yaw,name
 
 One position per `--interval` (0.5 s) where the cloud has points; turns and transit legs outside the cloud have no
 positions. Time and XYZ use the cloud's clock and coordinates.
-
-## GeoJSON
-
-A FeatureCollection with one MultiLineString: segments split at gaps over 5 s, thinned to about one vertex per metre.
-Properties: `estimated`, `method`, `quality`, `crs` (`EPSG:4326`, or `local` in cloud coordinates), `source_crs`,
-`time_start`, `time_end`, `time_system`, `segments`. Zero bytes when there is nothing to draw.
 
 ## Occlusion COPC
 

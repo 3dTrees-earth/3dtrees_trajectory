@@ -48,7 +48,6 @@ def test_static_scans_are_refused(tmp_path, capsys):
     assert main([str(tmp_path / "a.laz"), str(tmp_path / "b.laz"), "--debug", "-o", str(tmp_path / "s.csv")]) == 2
     assert "static (TLS)" in capsys.readouterr().err
     assert (tmp_path / "s.csv").stat().st_size == 0
-    assert (tmp_path / "s.geojson").stat().st_size == 0
     assert json.loads((tmp_path / "s.report.json").read_text())["quality"] == "none"
 
 
@@ -71,12 +70,3 @@ def test_platform_is_detected_for_single_returns(tmp_path, capsys):
     assert main([str(tmp_path / "f.laz"), "--debug", "-o", str(tmp_path / "f.csv")]) == 0
     assert json.loads((tmp_path / "f.report.json").read_text())["method"] == "scan_angle"
 
-
-def test_geojson_map_layer_splits_at_gaps(tmp_path):
-    flight(tmp_path / "f.laz")
-    assert main([str(tmp_path / "f.laz"), "-o", str(tmp_path / "p.csv")]) == 0
-    layer = json.loads((tmp_path / "p.geojson").read_text())
-    feature = layer["features"][0]
-    assert feature["geometry"]["type"] == "MultiLineString"
-    assert feature["properties"]["estimated"] is True and feature["properties"]["quality"] == "good"
-    assert sum(len(line) for line in feature["geometry"]["coordinates"]) <= 110  # 100 m flown, about 1 vertex per metre

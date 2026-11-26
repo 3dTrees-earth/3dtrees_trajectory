@@ -4,8 +4,7 @@ Estimate the sensor path of a moving lidar acquisition (ULS, MLS) from its stand
 the sensor could not see (occlusion) along that path or along one or more delivered paths. Version 1.0.0, MIT.
 
 - **Path estimation** from multi-return pulse lines (`lines`, cm-accurate on checked datasets) or from scan angles
-  of single returns (`scan_angle`, about 1 m). Output: a 3Dtrees trajectory CSV (`3dtrees-trajectory/estimated`)
-  and a GeoJSON map layer.
+  of single returns (`scan_angle`, about 1 m). Output: a 3Dtrees trajectory CSV (`3dtrees-trajectory/estimated`).
 - **Occlusion** by tracing every pulse from the sensor through a voxel grid (OccPy 0.3.0 traversal): a voxel COPC
   with classes filled / empty / occluded / unobserved, and a COG with the occluded share per height band above
   ground.
@@ -49,7 +48,6 @@ in GPS-time windows with bounded memory; `--sample` fits it from a bounded sampl
 | File | Contents |
 | --- | --- |
 | `trajectory.csv` | `# format: 3dtrees-trajectory/estimated`, CRS, clock, method, quality, warnings, delivered-path coverage; columns `time,x,y,z,roll,pitch,yaw,name` (attitude and name empty) |
-| `trajectory.geojson` | path segments (split at gaps over 5 s), WGS84 when the CRS is known, else cloud coordinates with `crs: local` |
 | `occlusion.copc.laz` | one point per filled, occluded or unobserved voxel: `occlusion` class, `nhit`, `nmiss`, `nocc`, `occluded_fraction`, `height_above_ground` |
 | `occlusion.tif` | COG, one band per height layer (`occluded_0-0.5m`, …) plus `unobserved_column`; provenance tags |
 | `*.report.json` | with `--debug`: quality, refusal reason, pairing, per-segment path choice, stage resources |

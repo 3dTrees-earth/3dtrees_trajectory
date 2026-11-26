@@ -43,7 +43,7 @@ All cases run the CLI as the Galaxy wrapper does (estimate + occlusion, DTM when
 
 ## Product equality
 
-- Re-cuts keep 1807 and 2014 COG, GeoJSON and decoded COPC records identical; the CSV differs only in its format line.
+- Re-cuts keep 1807 and 2014 COG and decoded COPC records identical; the CSV differs only in its format line.
 - Products are identical at 2–10 slots.
 - Untwine randomizes COPC overview sampling: compare decoded records in voxel-centre order.
 

@@ -28,7 +28,7 @@ def _report(output):
 
 def _assert_refusal(output, reason):
     assert output.read_bytes() == b""
-    assert output.with_suffix(".geojson").read_bytes() == b""
+    assert not output.with_suffix(".geojson").exists()
     report = _report(output)
     assert reason in report["error"]
     assert report["positions"] == 0
@@ -43,19 +43,18 @@ def test_debug_report_is_opt_in(tmp_path):
     cloud = tmp_path / "flight.laz"
     flight(cloud, seconds=6, rate=400)
     output = tmp_path / "path.csv"
-    layer = output.with_suffix(".geojson")
     default_report = output.with_suffix(".report.json")
     explicit_report = tmp_path / "diagnostics" / "report.json"
     args = [str(cloud), "-o", str(output)]
 
     assert main(args) == 0
-    assert set(tmp_path.iterdir()) == {cloud, output, layer}
-    products = (output.read_bytes(), layer.read_bytes())
+    assert set(tmp_path.iterdir()) == {cloud, output}
+    product = output.read_bytes()
 
     reports = []
     for options, path in [([], default_report), (["--report", str(explicit_report)], explicit_report)]:
         assert main([*args, "--debug", *options]) == 0
-        assert (output.read_bytes(), layer.read_bytes()) == products
+        assert output.read_bytes() == product
         report = json.loads(path.read_text())
         assert report["exit_code"] == 0
         assert report["method"] == "lines" and report["quality"] == "good"
@@ -84,9 +83,7 @@ def test_geocentric_crs_near_origin_is_a_local_placeholder(tmp_path, ecef):
         _assert_refusal(output, "Earth-centred coordinates: reproject to a projected CRS in metres")
     else:
         assert "# crs: local\n" in output.read_text()
-        layer = json.loads(output.with_suffix(".geojson").read_text())["features"][0]
-        assert layer["properties"]["source_crs"] == "local"
-        x, y, _ = layer["geometry"]["coordinates"][0][0]
+        x, y = np.loadtxt(output, delimiter=",", comments=("#", "time,"), usecols=(1, 2))[0]
         assert x == pytest.approx(500, abs=0.02)
         assert 500 <= y < 503
 
@@ -114,15 +111,15 @@ def test_refusal_on_stderr_and_empty_products_without_debug(tmp_path, capsys, co
         points = laspy.read(cloud)
         points.gps_time[:] = 0
         points.write(cloud)
-    output, geojson, copc, cog = [tmp_path / name for name in ("path.csv", "path.geojson", "out.copc.laz", "out.tif")]
-    for path in (output, geojson, copc, cog):
+    output, copc, cog = [tmp_path / name for name in ("path.csv", "out.copc.laz", "out.tif")]
+    for path in (output, copc, cog):
         path.write_text("stale product")
 
     assert main([str(cloud), "-o", str(output), "--occlusion-copc", str(copc), "--occlusion-cog", str(cog)]) == code
     stderr = capsys.readouterr().err
     assert reason in stderr
     assert "Keep the delivered path as supplementary data on the dataset" in stderr
-    assert all(path.read_bytes() == b"" for path in (output, geojson, copc, cog))
+    assert all(path.read_bytes() == b"" for path in (output, copc, cog))
     assert not list(tmp_path.rglob("*.json"))
 
 
@@ -143,7 +140,7 @@ def test_memory_failure_is_a_job_refusal(tmp_path, monkeypatch, capsys, module_n
     cloud = tmp_path / "flight.las"
     flight(cloud, seconds=6, rate=400)
     out, copc, cog = tmp_path / "path.csv", tmp_path / "out.copc.laz", tmp_path / "out.tif"
-    for path in (out, out.with_suffix(".geojson"), copc, cog):
+    for path in (out, copc, cog):
         path.write_text("stale")
     args = [str(cloud), "-o", str(out), "--debug", "--occlusion-copc", str(copc), "--occlusion-cog", str(cog), "--sample"]
     if function_name == "read_trajectory":
@@ -200,8 +197,6 @@ def test_multifile_with_matched_crs_and_different_las_versions(tmp_path, monkeyp
     ]))) < 0.05
     assert (_report(output)["resources"]["points_read"] ==
             len(las.points) + len(tail.points))
-    layer = json.loads(output.with_suffix(".geojson").read_text())
-    assert layer["features"][0]["properties"]["crs"] == "EPSG:4326"
 
 
 @pytest.mark.parametrize(("scenario", "reason"), [
@@ -262,7 +257,6 @@ def test_bad_input_has_refusal_and_clears_stale_outputs(tmp_path, scenario, reas
             flight(input_path, seconds=1, rate=100, single_return=True)
     output = tmp_path / "output.csv"
     output.write_text("stale")
-    output.with_suffix(".geojson").write_text("stale")
     expected = {"constant_time": 3, "nonfinite_time": 3, "no_fit": 4}.get(scenario, 2)
     assert main([*paths, "--debug", "-o", str(output)]) == expected
     report = _assert_refusal(output, reason)
@@ -316,18 +310,19 @@ def test_decoder_threads_do_not_change_trajectory_bytes(tmp_path):
         entrypoint = Path(__file__).resolve().parents[1] / "src" / "run.py"
         subprocess.run([sys.executable, str(entrypoint), str(path), "--debug", "-o", str(output), "--threads", "16"],
                        env=env, check=True)
-        results.append((output.read_bytes(), output.with_suffix(".geojson").read_bytes()))
+        results.append(output.read_bytes())
         assert 1 <= _report(output)["resources"]["decoding_threads"] <= int(slots)
     assert results[0] == results[1]
 
 
-def test_one_position_skips_the_map_layer(tmp_path):
+def test_one_position_writes_one_row(tmp_path):
     path = tmp_path / "input.laz"
     flight(path, seconds=6, rate=1600, single_return=True)
     output = tmp_path / "output.csv"
     assert main([str(path), "--debug", "-o", str(output), "--interval", "10"]) == 0
     assert _report(output)["positions"] == 1
-    assert output.with_suffix(".geojson").read_bytes() == b""
+    assert len(np.loadtxt(output, delimiter=",", comments=("#", "time,"), usecols=(0,), ndmin=1)) == 1
+    assert not output.with_suffix(".geojson").exists()
 
 
 def test_position_fit_handles_sampled_chunks(tmp_path, monkeypatch):
